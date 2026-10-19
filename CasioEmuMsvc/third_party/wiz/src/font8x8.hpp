@@ -1,16 +1,20 @@
-// font8x8.hpp - the two 8x8 CW font sets used by the print functions.
+// font8x8.hpp - the two CW font sets behind printLarge() and printMini().
 //
-// Both sets use the calculator-native 8x8 cell and an 8 px advance.  The
-// glyph shapes differ; the cell size does not, so mixed code never glitches
-// from a font metric mismatch.
+// The calculator LCD cell is 8 rows tall (64 px / 8 = 8 text lines), so both
+// sets are 8 px tall.  Neither font is stretched, squeezed or re-spaced:
+// each one keeps its own original advance.
 //
-// FONT8X8      - CW Mono, big print() set.
-// FONT_TEXT8   - CW Text, print_text() set.  CW Text lacks digits and many
-//                ASCII characters; those cells are filled from CW Mono at the
-//                same 8x8 size.
+// FONT_LARGE     - CW Mono at 8 px.  Monospaced, 7 px advance.
+// FONT_LARGE_ADV - the advance of every CW Mono glyph.
+//
+// FONT_MINI      - CW Text at 8 px.  Proportional, 2..7 px advance.
+// FONT_MINI_ADV  - the advance of every CW Text glyph.  CW Text has no
+//                  digits and only a few marks; the missing characters are
+//                  drawn from CW Mono at the same 8 px height and keep
+//                  CW Mono's 7 px advance.
 #pragma once
 
-static const unsigned char FONT8X8[] = {
+static const unsigned char FONT_LARGE[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x20,
     0x20, 0x50, 0x50, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x28, 0x7C, 0x50, 0x50, 0xF8,
     0xF8, 0x50, 0x30, 0x7C, 0x7C, 0x7C, 0x3C, 0x7C, 0x7C, 0x38, 0x66, 0x74, 0x68, 0x18, 0x1E,
@@ -64,7 +68,14 @@ static const unsigned char FONT8X8[] = {
     0x60, 0x60, 0x00, 0x00, 0x00, 0x7E, 0x4E, 0x44, 0x00, 0x00,
 };
 
-static const unsigned char FONT_TEXT8[] = {
+static const unsigned char FONT_LARGE_ADV[] = {
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7,
+};
+
+static const unsigned char FONT_MINI[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x20,
     0x20, 0x50, 0x50, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x28, 0x7C, 0x50, 0x50, 0xF8,
     0xF8, 0x50, 0x30, 0x7C, 0x7C, 0x7C, 0x3C, 0x7C, 0x7C, 0x38, 0x66, 0x74, 0x68, 0x18, 0x1E,
@@ -118,4 +129,21 @@ static const unsigned char FONT_TEXT8[] = {
     0x60, 0x60, 0x00, 0x00, 0x00, 0x7E, 0x4E, 0x44, 0x00, 0x00,
 };
 
+static const unsigned char FONT_MINI_ADV[] = {
+    2, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 3, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 5, 4, 5, 4, 5, 7, 4, 5, 2, 7, 4, 7, 6, 5, 7, 7, 7, 4, 7, 5, 4, 5, 6, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 3, 3, 3, 3, 3, 7, 3, 3, 1, 1, 3, 1, 5, 3, 3, 3, 3, 3, 3, 3, 3, 7, 7, 3, 3,
+    7, 7, 7, 7, 7,
+};
+
 static const int FONT8X8_LEN = 95 * 8;
+static const int FONT_ADV_LEN = 95;
+
+#define FONT8X8 FONT_LARGE
+#define FONT_TEXT8 FONT_MINI
+#ifndef FONT8X8_LEN
+#define FONT8X8_LEN 760
+#endif
+#ifndef FONT_TEXT8_LEN
+#define FONT_TEXT8_LEN 760
+#endif

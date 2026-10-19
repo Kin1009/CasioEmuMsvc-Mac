@@ -156,7 +156,7 @@ const char* kSampleSource =
 	"\n"
 	"void main() {\n"
 	"    clear();\n"
-	"    text(4, 4, \"Hello from CWiz\");\n"
+	"    print_text(4, 4, \"Hello from CWiz\");\n"
 	"    while (1) {\n"
 	"        if (key_hit(K_AC)) { presses = presses + 1; }\n"
 	"        print(4, 20, \"AC  \", presses);\n"
@@ -722,6 +722,8 @@ private:
 				SaveSource();
 			if (ImGui::MenuItem("Load", "Ctrl+O"))
 				LoadSource();
+			if (ImGui::MenuItem("Examples"))
+				SDL_OpenURL("file:///Users/kin/Desktop/Wiz/examples/");
 			ImGui::Separator();
 			if (ImGui::MenuItem("Build", "F5"))
 				DoBuild(false);
