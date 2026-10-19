@@ -11,6 +11,7 @@
 #include <set>
 
 #include "font6x8.hpp"
+#include "font8x8.hpp"
 #include "wiz.hpp"  // key_consts()
 
 namespace wiz {
@@ -975,10 +976,19 @@ private:
 };
 
 // =================================================================== prelude
-static std::string font_table_source() {
+static std::string font_bytes(const unsigned char* data, int len) {
     std::string body;
-    for (int i = 0; i < FONT6X8_LEN; i++) body += fmt("\\x%02x", FONT6X8[i]);
-    return fmt("rom8 char _font[760] = \"%s\";", body.c_str());
+    for (int i = 0; i < len; i++) body += fmt("\\x%02x", data[i]);
+    return body;
+}
+
+static std::string font_table_source() {
+    return fmt("rom8 char _font[760] = \"%s\";\n"
+               "rom8 char _font_text[760] = \"%s\";\n"
+               "rom8 char _font_big[760] = \"%s\";",
+               font_bytes(FONT6X8, FONT6X8_LEN).c_str(),
+               font_bytes(FONT_TEXT8, FONT8X8_LEN).c_str(),
+               font_bytes(FONT8X8, FONT8X8_LEN).c_str());
 }
 
 static const char* PRELUDE_SRC = R"CWIZ(
@@ -1108,6 +1118,100 @@ int num(int x, int y, int n) {
     }
     return x;
 }
+
+// ---- print(): the CW Mono set (8x8, fixed 8 px advance) ----
+void _mchar(int x, int y, int c) {
+    if (c < 32 || c > 126) { c = 63; }
+    int base = (c - 32) * 8;
+    int r = 0;
+    while (r < 8) {
+        int bits = _font_big[base + r];
+        int k = 0;
+        while (k < 8) {
+            pixel(x + k, y + r, (bits & (128 >> k)) != 0);
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+}
+int _mtext(int x, int y, int s) {
+    int c = _rpeek(s);
+    while (c != 0) {
+        _mchar(x, y, c);
+        x = x + 8;
+        s = s + 1;
+        c = _rpeek(s);
+    }
+    return x;
+}
+int _mnum(int x, int y, int n) {
+    if (n == -32768) { return _mtext(x, y, "-32768"); }
+    if (n < 0) {
+        _mchar(x, y, 45);
+        x = x + 8;
+        n = 0 - n;
+    }
+    int d = 10000;
+    int shown = 0;
+    while (d > 0) {
+        int q = n / d;
+        n = n - q * d;
+        if (q > 0 || shown || d == 1) {
+            _mchar(x, y, 48 + q);
+            x = x + 8;
+            shown = 1;
+        }
+        d = d / 10;
+    }
+    return x;
+}
+
+// ---- print_text(): the CW Text set (8x8 cells, 8 px advance) ----
+void _tchar(int x, int y, int c) {
+    if (c < 32 || c > 126) { c = 63; }
+    int base = (c - 32) * 8;
+    int r = 0;
+    while (r < 8) {
+        int bits = _font_text[base + r];
+        int k = 0;
+        while (k < 8) {
+            pixel(x + k, y + r, (bits & (128 >> k)) != 0);
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+}
+int _ptext(int x, int y, int s) {
+    int c = _rpeek(s);
+    while (c != 0) {
+        _tchar(x, y, c);
+        x = x + 8;
+        s = s + 1;
+        c = _rpeek(s);
+    }
+    return x;
+}
+int _ptnum(int x, int y, int n) {
+    if (n == -32768) { return _ptext(x, y, "-32768"); }
+    if (n < 0) {
+        _tchar(x, y, 45);
+        x = x + 8;
+        n = 0 - n;
+    }
+    int d = 10000;
+    int shown = 0;
+    while (d > 0) {
+        int q = n / d;
+        n = n - q * d;
+        if (q > 0 || shown || d == 1) {
+            _tchar(x, y, 48 + q);
+            x = x + 8;
+            shown = 1;
+        }
+        d = d / 10;
+    }
+    return x;
+}
 void sprite(int x, int y, int w, int h, int d) {
     int bw = (w + 7) >> 3;
     int r = 0;
@@ -1148,8 +1252,12 @@ static std::vector<NodeP> select_prelude(const NodeP& user_prog, const NodeP& pr
     }
     std::set<std::string> used = referenced_names(user_prog);
     if (used.count("print")) {
-        used.insert("text");
-        used.insert("num");
+        used.insert("_mtext");
+        used.insert("_mnum");
+    }
+    if (used.count("print_text")) {
+        used.insert("_ptext");
+        used.insert("_ptnum");
     }
     std::set<std::string> needed;
     std::vector<std::string> stack;
@@ -1609,11 +1717,11 @@ private:
 
     std::string call(const NodeP& c) {
         const std::string& name = c->sval;
-        if (name == "print") {
+        if (name == "print" || name == "print_text") {
             if ((int)c->list.size() < PRINT_MIN)
-                err("print(x, y, value, ...) needs at least 3 arguments", c);
+                err(name + "(x, y, value, ...) needs at least 3 arguments", c);
             for (auto& a : c->list) expr(a);
-            c->kind = "print";
+            c->kind = name;
             return "void";
         }
         auto bit = CW_BUILTINS.find(name);
@@ -2127,7 +2235,7 @@ private:
 
     // -- calls --------------------------------------------------------
     void ex_call(const NodeP& c) {
-        if (c->kind == "print") { ex_print(c); return; }
+        if (c->kind == "print" || c->kind == "print_text") { ex_print(c); return; }
         if (c->kind == "builtin") { ex_builtin(c); return; }
         emit_call(c->func, c->list);
     }
@@ -2205,9 +2313,11 @@ private:
         emit(fmt("ST ER0, %d", px));
         ex(y);
         emit(fmt("ST ER0, %d", py));
+        const bool text_font = c->kind == "print_text";
         for (size_t i = 2; i < c->list.size(); i++) {
             NodeP v = c->list[i];
-            Func* f = an.funcs[is_text(v) ? "text" : "num"];
+            Func* f = an.funcs[is_text(v) ? (text_font ? "_ptext" : "_mtext")
+                                          : (text_font ? "_ptnum" : "_mnum")];
             std::vector<NodeP> args = {tmp_ident(px, v), tmp_ident(py, v), v};
             emit_call(f, args);
             emit(fmt("ST ER0, %d", px));

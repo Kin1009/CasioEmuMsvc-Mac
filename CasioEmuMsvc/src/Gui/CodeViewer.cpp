@@ -73,10 +73,15 @@ static bool IsImmediate(std::string_view word) {
 	return true;
 }
 
+static ImVec4 ThemePick(const ImVec4& dark_color, const ImVec4& light_color) {
+	return ThemeManager::Instance().IsDarkMode() ? ~dark_color : light_color;
+}
+
 static void RenderSyntaxHighlight(const char* text, bool is_label, bool eps6800) {
 	if (is_label) {
-		// 标号整体着色为高亮黄
-		ImGui::TextColored(~ImVec4(1.0f, 1.0f, 0.4f, 1.0f), "%s", text);
+		// 标号整体着色为高亮黄（浅色主题用深琥珀色）
+		ImGui::TextColored(ThemePick(ImVec4(1.0f, 1.0f, 0.4f, 1.0f), ImVec4(0.55f, 0.40f, 0.00f, 1.0f)),
+						   "%s", text);
 		return;
 	}
 
@@ -86,13 +91,13 @@ static void RenderSyntaxHighlight(const char* text, bool is_label, bool eps6800)
 		return;
 	}
 
-	// 定义语法高亮的主题颜色
-	ImVec4 col_hex = ~ImVec4(0.5f, 0.5f, 0.5f, 1.0f);	// 机器码：灰色
-	ImVec4 col_mnem = ~ImVec4(0.3f, 0.8f, 1.0f, 1.0f);	// 助记符：亮蓝
-	ImVec4 col_reg = ~ImVec4(1.0f, 0.6f, 0.6f, 1.0f);	// 寄存器：粉红
-	ImVec4 col_imm = ~ImVec4(0.6f, 1.0f, 0.6f, 1.0f);	// 立即数：亮绿
-	ImVec4 col_punct = ~ImVec4(0.8f, 0.8f, 0.8f, 1.0f); // 标点符：浅灰
-	ImVec4 col_def = ~ImVec4(0.9f, 0.9f, 0.9f, 1.0f);	// 默认符：白色
+	// 定义语法高亮的主题颜色（浅色主题使用可读的深色）
+	ImVec4 col_hex = ThemePick(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), ImVec4(0.40f, 0.40f, 0.40f, 1.0f));
+	ImVec4 col_mnem = ThemePick(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), ImVec4(0.00f, 0.35f, 0.65f, 1.0f));
+	ImVec4 col_reg = ThemePick(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), ImVec4(0.65f, 0.10f, 0.30f, 1.0f));
+	ImVec4 col_imm = ThemePick(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), ImVec4(0.00f, 0.45f, 0.15f, 1.0f));
+	ImVec4 col_punct = ThemePick(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), ImVec4(0.35f, 0.35f, 0.35f, 1.0f));
+	ImVec4 col_def = ThemePick(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
 
 	struct Token {
 		ImVec4 color;
@@ -508,7 +513,8 @@ void CodeViewer::DrawContent() {
 			auto bb = it == break_points.end();
 			if (!e.is_label) {
 				if (e.offset == pc_cache) {
-					ImGui::TextColored(~ImVec4(0.0, 1.0, 0.0, 1.0), " > ");
+					ImGui::TextColored(ThemePick(ImVec4(0.0f, 1.0f, 0.0f, 1.0f),
+											  ImVec4(0.0f, 0.50f, 0.0f, 1.0f)), " > ");
 				}
 				else {
 					if (bb) {
@@ -519,7 +525,8 @@ void CodeViewer::DrawContent() {
 					}
 					else {
 						if (it->second == 1) {
-							ImGui::TextColored(~ImVec4(1.0, 0.0, 0.0, 1.0), " x ");
+							ImGui::TextColored(ThemePick(ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
+														 ImVec4(0.65f, 0.0f, 0.0f, 1.0f)), " x ");
 							if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
 								RemoveBreakpoint(e.offset);
 							}
@@ -554,7 +561,8 @@ void CodeViewer::DrawContent() {
 					}
 				}
 				ImGui::SameLine();
-				ImGui::TextColored(~ImVec4(1.0, 1.0, 0.0, 1.0), "%05x", e.offset);
+				ImGui::TextColored(ThemePick(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
+											 ImVec4(0.55f, 0.40f, 0.00f, 1.0f)), "%05x", e.offset);
 				ImGui::SameLine();
 			}
 			ImGui::PushID(line_i);

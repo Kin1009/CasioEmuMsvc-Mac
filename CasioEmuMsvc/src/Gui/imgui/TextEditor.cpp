@@ -1140,6 +1140,30 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 	ColorizeInternal();
 	Render();
 
+	// Right-click menu so copy/paste is discoverable even when the platform
+	// shortcut (Cmd+C / Cmd+V on macOS) is intercepted by the host.
+	if (ImGui::BeginPopupContextWindow("##TextEditorContext")) {
+		const bool osx = ImGui::GetIO().ConfigMacOSXBehaviors;
+		const bool selection = !GetSelectedText().empty();
+		const bool clipboard = ImGui::GetClipboardText() != nullptr &&
+			*ImGui::GetClipboardText() != 0;
+		if (ImGui::MenuItem("Undo", osx ? "Cmd+Z" : "Ctrl+Z", false, CanUndo()))
+			Undo();
+		if (ImGui::MenuItem("Redo", osx ? "Cmd+Shift+Z" : "Ctrl+Y", false, CanRedo()))
+			Redo();
+		ImGui::Separator();
+		if (ImGui::MenuItem("Cut", osx ? "Cmd+X" : "Ctrl+X", false, selection && !IsReadOnly()))
+			Cut();
+		if (ImGui::MenuItem("Copy", osx ? "Cmd+C" : "Ctrl+C", false, selection))
+			Copy();
+		if (ImGui::MenuItem("Paste", osx ? "Cmd+V" : "Ctrl+V", false, clipboard && !IsReadOnly()))
+			Paste();
+		ImGui::Separator();
+		if (ImGui::MenuItem("Select all", osx ? "Cmd+A" : "Ctrl+A"))
+			SelectAll();
+		ImGui::EndPopup();
+	}
+
 	//if (mHandleKeyboardInputs)
 	//	ImGui::PopItemFlag();
 

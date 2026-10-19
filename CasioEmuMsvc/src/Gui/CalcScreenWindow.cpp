@@ -1,12 +1,11 @@
-// CalcScreenWindow.cpp - the model's LCD inside the debugger, and the option to
-// give it a dock area of its own.
+// CalcScreenWindow.cpp - the complete calculator inside the debugger.
 //
-// The desktop build shows the calculator in a second SDL window (Config.hpp does
-// not define SINGLE_WINDOW). This window presents the same LCD as a debugger
-// window, and the status-bar option "Dock screen" parks it in a dedicated dock
-// node on the right of the debugger window: a separate area, not a tab and not a
-// floating window. The pixels come from the screen peripheral's
-// IScreenFrameProvider, so every model (nX-U8 / nX-U16 / EPS / TI) works.
+// The desktop build is single-window: the debugger owns the only OS window, so
+// there is no separate calculator window any more. Emulator::Frame() renders
+// the whole model (face, key labels, LCD and status sprites) into an offscreen
+// texture, and this window presents exactly that image - the same picture the
+// old external window showed. The LCD-only path is kept as a fallback for
+// builds or models without a model face.
 #include "WizToolchain.h"
 
 #include "Chipset/Chipset.hpp"
@@ -15,26 +14,56 @@
 #include <SDL.h>
 
 #include <algorithm>
-#include <cstdio>
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
-
-bool g_dock_calc_screen = false;
 
 namespace {
 
 constexpr const char* kScreenWindowName = "Calculator";
 
-// The dock node reserved for the screen while the option is on.
-ImGuiID g_screen_dock_node = 0;
-bool g_dock_applied = false;
+struct Placement {
+	float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+	bool hovered = false;
+};
+
+// Draw a texture centred in the available area (minus the controls strip).
+// In Fit mode the calculator grows until one pair of edges is reached.  Use the
+// exact fractional scale (not floor) so a 1.34x panel really fills the panel;
+// the texture keeps nearest-neighbour filtering, so the keys stay crisp.
+Placement DrawCentred(ImTextureID image, int width, int height, float footer, bool fit, float zoom) {
+	Placement place;
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
+	float area_w = avail.x;
+	float area_h = avail.y - footer;
+	if (area_w < 1.0f || area_h < 1.0f)
+		return place;
+
+	float raw = std::min(area_w / static_cast<float>(width), area_h / static_cast<float>(height));
+	float scale = fit ? raw : zoom;
+	if (scale <= 0.0f)
+		scale = 1.0f;
+	place.w = width * scale;
+	place.h = height * scale;
+
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	place.x = origin.x + (area_w - place.w) * 0.5f;
+	place.y = origin.y + (area_h - place.h) * 0.5f;
+	ImGui::SetCursorScreenPos(ImVec2(place.x, place.y));
+	ImGui::Image(image, ImVec2(place.w, place.h));
+	place.hovered = ImGui::IsItemHovered();
+	// Leave the cursor below the picture so the controls line up at the bottom.
+	ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + area_h));
+	return place;
+}
 
 }  // namespace
 
 class CalcScreenWindow : public UIWindow {
 public:
 	CalcScreenWindow() : UIWindow(kScreenWindowName) {
-		inital_size = ImVec2(360, 300);
+		inital_size = ImVec2(420, 700);
 		flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 	}
 
@@ -44,15 +73,39 @@ public:
 	}
 
 	void RenderCore() override {
-		using casioemu::IScreenFrameProvider;
+		if (!m_emu) {
+			ImGui::TextDisabled("The calculator is not running.");
+			return;
+		}
 
-		IScreenFrameProvider* provider = m_emu ? m_emu->chipset.QueryInterface<IScreenFrameProvider>() : nullptr;
+		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+
+#ifdef SINGLE_WINDOW
+		// The whole calculator, as the external window used to render it.
+		if (SDL_Texture* composite = m_emu->GetCompositeTexture()) {
+			int image_w = m_emu->GetCompositeTextureWidth();
+			int image_h = m_emu->GetCompositeTextureHeight();
+			if (image_w <= 0 || image_h <= 0)
+				SDL_QueryTexture(composite, nullptr, nullptr, &image_w, &image_h);
+			if (image_w > 0 && image_h > 0) {
+				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(composite), image_w,
+											  image_h, footer, fit_, zoom_);
+				ForwardClicks(place, image_w, image_h);
+				DrawControls(image_w, image_h);
+				return;
+			}
+		}
+#endif
+
+		using casioemu::IScreenFrameProvider;
+		IScreenFrameProvider* provider = m_emu->chipset.QueryInterface<IScreenFrameProvider>();
 		if (!provider) {
 			ImGui::TextDisabled("This model has no pixel screen.");
 			return;
 		}
 
-		// Keep the frame texture in sync with the model and the LCD size.
+		// Fallback: only the LCD pixels (models without a model face, or builds
+		// that still use a separate calculator window).
 		provider->UpdateFrameAlpha();
 		const int width = provider->GetFrameWidth();
 		const int height = provider->GetFrameHeight();
@@ -68,38 +121,55 @@ public:
 		provider->WriteFrameRgba(frame_.data(), ink.r, ink.g, ink.b);
 		SDL_UpdateTexture(texture_, nullptr, frame_.data(), width * 4);
 
-		// The area left for the picture after the controls strip at the bottom.
-		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
-		const ImVec2 avail = ImGui::GetContentRegionAvail();
-		float area_w = avail.x, area_h = avail.y - footer;
-		if (area_w < 1.0f || area_h < 1.0f)
-			return;
-
-		float scale = fit_ ? std::min(area_w / width, area_h / height) : zoom_;
-		if (scale <= 0.0f)
-			scale = 1.0f;
-		const ImVec2 size(width * scale, height * scale);
-
-		const ImVec2 origin = ImGui::GetCursorScreenPos();
-		ImGui::SetCursorScreenPos(ImVec2(origin.x + (area_w - size.x) * 0.5f,
-										origin.y + (area_h - size.y) * 0.5f));
-		ImGui::Image((ImTextureID)texture_, size);
-		// Put the cursor back below the picture so the footer lines up.
-		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + area_h));
-
-		ImGui::Checkbox("Dock in main window", &g_dock_calc_screen);
-		ImGui::SameLine();
-		ImGui::Checkbox("Fit", &fit_);
-		if (!fit_) {
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(90.0f);
-			ImGui::SliderFloat("##zoom", &zoom_, 0.5f, 8.0f, "%.1fx");
-		}
-		ImGui::SameLine();
-		ImGui::TextDisabled("%dx%d", width, height);
+		Placement place = DrawCentred(reinterpret_cast<ImTextureID>(texture_), width, height,
+									  footer, fit_, zoom_);
+		ForwardClicks(place, width, height);
+		DrawControls(width, height);
 	}
 
 private:
+	// Clicking the picture presses the calculator key under the cursor. The old
+	// external window did this through the window rectangle; the docked image is
+	// scaled, so map the mouse position back to model coordinates here.
+	void ForwardClicks(const Placement& place, int width, int height) {
+		if (!m_emu || !place.hovered || place.w <= 0.0f || place.h <= 0.0f)
+			return;
+		const ImVec2 mouse = ImGui::GetIO().MousePos;
+		int mx = static_cast<int>((mouse.x - place.x) / place.w * width);
+		int my = static_cast<int>((mouse.y - place.y) / place.h * height);
+		mx = std::max(0, std::min(width - 1, mx));
+		my = std::max(0, std::min(height - 1, my));
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+			m_emu->ModelMouseEvent(mx, my, true);
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+			m_emu->ModelMouseEvent(mx, my, false);
+	}
+
+	void DrawControls(int width, int height) {
+		ImGui::Checkbox("Fit", &fit_);
+		ImGui::SameLine();
+		bool original = !fit_ && std::abs(zoom_ - 1.0f) < 0.001f;
+		if (ImGui::Checkbox("Original size (1:1)", &original)) {
+			if (original) {
+				fit_ = false;
+				zoom_ = 1.0f;
+			} else {
+				fit_ = true;
+			}
+		}
+		if (!fit_) {
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(110.0f);
+			ImGui::SliderFloat("##zoom", &zoom_, 0.25f, 8.0f, "%.2fx");
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("%dx%d", width, height);
+		if (m_emu && m_emu->GetPaused()) {
+			ImGui::SameLine();
+			ImGui::TextDisabled("(paused)");
+		}
+	}
+
 	void RecreateTexture(int width, int height) {
 		if (texture_)
 			SDL_DestroyTexture(texture_);
@@ -125,35 +195,4 @@ private:
 
 UIWindow* CreateCalcScreenWindow() {
 	return new CalcScreenWindow();
-}
-
-void CalcScreenDockSync(bool docked, ImGuiID dockspace_id) {
-	if (dockspace_id == 0)
-		return;
-
-	if (docked && !g_dock_applied) {
-		// Carve a fixed area out of the right of the debugger dockspace. The
-		// existing windows keep the left node; only the screen lives on the right.
-		ImGuiID screen = 0, rest = 0;
-		ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Right, 0.30f, &screen, &rest);
-		if (screen == 0)
-			return;
-		if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(screen)) {
-			// NoTabBar: a separate area rather than another tab in the tab bar.
-			node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar | ImGuiDockNodeFlags_NoCloseButton |
-								ImGuiDockNodeFlags_NoWindowMenuButton;
-		}
-		ImGui::DockBuilderDockWindow(kScreenWindowName, screen);
-		ImGui::DockBuilderFinish(dockspace_id);
-		g_screen_dock_node = screen;
-		g_dock_applied = true;
-	} else if (!docked && g_dock_applied) {
-		// Give the space back and leave the screen docked as a normal tab.
-		if (g_screen_dock_node)
-			ImGui::DockBuilderRemoveNode(g_screen_dock_node);
-		ImGui::DockBuilderDockWindow(kScreenWindowName, dockspace_id);
-		ImGui::DockBuilderFinish(dockspace_id);
-		g_screen_dock_node = 0;
-		g_dock_applied = false;
-	}
 }

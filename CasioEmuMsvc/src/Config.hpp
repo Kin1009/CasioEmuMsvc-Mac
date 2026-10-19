@@ -55,7 +55,7 @@
 #undef max
 #endif 
 
-// #define SINGLE_WINDOW
+#define SINGLE_WINDOW
 #if !defined(SINGLE_WINDOW) && defined(__ANDROID__)
 #define SINGLE_WINDOW
 #endif

@@ -49,6 +49,14 @@ namespace casioemu {
 		int scaled_interface_texture_h = 0;
 		bool interface_is_svg = false;
 		std::string interface_svg_data;
+#ifdef SINGLE_WINDOW
+		// The debugger owns the only window in single-window builds. Frame()
+		// renders the complete calculator (face, keys, LCD and status sprites)
+		// into this offscreen texture; the Calculator debugger window shows it.
+		SDL_Texture* composite_texture = nullptr;
+		int composite_texture_w = 0;
+		int composite_texture_h = 0;
+#endif
 		unsigned int cycles_per_second;
 		unsigned int eps_timer1_source_hz = 0;
 		unsigned int timer_interval;
@@ -136,6 +144,10 @@ namespace casioemu {
 		bool Running();
 		void HandleMemoryError();
 		void Shutdown();
+		// Reboot the emulated model to its power-on state (the calculator's main
+		// menu).  Used when the calculator window is closed: the debugger stays
+		// open instead of terminating the whole application.
+		void ResetToMainMenu();
 		void Tick();
 		/**
 		 * Called when SDL_WINDOWEVENT_EXPOSED event is received. Does not re-frame.
@@ -150,8 +162,18 @@ namespace casioemu {
 		void SetPaused(bool paused);
 		void RequestStep();
 		void UIEvent(SDL_Event event);
+		// Send a mouse press/release already in model (face) coordinates. The
+		// Calculator debugger window uses this so clicking the on-screen keys works
+		// in single-window builds, where there is no emulator window rectangle.
+		void ModelMouseEvent(int model_x, int model_y, bool down);
 		SDL_Renderer* GetRenderer();
 		SDL_Texture* GetInterfaceTexture();
+#ifdef SINGLE_WINDOW
+		// The last complete model frame rendered by Frame() (single-window builds).
+		SDL_Texture* GetCompositeTexture() { return composite_texture; }
+		int GetCompositeTextureWidth() const { return composite_texture_w; }
+		int GetCompositeTextureHeight() const { return composite_texture_h; }
+#endif
 		std::string GetModelFilePath(std::string relative_path) const;
 		bool HasModelResource(const std::string& name) const;
 		std::vector<std::uint8_t> ReadModelResource(const std::string& name) const;

@@ -29,6 +29,8 @@ struct BuildResult {
     std::string full_asm;
     std::map<std::string, int> variables;  // name -> RAM address
     std::map<std::string, int> syms;       // assembler symbol table
+    bool cwapp = false;                    // built for the fx-580VN X menu
+    int slot = 2;                          // #slot n (1..12); 2 when absent
 };
 
 // Where runtime.asm and the boot templates live. The drivers call set_data_dir()

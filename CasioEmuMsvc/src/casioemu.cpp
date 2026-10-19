@@ -455,6 +455,10 @@ int main(int argc, char* argv[]) {
 			continue;
 		}
 		switch (event.type) {
+		case SDL_QUIT:
+			// Cmd+Q / the application menu still quits normally.
+			emulator.Shutdown();
+			break;
 		case SDL_WINDOWEVENT:
 			switch (event.window.event) {
 			case SDL_WINDOWEVENT_CLOSE:
@@ -466,8 +470,26 @@ int main(int argc, char* argv[]) {
 					(!window || eventWindowId != SDL_GetWindowID(window))) {
 					break;
 				}
+#ifdef SINGLE_WINDOW
+				// In single-window builds this is the calculator's only window.
+				// Closing it should not take the debugger down with it: reboot
+				// the model to its main menu and bring the Calculator tab back.
+				if (emulator.window && eventWindowId == SDL_GetWindowID(emulator.window)) {
+					emulator.ResetToMainMenu();
+					for (auto* debug_window : windows) {
+						if (debug_window && debug_window->name &&
+							strcmp(debug_window->name, "Calculator") == 0) {
+							debug_window->BringToFront();
+						}
+					}
+					break;
+				}
+#endif
+				// Let main() unwind normally: the emulator destructor joins the
+				// tick thread before the chipset (and the LCD history mutex it
+				// owns) is destroyed. std::exit(0) skipped that join and could
+				// abort in the still-running tick thread ("closed unexpectedly").
 				emulator.Shutdown();
-				std::exit(0);
 				break;
 			case SDL_WINDOWEVENT_RESIZED:
 				break;
@@ -513,6 +535,21 @@ int main(int argc, char* argv[]) {
 	if (bg_txt) {
 		SDL_DestroyTexture(bg_txt);
 	}
+#if defined(SINGLE_WINDOW) && !defined(__ANDROID__)
+	// Persist the debugger geometry. In single-window builds this window is the
+	// emulator's window as well, so the Calculator panel keeps its size/place.
+	if (emulator.window) {
+		int x = 0, y = 0, w = 0, h = 0;
+		SDL_GetWindowPosition(emulator.window, &x, &y);
+		SDL_GetWindowSize(emulator.window, &w, &h);
+		auto& settings = ThemeManager::Instance().Settings();
+		settings.windowX = x;
+		settings.windowY = y;
+		settings.windowW = w;
+		settings.windowH = h;
+		ThemeManager::Instance().SaveSettings();
+	}
+#endif
 #ifdef ENABLE_SENTRY
 	sentry_close();
 #endif

@@ -16,6 +16,8 @@
 namespace wiz {
 namespace {
 
+static std::string prev_target_for;  // enforce #cwapp only after #for 580
+
 std::vector<CwizOrigin>& origins() {
     static std::vector<CwizOrigin> v;
     return v;
@@ -265,12 +267,19 @@ public:
 
     std::string run(const std::string& src, const std::string& file) {
         root_file = file;
+        prev_target_for.clear();
+        has_cwapp_ = false;
+        slot_ = 2;
+        slot_seen_ = false;
         active_stack.push_back(Frame{true, true, true, false});
         emit_lines(src, file);
         if (active_stack.size() != 1)
             throw CwizError("unterminated #if (missing #endif)", file_line);
         return join(out, "\n");
     }
+
+    bool has_cwapp() const { return has_cwapp_; }
+    int slot() const { return slot_; }
 
 private:
     struct Frame {
@@ -287,6 +296,9 @@ private:
     std::vector<std::string> include_stack;
     std::string root_file;
     bool in_block = false;  // inside a /* ... */ comment
+    bool has_cwapp_ = false;
+    int slot_ = 2;
+    bool slot_seen_ = false;
     int file_line = 0;
 
     bool active() const { return active_stack.back().active; }
@@ -414,7 +426,7 @@ private:
             if (contains(include_stack, canon)) throw CwizError("#include cycle: " + inc, line);
             bool ok = false;
             std::string text = read_text_file(inc, &ok);
-            if (!ok) throw CwizError("cannot read #include file: " + inc, line);
+            if (!ok) throw CwizError("#include: file not found '" + inc + "' (looked relative to source '" + file + "':" + std::to_string(line) + ")", line);
             include_stack.push_back(canon);
             emit_lines(text, inc);
             include_stack.pop_back();
@@ -422,13 +434,35 @@ private:
         }
         if (name == "for") {
             // `#for 580, 880` - the target directive (which calculator).
+            prev_target_for = rest;
+            has_cwapp_ = false;
             push_out("for " + rest, file, line);
             return;
         }
         if (name == "cwapp") {
-            // `#cwapp` - used after `#for 580` to mark the section as the app
-            // (a patch for the fx-580VN X firmware) rather than a ROM file.
+            // `#cwapp` only valid after `#for 580` (the app flavour of the 580).
+            if (prev_target_for.find("580") == std::string::npos) {
+                throw CwizError("#cwapp requires #for 580 before it (found: #for " + prev_target_for + ")", line);
+            }
+            has_cwapp_ = true;
+            slot_seen_ = false;
             push_out("for cwapp", file, line);
+            return;
+        }
+        if (name == "slot") {
+            // `#slot n` - choose the fx-580VN X menu slot (1..12) that the
+            // compiler patches.  It is only meaningful in a #cwapp section.
+            if (!has_cwapp_)
+                throw CwizError("#slot is only available after #cwapp", line);
+            if (slot_seen_)
+                throw CwizError("#slot is already set for this #cwapp section", line);
+            char* end = nullptr;
+            long n = std::strtol(rest.c_str(), &end, 10);
+            if (rest.empty() || !end || *end != '\0' || n < 1 || n > 12)
+                throw CwizError("#slot needs a slot number from 1 to 12", line);
+            slot_ = (int)n;
+            slot_seen_ = true;
+            push_out("", file, line);
             return;
         }
         throw CwizError("unknown directive '#" + name + "'", line);
@@ -787,11 +821,20 @@ private:
 
 }  // namespace
 
-std::string preprocess_cwiz(const std::string& src, const std::string& file,
-                            const std::string& target) {
+CwizPreprocessInfo preprocess_cwiz_info(const std::string& src, const std::string& file,
+                                        const std::string& target) {
     origins().clear();
     Pre pre(target);
-    return pre.run(src, file);
+    CwizPreprocessInfo info;
+    info.text = pre.run(src, file);
+    info.has_cwapp = pre.has_cwapp();
+    info.slot = pre.slot();
+    return info;
+}
+
+std::string preprocess_cwiz(const std::string& src, const std::string& file,
+                            const std::string& target) {
+    return preprocess_cwiz_info(src, file, target).text;
 }
 
 CwizOrigin cwiz_line_origin(int line) {

@@ -109,19 +109,24 @@ BuildResult build_source(const std::string& src, const std::string& target) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
     std::string selected = select_sections(src, tg);
     WizResult r = compile_to_asm(selected, tg);
-    return finish(r.asm_body, r.variables, tg);
+    BuildResult res = finish(r.asm_body, r.variables, tg);
+    res.cwapp = tg.name == "cwapp";
+    return res;
 }
 
 BuildResult build_cwiz(const std::string& src, const std::string& target,
                        const std::string& path) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
     // CWiz is the language with preprocessor directives; Wiz uses `#` for comments.
-    std::string pre = preprocess_cwiz(src, path, tg.name);
-    std::string selected = select_sections(pre, tg);
+    CwizPreprocessInfo pp = preprocess_cwiz_info(src, path, tg.name);
+    std::string selected = select_sections(pp.text, tg);
     CwizResult r = compile_cwiz(selected, tg);
     std::map<std::string, int> vars;
     for (const auto& kv : r.variables) vars[kv.first] = kv.second.addr;
-    return finish(r.asm_body, vars, tg);
+    BuildResult res = finish(r.asm_body, vars, tg);
+    res.cwapp = tg.name == "cwapp";
+    res.slot = pp.slot;
+    return res;
 }
 
 std::string language_of(const std::string& path, const std::string& forced) {

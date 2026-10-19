@@ -62,6 +62,14 @@ public:
 #ifdef CASIOEMU_CORE_WEB
 		checkWebDatabaseImportResult();
 #endif
+		const bool dark = ThemeManager::Instance().IsDarkMode();
+		if (!palette_ready_ || dark != palette_dark_) {
+			palette_dark_ = dark;
+			palette_ready_ = true;
+			editor_.SetPalette(dark ? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
+			memoryEditor_.HighlightColor = dark ? IM_COL32(255, 255, 255, 45)
+												: IM_COL32(0, 0, 0, 32);
+		}
 		drawMenuBar();
 		drawToolbar();
 		ImGui::Separator();
@@ -111,6 +119,8 @@ public:
 
 private:
 	TextEditor editor_;
+	bool palette_dark_ = false;
+	bool palette_ready_ = false;
 	MemoryEditor memoryEditor_;
 	std::vector<uint8_t> outputBytes_;
 	uint32_t baseAddress_ = 0x8154;

@@ -25,10 +25,21 @@
 
 namespace wiz {
 
+struct CwizPreprocessInfo {
+    std::string text;
+    bool has_cwapp = false;  // the source contains a #cwapp section
+    int slot = 2;            // #slot n (1..12); 2 when the directive is absent
+};
+
 // Preprocess `src` (which came from file `file`) for target `target` (an internal
 // target name such as "cw", "cwii" or "cwapp"). Throws CwizError on a bad directive.
 std::string preprocess_cwiz(const std::string& src, const std::string& file,
                             const std::string& target);
+
+// As above, plus the #cwapp / #slot information the compiler driver needs to
+// patch the built-in fx-580VN X ROM automatically.
+CwizPreprocessInfo preprocess_cwiz_info(const std::string& src, const std::string& file,
+                                        const std::string& target);
 
 struct CwizOrigin {
     std::string file;  // empty when unknown

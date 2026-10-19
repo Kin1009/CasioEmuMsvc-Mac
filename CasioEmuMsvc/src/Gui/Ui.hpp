@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include "Chipset/MMU.hpp"
 #include "Emulator.hpp"
 #include "LabelFile.h"
@@ -54,6 +55,7 @@ public:
 			bring_to_front_requested = false;
 		}
 		ImGui::SetNextWindowSize(inital_size, ImGuiCond_FirstUseEver);
+		const bool was_open = open;
 #ifdef CASIOEMU_CORE_WEB
 		if (ImGui::Begin(name, nullptr, flags)) {
 #else
@@ -62,6 +64,14 @@ public:
 			RenderCore();
 		}
 		ImGui::End();
+		// Closing the Calculator tab means "reboot the calculator", not "hide
+		// the only way to see the model".  Reopen it on the main menu.
+		if (was_open && !open && name && std::strcmp(name, "Calculator") == 0) {
+			open = true;
+			bring_to_front_requested = true;
+			if (m_emu)
+				m_emu->ResetToMainMenu();
+		}
 
 #ifdef __ANDROID__
 		ImGui::PopStyleVar();

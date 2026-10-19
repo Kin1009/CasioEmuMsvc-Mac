@@ -596,6 +596,20 @@ namespace casioemu {
 		chipset.UIEvent(event);
 	}
 
+	void Emulator::ModelMouseEvent(int model_x, int model_y, bool down) {
+		if (headless)
+			return;
+		SDL_Event event{};
+		event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+		event.button.type = event.type;
+		event.button.button = SDL_BUTTON_LEFT;
+		event.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+		event.button.clicks = 1;
+		event.button.x = model_x;
+		event.button.y = model_y;
+		chipset.UIEvent(event);
+	}
+
 	void Emulator::RunStartupScript() {
 		if (argv_map.find("script") == argv_map.end())
 			return;
@@ -713,6 +727,70 @@ namespace casioemu {
 	void Emulator::Frame() {
 		if (headless)
 			return;
+#ifdef SINGLE_WINDOW
+		// Single-window builds have no calculator OS window: the debugger owns
+		// the only window. Render one complete model frame into an offscreen
+		// texture so the Calculator window can present exactly what the old
+		// external window showed (face, keys, LCD, status sprites).
+		const int tex_w = interface_background.dest.w;
+		const int tex_h = interface_background.dest.h;
+		static bool logged_geometry = false;
+		if (!logged_geometry) {
+			logged_geometry = true;
+			std::printf("[Calculator] face src %d,%d %dx%d  dest %d,%d %dx%d\n",
+				interface_background.src.x, interface_background.src.y,
+				interface_background.src.w, interface_background.src.h,
+				interface_background.dest.x, interface_background.dest.y,
+				interface_background.dest.w, interface_background.dest.h);
+		}
+		if (!renderer || !interface_texture || tex_w <= 0 || tex_h <= 0)
+			return;
+		if (!composite_texture || composite_texture_w != tex_w || composite_texture_h != tex_h) {
+			if (composite_texture)
+				SDL_DestroyTexture(composite_texture);
+			Uint32 face_format = SDL_PIXELFORMAT_ARGB8888;
+			SDL_QueryTexture(interface_texture, &face_format, nullptr, nullptr, nullptr);
+			composite_texture = SDL_CreateTexture(renderer, face_format,
+				SDL_TEXTUREACCESS_TARGET, tex_w, tex_h);
+			if (composite_texture)
+				SDL_SetTextureScaleMode(composite_texture, SDL_ScaleModeNearest);
+			composite_texture_w = tex_w;
+			composite_texture_h = tex_h;
+		}
+		if (!composite_texture)
+			return;
+
+		SDL_SetRenderTarget(renderer, composite_texture);
+		SDL_RenderSetViewport(renderer, nullptr);
+		SDL_RenderSetClipRect(renderer, nullptr);
+		SDL_RenderSetScale(renderer, 1.0f, 1.0f);
+		SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+		SDL_RenderClear(renderer);
+		if (interface_is_svg && !interface_svg_data.empty()) {
+			if (!scaled_interface_texture || scaled_interface_texture_w != tex_w || scaled_interface_texture_h != tex_h) {
+				if (scaled_interface_texture)
+					SDL_DestroyTexture(scaled_interface_texture);
+				scaled_interface_texture = CreateSizedSvgTexture(renderer, interface_svg_data, tex_w, tex_h);
+				scaled_interface_texture_w = tex_w;
+				scaled_interface_texture_h = tex_h;
+			}
+			if (scaled_interface_texture)
+				SDL_RenderCopy(renderer, scaled_interface_texture, nullptr, nullptr);
+		}
+		else {
+			SDL_Rect src = interface_background.src;
+			SDL_SetTextureColorMod(interface_texture, 255, 255, 255);
+			SDL_SetTextureAlphaMod(interface_texture, 255);
+			SDL_RenderCopy(renderer, interface_texture, &src, nullptr);
+		}
+		// Peripherals draw in model coordinates (1 px = 1 model pixel).
+		chipset.Frame();
+		SDL_SetRenderTarget(renderer, nullptr);
+		SDL_RenderSetViewport(renderer, nullptr);
+		SDL_RenderSetClipRect(renderer, nullptr);
+		SDL_RenderSetScale(renderer, 1.0f, 1.0f);
+		return;
+#else
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 		const bool board_interface = !ModelDefinition.board_path.empty() &&
 			interface_background.dest.w > 0 && interface_background.dest.h > 0;
@@ -819,6 +897,7 @@ namespace casioemu {
 		emu_rect = dest;
 		SDL_DestroyTexture(tx);
 		Repaint();
+#endif
 	}
 
 	void Emulator::WindowResize(int _width, int _height) {
@@ -840,6 +919,20 @@ namespace casioemu {
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 
 		running = false;
+	}
+
+	void Emulator::ResetToMainMenu() {
+		// Stop the worker between two instructions, reset the chipset and let the
+		// CPU boot again.  The user keeps every debugger window; only the
+		// emulated calculator goes back to its home screen.
+		const bool was_paused = Paused.load(std::memory_order_relaxed);
+		Paused.store(true, std::memory_order_relaxed);
+		{
+			std::lock_guard<casioemu::FairRecursiveMutex> lock(access_mx);
+			chipset.Reset();
+			cycles.Reset();
+		}
+		Paused.store(was_paused, std::memory_order_relaxed);
 	}
 
 	void Emulator::ExecuteCommand(std::string command) {

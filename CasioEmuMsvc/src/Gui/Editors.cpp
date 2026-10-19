@@ -17,6 +17,30 @@ namespace {
 }
 
 float ram_edit_ov[0x100000]{};
+
+// Per-window hex column selector.  MemoryEditor stores the byte count in
+// `Cols`; one byte is two hex characters, so 16 columns is 32 characters (plus
+// the ASCII pane).  Keeping the label on the left matches the rest of the
+// debugger's choosers.
+static void DrawColumnSelector(MemoryEditor& editor) {
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Columns");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(120.0f);
+	int cols = editor.Cols;
+	if (ImGui::InputInt("##hex_columns", &cols, 1, 4)) {
+		editor.Cols = cols < 1 ? 1 : (cols > 64 ? 64 : cols);
+	}
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+		ImGui::BeginTooltip();
+		ImGui::TextUnformatted("Bytes shown per line (2 hex characters per byte).");
+		ImGui::EndTooltip();
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled("bytes / line");
+	ImGui::Separator();
+}
+
 struct HexEditor : public UIWindow, public MemoryEditor {
 	void* data{};
 	size_t size{};
@@ -33,6 +57,10 @@ struct HexEditor : public UIWindow, public MemoryEditor {
 		};
 	}
 	void RenderCore() override {
+		this->HighlightColor = ThemeManager::Instance().IsDarkMode()
+			? IM_COL32(255, 255, 255, 45)
+			: IM_COL32(0, 0, 0, 32);
+		DrawColumnSelector(*this);
 		this->DrawContents(data, size, display_base);
 		if (open_popup) {
 			ImGui::OpenPopup("ContextMenu");
@@ -73,6 +101,10 @@ struct SpansHexEditor : public UIWindow, public MemoryEditor {
 		};
 	}
 	void RenderCore() override {
+		this->HighlightColor = ThemeManager::Instance().IsDarkMode()
+			? IM_COL32(255, 255, 255, 45)
+			: IM_COL32(0, 0, 0, 32);
+		DrawColumnSelector(*this);
 		this->DrawContents(data, size, display_base, spans);
 		if (open_popup) {
 			ImGui::OpenPopup("ContextMenu");
@@ -213,26 +245,26 @@ std::vector<UIWindow*> GetEditors() {
 		const size_t rom_display_bytes = m_emu->chipset.epscpu->RomFormat() == casioemu::Eps6800RomFormat::UnpackedNibbles
 											 ? m_emu->chipset.rom_data.size() / 2
 											 : m_emu->chipset.rom_data.size();
-		windows.push_back(EPS_ROM_Hex(new HexEditor{"Rom", nullptr, rom_display_bytes, 0}));
+		windows.push_back(EPS_ROM_Hex(new HexEditor{"ROM", nullptr, rom_display_bytes, 0}));
 		if (!m_emu->chipset.flash_data.empty())
 			windows.push_back(EPS_FLASH_Hex(new HexEditor{"Flash", nullptr, m_emu->chipset.flash_data.size(), kEpsFlashBaseByte}));
-		windows.push_back(MMU_Hex(new HexEditor{"Ram", nullptr, 0x2080, 0}));
+		windows.push_back(MMU_Hex(new HexEditor{"RAM", nullptr, 0x2080, 0}));
 		windows.push_back(MMU_Hex(new HexEditor{"Regs", nullptr, 0x80, 0}));
-		windows.push_back(EPS_VRAM_Hex(new HexEditor{"VRam", nullptr, m_emu->chipset.epscpu->LcdRawSize(), 0}));
+		windows.push_back(EPS_VRAM_Hex(new HexEditor{"VRAM", nullptr, m_emu->chipset.epscpu->LcdRawSize(), 0}));
 	}
 	else {
-		windows.push_back(new HexEditor{"Rom", m_emu->chipset.rom_data.data(), m_emu->chipset.rom_data.size(), 0});
+		windows.push_back(new HexEditor{"ROM", m_emu->chipset.rom_data.data(), m_emu->chipset.rom_data.size(), 0});
 		windows.push_back(
 			Highlight_Default(
 				MMU_Hex(
 					new SpansHexEditor{
-						"Ram",
+						"RAM",
 						(void*)casioemu::GetRamBaseAddr(m_emu->hardware_id),
 						casioemu::GetRamEditorSize(m_emu->hardware_id),
 						casioemu::GetRamBaseAddr(m_emu->hardware_id),
 						GetCommonMemLabels(m_emu->hardware_id)})));
 		if (m_emu->hardware_id == casioemu::HW_FX_5800P) {
-			windows.push_back(MMU_Hex(new SpansHexEditor{"PRam", (void*)0x40000, 0x8000, 0x40000, GetCommonMemLabels(m_emu->hardware_id)}));
+			windows.push_back(MMU_Hex(new SpansHexEditor{"PRAM", (void*)0x40000, 0x8000, 0x40000, GetCommonMemLabels(m_emu->hardware_id)}));
 			windows.push_back(new HexEditor{"Flash", m_emu->chipset.flash_data.data(), m_emu->chipset.flash_data.size(), 0});
 		}
 		windows.push_back(MMU_Hex(new HexEditor{"All", 0, 0xfffff, 0}));

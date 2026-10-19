@@ -84,13 +84,10 @@ void RenderStatusBar() {
 	ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - barHeight));
 	ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, barHeight));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 2.0f));
-#ifdef CASIOEMU_CORE_WEB
+	// Follow the active theme instead of hard-coding the dark status bar.
 	ImVec4 statusBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
-	statusBg.w = std::max(statusBg.w, 0.82f);
+	statusBg.w = std::max(statusBg.w, 0.92f);
 	ImGui::PushStyleColor(ImGuiCol_WindowBg, statusBg);
-#else
-	ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.12f, 1.0f));
-#endif
 	
 	if (ImGui::Begin("##StatusBar", nullptr, 
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
@@ -123,8 +120,10 @@ void RenderStatusBar() {
 		ImGui::TextDisabled("|");
 		ImGui::SameLine(0.0f, 20.0f);
 #ifndef CASIOEMU_CORE_WEB
-		// Toolchain: keep the calculator screen as a separate docked area.
-		ImGui::Checkbox("Dock screen", &g_dock_calc_screen);
+		if (m_emu)
+			ImGui::TextDisabled("%s", m_emu->ModelDefinition.model_name.c_str());
+		else
+			ImGui::TextDisabled("%s", "CasioEmuMsvc");
 #else
 		ImGui::TextDisabled("%s", "CasioEmuMsvc");
 #endif
@@ -164,13 +163,30 @@ static ImGuiID RenderDockSpace(float reservedBottom) {
 	return dockspace_id;
 }
 
+// First-run dock layout: the calculator sits in a panel on the right, exactly
+// as the old external calculator window sat beside the debugger - but inside the
+// same OS window. Existing user layouts (a split root) are left untouched.
+static void SetupDefaultDockLayout(ImGuiID dockspace_id) {
+	static bool checked = false;
+	if (checked || dockspace_id == 0)
+		return;
+	checked = true;
+
+	ImGuiDockNode* root = ImGui::DockBuilderGetNode(dockspace_id);
+	if (!root || root->ChildNodes[0] || root->ChildNodes[1])
+		return;
+
+	ImGuiID calc_node = 0, rest_node = 0;
+	ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Right, 0.24f, &calc_node, &rest_node);
+	if (calc_node != 0)
+		ImGui::DockBuilderDockWindow("Calculator", calc_node);
+	ImGui::DockBuilderFinish(dockspace_id);
+}
+
 static void RenderDebuggerGuiWindows() {
 #ifndef __ANDROID__
 	ImGuiID dockspace_id = RenderDockSpace(GetStatusBarHeight());
-#ifndef CASIOEMU_CORE_WEB
-	// The dock layout has to be settled before the windows render.
-	CalcScreenDockSync(g_dock_calc_screen, dockspace_id);
-#endif
+	SetupDefaultDockLayout(dockspace_id);
 #endif
 	for (auto win : windows) {
 #ifndef __ANDROID__
@@ -238,56 +254,11 @@ static void RenderDebuggerGuiWindows() {
 	//	}
 	// #endif
 
-#ifdef SINGLE_WINDOW
-	ImGui::SetNextWindowBgAlpha(0.0f);
-	ImGui::Begin("Overlay", nullptr,
-		ImGuiWindowFlags_NoDecoration |
-		ImGuiWindowFlags_NoDocking |
-		ImGuiWindowFlags_AlwaysAutoResize |
-		ImGuiWindowFlags_NoBackground |
-		ImGuiWindowFlags_NoTitleBar |
-		ImGuiWindowFlags_NoMove);
-
-	auto& tm = ThemeManager::Instance();
-	float safeAreaPadding = tm.padding * 1.5f;
-	ImGui::SetWindowPos(ImVec2(safeAreaPadding, safeAreaPadding));
-
-	float displayWidth = ImGui::GetIO().DisplaySize.x;
-	float totalWidth = displayWidth - (safeAreaPadding * 2);
-	float spacingBetweenElements = tm.padding * 1.2f;
-	float buttonWidth = (totalWidth - spacingBetweenElements * 2) * 0.25f;
-	float comboWidth = totalWidth - (buttonWidth * 2) - (spacingBetweenElements * 2);
-
-	static UIWindow* current_filter = 0;
-	ImGui::SetNextItemWidth(comboWidth);
-	if (ImGui::BeginCombo("##cb", current_filter ? current_filter->name : 0)) {
-		for (int n = 0; n < windows.size(); n++) {
-			bool is_selected = (current_filter == windows[n]);
-			if (ImGui::Selectable(windows[n]->name, is_selected))
-				current_filter = windows[n];
-			if (is_selected)
-				ImGui::SetItemDefaultFocus();
-		}
-		ImGui::EndCombo();
-	}
-
-	ImGui::SameLine(0, spacingBetweenElements);
-	ImVec2 buttonSize(buttonWidth, tm.buttonHeight * 1.2f);
-	if (ImGui::Button("Open", buttonSize)) {
-		if (current_filter != 0)
-			current_filter->open = true;
-	}
-
-	ImGui::SameLine(0, spacingBetweenElements);
-	if (ImGui::Button("Close all", buttonSize)) {
-		for (auto& win : windows) {
-			win->open = false;
-		}
-	}
-	// Let's record where we are.
-	top_bar_size = ImGui::GetCursorPosY();
-	ImGui::End();
-#endif
+	// The debugger uses the normal ImGui dock tab bar.  There used to be a
+	// separate custom "Open / Close all" strip here; it duplicated the tab bar,
+	// hid the calculator's first row and made the window look like it had two
+	// independent tab systems.  The docked windows are the only navigation now.
+	top_bar_size = 0;
 }
 
 void gui_loop() {
@@ -372,9 +343,13 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 		windows.push_back(item);
 	}
 #ifndef CASIOEMU_CORE_WEB
-	// The Wiz / CWiz toolchain and the model's screen as a debugger window (the
-	// status bar can move the screen into a dock area of its own).
-	windows.push_back(CreateToolchainWindow());
+	// The Wiz / CWiz toolchain is offered for the two ClassWiz models it targets
+	// (fx-580VN X and fx-880BTG); every model gets the Calculator window.
+	if (m_emu) {
+		const std::string& model = m_emu->ModelDefinition.model_name;
+		if (model.find("580") != std::string::npos || model.find("880") != std::string::npos)
+			windows.push_back(CreateToolchainWindow());
+	}
 	windows.push_back(CreateCalcScreenWindow());
 #endif
 
@@ -394,6 +369,36 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 #ifdef SINGLE_WINDOW
 	window = wnd;
 	renderer = rnd;
+#ifndef __ANDROID__
+	// The emulator creates this window at the model's interface size. In
+	// single-window builds it is also the debugger window, so give it the saved
+	// debugger size instead - otherwise the docks and tab bar start cramped.
+	{
+		int winX = ThemeManager::Instance().Settings().windowX;
+		int winY = ThemeManager::Instance().Settings().windowY;
+		int winW = ThemeManager::Instance().Settings().windowW;
+		int winH = ThemeManager::Instance().Settings().windowH;
+		SDL_Rect bounds{0, 0, 0, 0};
+		if (SDL_GetDisplayUsableBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0) {
+			if (winW > bounds.w) winW = bounds.w;
+			if (winH > bounds.h) winH = bounds.h;
+			if (winX != SDL_WINDOWPOS_CENTERED) {
+				if (winX < bounds.x) winX = bounds.x;
+				if (winX + winW > bounds.x + bounds.w) winX = bounds.x + bounds.w - winW;
+			}
+			if (winY != SDL_WINDOWPOS_CENTERED) {
+				if (winY < bounds.y) winY = bounds.y;
+				if (winY + winH > bounds.y + bounds.h) winY = bounds.y + bounds.h - winH;
+			}
+		}
+		SDL_SetWindowTitle(window, "CasioEmuMsvc Debugger");
+		SDL_SetWindowSize(window, winW, winH);
+		if (winX == SDL_WINDOWPOS_CENTERED || winY == SDL_WINDOWPOS_CENTERED)
+			SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+		else
+			SDL_SetWindowPosition(window, winX, winY);
+	}
+#endif
 #else
 #ifdef __ANDROID__
 	window = SDL_CreateWindow("CasioEmuMsvc Debugger",
@@ -504,18 +509,18 @@ namespace UIHelpers {
 			}
 			return;
 		}
-		// Prefer the "Ram" window; fall back to any window that overrides GotoMemoryAddress.
+		// Prefer the "RAM" window; fall back to any window that overrides GotoMemoryAddress.
 		UIWindow* fallback = nullptr;
 		for (auto* win : windows) {
 			const char* n = win->name;
-			if (n && strcmp(n, "Ram") == 0) {
+			if (n && strcmp(n, "RAM") == 0) {
 				win->GotoMemoryAddress(addr);
 				win->BringToFront();
 				return;
 			}
 			// Track first editor-like window as fallback
-			if (!fallback && n && (strcmp(n, "Rom") == 0 || strcmp(n, "All") == 0
-				|| strcmp(n, "PRam") == 0 || strcmp(n, "Flash") == 0)) {
+			if (!fallback && n && (strcmp(n, "ROM") == 0 || strcmp(n, "All") == 0
+				|| strcmp(n, "PRAM") == 0 || strcmp(n, "Flash") == 0)) {
 				fallback = win;
 			}
 		}

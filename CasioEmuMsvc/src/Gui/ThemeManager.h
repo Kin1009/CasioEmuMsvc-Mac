@@ -261,6 +261,7 @@ public:
 	// —— 主题切换 ——
 	void SetDarkMode();
 	void SetLightMode();
+	bool IsDarkMode() const { return m_settings.isDarkMode; }
 	/// 应用默认主题（原 SetupDefaultTheme）
 	void ApplyDefaultTheme();
 

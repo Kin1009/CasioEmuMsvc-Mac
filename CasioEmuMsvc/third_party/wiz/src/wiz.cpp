@@ -10,6 +10,7 @@
 #include <set>
 
 #include "font6x8.hpp"
+#include "font8x8.hpp"
 
 namespace wiz {
 
@@ -111,6 +112,8 @@ static const std::vector<std::pair<std::string, std::string>> PRELUDE = {
      "        for dx in range(0 - r, r + 1):\n            if dx * dx + dy * dy <= r2:\n"
      "                pixel(cx + dx, cy + dy, c)\n"},
     {"font", ""},  // filled in lazily (see prelude_font())
+    {"font_text", ""},  // CW Text 8px + proportional advances
+    {"font_big", ""},   // CW Mono 8px
     {"char",
      "\ndef char(x, y, c):\n    if c < 32 or c > 126:\n        c = 63\n    base = (c - 32) * 8\n"
      "    for r in range(0, 8):\n        bits = _font[base + r]\n        for k in range(0, 6):\n"
@@ -127,16 +130,50 @@ static const std::vector<std::pair<std::string, std::string>> PRELUDE = {
      "\ndef sprite(x, y, w, h, d):\n    bw = (w + 7) >> 3\n    for r in range(0, h):\n"
      "        for k in range(0, w):\n            b = _rpeek(d + r * bw + (k >> 3))\n"
      "            if b & (128 >> (k & 7)):\n                pixel(x + k, y + r)\n"},
+    {"print_mono_fonts",
+     "\ndef _mchar(x, y, c):\n    if c < 32 or c > 126:\n        c = 63\n    base = (c - 32) * 8\n"
+     "    for r in range(0, 8):\n        bits = _font_big[base + r]\n"
+     "        for k in range(0, 8):\n            pixel(x + k, y + r, (bits & (128 >> k)) != 0)\n"
+     "\ndef _mtext(x, y, s):\n    c = _rpeek(s)\n    while c != 0:\n        _mchar(x, y, c)\n"
+     "        x += 8\n        s += 1\n        c = _rpeek(s)\n    return x\n"
+     "\ndef _mnum(x, y, n):\n    if n == -32768:\n        return _mtext(x, y, \"-32768\")\n"
+     "    if n < 0:\n        _mchar(x, y, 45)\n        x += 8\n        n = 0 - n\n"
+     "    d = 10000\n    shown = 0\n    while d > 0:\n        q = n / d\n        n = n - q * d\n"
+     "        if q > 0 or shown or d == 1:\n            _mchar(x, y, 48 + q)\n"
+     "            x += 8\n            shown = 1\n        d = d / 10\n    return x\n"},
+    {"print_text_fonts",
+     "\ndef _tchar(x, y, c):\n    if c < 32 or c > 126:\n        c = 63\n    base = (c - 32) * 8\n"
+     "    for r in range(0, 8):\n        bits = _font_text[base + r]\n"
+     "        for k in range(0, 8):\n            pixel(x + k, y + r, (bits & (128 >> k)) != 0)\n"
+     "\ndef _ptext(x, y, s):\n    c = _rpeek(s)\n    while c != 0:\n        _tchar(x, y, c)\n"
+     "        x += 8\n        s += 1\n        c = _rpeek(s)\n    return x\n"
+     "\ndef _ptnum(x, y, n):\n    if n == -32768:\n        return _ptext(x, y, \"-32768\")\n"
+     "    if n < 0:\n        _tchar(x, y, 45)\n        x += 8\n        n = 0 - n\n"
+     "    d = 10000\n    shown = 0\n    while d > 0:\n        q = n / d\n        n = n - q * d\n"
+     "        if q > 0 or shown or d == 1:\n            _tchar(x, y, 48 + q)\n"
+     "            x += 8\n            shown = 1\n        d = d / 10\n    return x\n"},
 };
 
-static std::string prelude_font() {
-    std::string s = "rom8 _font = [";
-    for (int i = 0; i < FONT6X8_LEN; i++) {
+static std::string prelude_array(const char* name, const unsigned char* data, int len) {
+    std::string s = std::string("rom8 ") + name + " = [";
+    for (int i = 0; i < len; i++) {
         if (i) s += ", ";
-        s += std::to_string(FONT6X8[i]);
+        s += std::to_string(data[i]);
     }
     s += "]\n";
     return s;
+}
+
+static std::string prelude_font() {
+    return prelude_array("_font", FONT6X8, FONT6X8_LEN);
+}
+
+static std::string prelude_font_text() {
+    return prelude_array("_font_text", FONT_TEXT8, FONT8X8_LEN);
+}
+
+static std::string prelude_font_big() {
+    return prelude_array("_font_big", FONT8X8, FONT8X8_LEN);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -982,6 +1019,8 @@ std::vector<NodeP> Compiler::add_prelude(std::vector<NodeP> prog,
     for (auto& kv : PRELUDE) {
         std::string text = kv.second;
         if (kv.first == "font") text = prelude_font();
+        else if (kv.first == "font_text") text = prelude_font_text();
+        else if (kv.first == "font_big") text = prelude_font_big();
         text = replace_all(text, "@ROWS@", std::to_string(target.rows));
         text = replace_all(text, "@LAST@", std::to_string(target.rows - 1));
         if (target.rom_seg == 0) text = replace_all(text, "_rpeek(", "peek(");
@@ -1029,15 +1068,19 @@ void Compiler::rewrite_print(NodeP& n, const std::set<std::string>& data_names) 
         rewrite_print(arm.first, data_names);
         for (auto& x : arm.second) rewrite_print(x, data_names);
     }
-    if (n->k == "call" && n->name == "print") {
+    if (n->k == "call" && (n->name == "print" || n->name == "print_text")) {
         if (n->args.size() < 3)
-            throw WizError("print(x, y, value, ...) needs at least 3 arguments", n->line);
+            throw WizError(n->name + "(x, y, value, ...) needs at least 3 arguments", n->line);
+        const bool text_font = n->name == "print_text";
         NodeP cur = n->args[0];
         for (size_t i = 2; i < n->args.size(); i++) {
             const NodeP& a = n->args[i];
             bool is_text = a->k == "str" || (a->k == "var" && data_names.count(a->name));
             NodeP c = mk("call", n->line);
-            c->name = is_text ? "text" : "num";
+            if (text_font)
+                c->name = is_text ? "_ptext" : "_ptnum";
+            else
+                c->name = is_text ? "_mtext" : "_mnum";
             c->args = {cur, n->args[1], a};
             cur = c;
         }
