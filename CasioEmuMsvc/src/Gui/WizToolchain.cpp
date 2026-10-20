@@ -20,6 +20,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -492,20 +494,24 @@ private:
 			AddLog(Sev::Error, "the debugger is not attached");
 			return;
 		}
-		for (size_t i = 0; i < rop_bytes_.size(); ++i)
-			me_mmu->WriteData(rop_base_ + static_cast<uint32_t>(i), rop_bytes_[i], 0);
-		for (size_t i = 0; i < rop_launcher_.size(); ++i)
-			me_mmu->WriteData(rop_launcher_base_ + static_cast<uint32_t>(i), rop_launcher_[i], 0);
-		AddLog(Sev::Note, wiz::fmt("injected payload @ %04X and launcher @ %04X", rop_base_,
-								   rop_launcher_base_));
-
-		if (auto* cpu = m_emu->chipset.epscpu) {
-			if (rop_launcher_base_ >= 0x8000 && rop_launcher_base_ < 0x10000) {
-				cpu->SetPC(rop_launcher_base_);
-				m_emu->SetPaused(false);
-				AddLog(Sev::Note, wiz::fmt("PC -> launcher @ %04X; running", rop_launcher_base_));
+		auto write_block = [this](uint32_t base, const std::vector<uint8_t>& bytes, const char* what) {
+			for (size_t i = 0; i < bytes.size(); ++i)
+				me_mmu->WriteData(base + static_cast<uint32_t>(i), bytes[i], 0);
+			for (size_t i = 0; i < bytes.size(); ++i) {
+				if (me_mmu->ReadData(base + static_cast<uint32_t>(i), false) != bytes[i]) {
+					AddLog(Sev::Error, wiz::fmt("%s write failed @ %04X+%zu", what, base, i));
+					return false;
+				}
 			}
-		}
+			AddLog(Sev::Note, wiz::fmt("%s verified @ %04X (%zu bytes)", what, base, bytes.size()));
+			return true;
+		};
+		if (!write_block(rop_base_, rop_bytes_, "payload"))
+			return;
+		if (!write_block(rop_launcher_base_, rop_launcher_, "launcher"))
+			return;
+		if (rop_launcher_base_ == 0xD180 || rop_launcher_base_ == 0x9268)
+			AddLog(Sev::Note, "press EXE in Program mode to run the launcher");
 	}
 
 	// The linter is the same engine as the `wizlint` command-line tool: the
@@ -859,6 +865,113 @@ private:
 		AddLog(Sev::Note, "loaded " + path);
 	}
 
+	void LoadExample(const std::filesystem::path& path) {
+		std::ifstream stream(path, std::ios::binary);
+		if (!stream) {
+			AddLog(Sev::Error, "cannot open " + path.string());
+			return;
+		}
+		std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+		editor_.SetText(text);
+		editor_.SetCursorPosition(TextEditor::Coordinates());
+
+		const std::string name = path.filename().string();
+		std::snprintf(file_name_, sizeof file_name_, "%s", name.c_str());
+		const std::string ext = path.extension().string();
+		lang_idx_ = (ext == ".wz") ? 1 : 2;
+
+		const bool is_rop = text.find("#rop") != std::string::npos;
+		const bool is_880 = text.find("880") != std::string::npos &&
+		                    text.find("#for") != std::string::npos;
+		if (text.find("#cwapp") != std::string::npos)
+			target_idx_ = 2;
+		else if (is_rop)
+			target_idx_ = is_880 ? 4 : 3;
+		else
+			target_idx_ = is_880 ? 0 : 1;
+		// Keep the target the example asks for instead of re-deriving it from
+		// the model that happens to be running.
+		picked_target_ = true;
+
+		built_ok_ = false;
+		rop_launcher_hex_.clear();
+		diags_.clear();
+		editor_.SetErrorMarkers({});
+		AddLog(Sev::Note, "loaded example " + name);
+	}
+
+	static std::string ExampleCategoryLabel(std::string name) {
+		std::replace(name.begin(), name.end(), '_', ' ');
+		if (!name.empty())
+			name[0] = (char)std::toupper((unsigned char)name[0]);
+		return name;
+	}
+
+	static std::string ExampleFileLabel(const std::filesystem::path& path) {
+		const std::string ext = path.extension().string();
+		return path.stem().string() + "  (" + (ext == ".wz" ? "Wiz" : "CWiz") + ")";
+	}
+
+	static std::set<std::string> NestedExampleNames(const std::filesystem::path& root) {
+		std::set<std::string> names;
+		std::error_code ec;
+		for (std::filesystem::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+			if (!it->is_regular_file(ec) || it->path().parent_path() == root)
+				continue;
+			const std::string ext = it->path().extension().string();
+			if (ext == ".wz" || ext == ".cwiz")
+				names.insert(it->path().filename().string());
+		}
+		return names;
+	}
+
+	void RenderExampleDir(const std::filesystem::path& dir, bool root,
+	                      const std::set<std::string>& nested) {
+		std::error_code ec;
+		std::vector<std::filesystem::path> dirs;
+		std::vector<std::filesystem::path> files;
+		for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+			if (it->is_directory(ec)) {
+				dirs.push_back(it->path());
+			} else if (it->is_regular_file(ec)) {
+				const std::string ext = it->path().extension().string();
+				if (ext != ".wz" && ext != ".cwiz")
+					continue;
+				if (root && nested.count(it->path().filename().string()))
+					continue;
+				files.push_back(it->path());
+			}
+		}
+		std::sort(dirs.begin(), dirs.end());
+		std::sort(files.begin(), files.end());
+
+		for (const auto& sub : dirs) {
+			ImGui::PushID(sub.filename().string().c_str());
+			if (ImGui::BeginMenu(ExampleCategoryLabel(sub.filename().string()).c_str())) {
+				RenderExampleDir(sub, false, nested);
+				ImGui::EndMenu();
+			}
+			ImGui::PopID();
+		}
+		for (const auto& file : files) {
+			ImGui::PushID(file.string().c_str());
+			if (ImGui::MenuItem(ExampleFileLabel(file).c_str()))
+				LoadExample(file);
+			ImGui::PopID();
+		}
+	}
+
+	void RenderExamplesMenu() {
+		const std::string root = WizExamplesDir();
+		std::error_code ec;
+		if (!std::filesystem::is_directory(root, ec)) {
+			ImGui::MenuItem("(examples not found)", nullptr, false, false);
+			return;
+		}
+		const std::set<std::string> nested = NestedExampleNames(root);
+		RenderExampleDir(root, true, nested);
+	}
+
 	// ------------------------------------------------------------ chrome
 	void RefreshEditorPalette() {
 		const bool dark = ThemeManager::Instance().IsDarkMode();
@@ -885,9 +998,10 @@ private:
 				SaveSource();
 			if (ImGui::MenuItem("Load", "Ctrl+O"))
 				LoadSource();
-			if (ImGui::MenuItem("Examples")) {
-				const std::string examples = WizExamplesDir();
-				SDL_OpenURL(("file://" + examples).c_str());
+			if (ImGui::BeginMenu("Examples"))
+			{
+				RenderExamplesMenu();
+				ImGui::EndMenu();
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Build", "F5"))

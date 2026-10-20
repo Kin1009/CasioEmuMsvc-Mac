@@ -885,6 +885,7 @@ enum class LauncherKind { Common, Simple };
 struct LauncherOpts {
     LauncherKind kind = LauncherKind::Common;
     uint32_t base = 0x8154;     // where the launcher bytes are placed
+    bool has_base = false;
     uint32_t length = 3;        // 580 program-size code: 1 short, 2 medium, 3 long
     uint32_t backup = 0;        // 0 = use the payload base (#org)
     uint32_t main = 0xD730;     // 580 address the payload is copied to
@@ -943,6 +944,7 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                         // simple stub at that address.
                         lopts.kind = LauncherKind::Simple;
                         lopts.base = parse_number(a);
+                        lopts.has_base = true;
                     }
                 }
                 if (lopts.kind == LauncherKind::Common) {
@@ -952,7 +954,7 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                     if (ls >> v) { lopts.main = parse_number(v); lopts.has_main = true; }
                 } else {
                     std::string v;
-                    if (ls >> v) lopts.base = parse_number(v);
+                    if (ls >> v) { lopts.base = parse_number(v); lopts.has_base = true; }
                 }
             }
             out += "\n";
@@ -1027,7 +1029,14 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             out.push_back((uint8_t)((tag >> 8) & 0xFF));
         };
 
-        r.launcher_base = lopts.base;
+        // The common launcher is entered through the calculator's program
+        // input area; the simple stub defaults to the historical 8154 entry.
+        if (lopts.has_base)
+            r.launcher_base = lopts.base;
+        else
+            r.launcher_base = (lopts.kind == LauncherKind::Common)
+                                  ? (r.model == "880" ? 0x9268u : 0xD180u)
+                                  : 0x8154u;
         const uint32_t backup = lopts.has_backup ? lopts.backup : r.base;
         const uint32_t main = lopts.has_main ? lopts.main : 0xD730;
         const uint32_t length = lopts.has_length ? lopts.length : 3;
