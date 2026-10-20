@@ -1007,14 +1007,26 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             else if (pm.find("580") != std::string::npos) r.model = "580";
         }
         if (!has_org) org = (m == "880") ? 0xE330 : 0xE9E0;
-        prog.org = org;
+
+        // The 580 common launcher copies the injected payload before it lets
+        // the chain run.  Absolute addresses emitted into the chain therefore
+        // have to be based on the copy destination, not on the temporary
+        // injection address.  880 common and the simple stub execute in place.
+        const uint32_t backup = lopts.has_backup ? lopts.backup : org;
+        const uint32_t main = lopts.has_main ? lopts.main : 0xD730;
+        const bool common = lopts.kind == LauncherKind::Common;
+        const bool common_580 = common && m == "580";
+        const uint32_t execution_org = common_580 ? main : (common ? backup : org);
+        prog.org = execution_org;
         prog.has_org = true;
         Db db;
         db.load(r.model == "880" ? ROP_DB_880 : ROP_DB_580);
         Emitter em(db);
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
-        r.base = prog.org;
+        // `base` is where the debugger writes the payload.  It is not
+        // necessarily the address used for absolute pointers inside it.
+        r.base = common ? backup : org;
 
         auto emit16 = [](std::vector<uint8_t>& out, uint32_t v) {
             out.push_back((uint8_t)(v & 0xFF));
@@ -1035,8 +1047,6 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             r.launcher_base = lopts.base;
         else
             r.launcher_base = (r.model == "880" ? 0x9268u : 0xD180u);
-        const uint32_t backup = lopts.has_backup ? lopts.backup : r.base;
-        const uint32_t main = lopts.has_main ? lopts.main : 0xD730;
         const uint32_t length = lopts.has_length ? lopts.length : 3;
 
         if (lopts.kind == LauncherKind::Common) {
