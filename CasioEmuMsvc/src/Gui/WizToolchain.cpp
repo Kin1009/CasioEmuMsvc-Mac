@@ -443,7 +443,11 @@ private:
 		built_ok_ = true;
 		rop_bytes_ = std::move(rop.bytes);
 		rop_base_ = rop.base;
-		AddLog(Sev::Note, wiz::fmt("ROP %zu bytes @ %04X", rop_bytes_.size(), rop_base_));
+		rop_launcher_ = std::move(rop.launcher);
+		rop_launcher_base_ = rop.launcher_base;
+		AddLog(Sev::Note, wiz::fmt("payload %zu bytes @ %04X, launcher %zu bytes @ %04X",
+								   rop_bytes_.size(), rop_base_, rop_launcher_.size(),
+								   rop_launcher_base_));
 
 		std::string directory;
 		if (m_emu)
@@ -467,13 +471,16 @@ private:
 		}
 		for (size_t i = 0; i < rop_bytes_.size(); ++i)
 			me_mmu->WriteData(rop_base_ + static_cast<uint32_t>(i), rop_bytes_[i], 0);
-		AddLog(Sev::Note, wiz::fmt("injected into RAM at %04X", rop_base_));
+		for (size_t i = 0; i < rop_launcher_.size(); ++i)
+			me_mmu->WriteData(rop_launcher_base_ + static_cast<uint32_t>(i), rop_launcher_[i], 0);
+		AddLog(Sev::Note, wiz::fmt("injected payload @ %04X and launcher @ %04X", rop_base_,
+								   rop_launcher_base_));
 
 		if (auto* cpu = m_emu->chipset.epscpu) {
-			if (rop_base_ >= 0x8000 && rop_base_ < 0x10000) {
-				cpu->SetPC(rop_base_);
+			if (rop_launcher_base_ >= 0x8000 && rop_launcher_base_ < 0x10000) {
+				cpu->SetPC(rop_launcher_base_);
 				m_emu->SetPaused(false);
-				AddLog(Sev::Note, "PC set to the payload; running");
+				AddLog(Sev::Note, wiz::fmt("PC -> launcher @ %04X; running", rop_launcher_base_));
 			}
 		}
 	}
@@ -1064,6 +1071,8 @@ private:
 	wiz::BuildResult last_build_;
 	std::vector<uint8_t> rop_bytes_;
 	uint32_t rop_base_ = 0;
+	std::vector<uint8_t> rop_launcher_;
+	uint32_t rop_launcher_base_ = 0;
 	std::string last_build_source_;
 	std::string stock_rom_;
 	std::string stock_rom_path_;

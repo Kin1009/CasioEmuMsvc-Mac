@@ -868,7 +868,8 @@ struct Emitter {
     }
 };
 
-std::string strip_directives(std::string src, std::string& model, uint32_t& org, bool& has_org) {
+std::string strip_directives(std::string src, std::string& model, uint32_t& org, bool& has_org,
+                             uint32_t& launcher, bool& has_launcher) {
     std::string out;
     std::istringstream in(src);
     std::string line;
@@ -889,6 +890,12 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                 if (!a.empty() && a.back() == ']') a.pop_back();
                 org = (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
                 has_org = true;
+            } else if (dlow == "launcher") {
+                std::string a; ls >> a;
+                if (!a.empty() && a[0] == '[') a = a.substr(1);
+                if (!a.empty() && a.back() == ']') a.pop_back();
+                launcher = (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
+                has_launcher = true;
             }
             out += "\n";
             continue;
@@ -917,7 +924,9 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         std::string m = r.model;
         uint32_t org = 0xE9E0;
         bool has_org = false;
-        std::string body = strip_directives(source, m, org, has_org);
+        uint32_t launcher = 0x8154;
+        bool has_launcher = false;
+        std::string body = strip_directives(source, m, org, has_org, launcher, has_launcher);
         r.model = m;
         Program prog = Parser(lex(body)).parse();
         if (prog.model.empty()) prog.model = m;
@@ -933,6 +942,26 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
         r.base = prog.has_org ? prog.org : 0xE9E0;
+        // Launcher: pop er14 / addr = payload - 2 / sp = er14, pop er14.
+        // The last gadget pops the word at payload-2 into er14 and leaves SP
+        // exactly at the payload, so the gadget chain continues there.
+        r.launcher_base = launcher;
+        const uint32_t pop_er14 = 0x15C78;      // pop er14
+        const uint32_t set_sp = 0x20D60;        // sp = er14,pop er14
+        auto emit_call = [](std::vector<uint8_t>& out, uint32_t addr) {
+            uint32_t word = addr + 0x30300000u;
+            for (int i = 0; i < 4; ++i) { out.push_back((uint8_t)(word & 0xFF)); word >>= 8; }
+        };
+        emit_call(r.launcher, pop_er14);
+        const uint32_t entry = r.base >= 2 ? r.base - 2 : r.base;
+        r.launcher.push_back((uint8_t)(entry & 0xFF));
+        r.launcher.push_back((uint8_t)((entry >> 8) & 0xFF));
+        emit_call(r.launcher, set_sp);
+        char hb[16];
+        std::snprintf(hb, sizeof hb, "%04X", r.launcher_base);
+        std::snprintf(hb + 8, sizeof hb - 8, "%04X", r.base);
+        r.log += std::string("  ; launcher @ ") + hb + " -> [" + (hb + 8) + "]\n";
+        (void)has_launcher;
         return r;
     } catch (const std::exception& e) {
         RopResult bad;

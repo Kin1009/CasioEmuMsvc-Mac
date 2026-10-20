@@ -13,6 +13,10 @@ struct RopResult {
     std::string log;     // emission log / diagnostics
     std::vector<uint8_t> bytes;
     uint32_t base = 0;   // #org / opn address (home)
+    // A ROP program is entered indirectly: a short launcher at its own address
+    // sets SP to the payload and lets the gadget chain continue there.
+    std::vector<uint8_t> launcher;
+    uint32_t launcher_base = 0x8154;
     std::string model;   // "580" or "880"
 };
 
