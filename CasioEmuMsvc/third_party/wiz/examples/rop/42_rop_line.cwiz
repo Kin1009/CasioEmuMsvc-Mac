@@ -1,0 +1,14 @@
+// Working 580 ROP line/text example. Build as the 580 ROP payload target.
+#rop
+#for 580
+#org E9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    line(0, 0, 191, 62);
+    print(0x30, 0x01, "ROP LINE");
+    render();
+}

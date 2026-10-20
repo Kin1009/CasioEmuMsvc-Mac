@@ -12,6 +12,7 @@
 
 #include "build.hpp"
 #include "common.hpp"
+#include "rop.hpp"
 #include "targets.hpp"
 
 namespace wiz {
@@ -200,8 +201,13 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
 
     // ---------------------------------------------------------------- compiler
     try {
-        if (target == "cwapp" || target == "580" || target == "880" || target == "cw" ||
-            target == "cwii") {
+        if (source_is_rop(source)) {
+            const std::string rop_model = target == "880" || target == "cwii" ? "880" : "580";
+            const RopResult result = build_rop(source, rop_model);
+            if (!result.ok)
+                add(out, LintSeverity::Error, 0, 0, "compile", result.error);
+        } else if (target == "cwapp" || target == "580" || target == "880" || target == "cw" ||
+                   target == "cwii") {
             if (cwiz)
                 build_cwiz(source, target, file_name);
             else

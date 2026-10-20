@@ -24,3 +24,20 @@ Build options the embedder may set:
 
 The language itself is documented in the Wiz repository: `README.md`,
 `docs/GUIDE.md`, `docs/API.md`.
+
+## ROP runtime contract
+
+CWiz ROP sources use `#rop`, `#for 580` or `#for 880`, `#org`, and
+`#launcher common`. The 580 common launcher writes the payload at `E9E0`,
+copies it to runtime address `D730`, and enters it from `D180`. The compiler
+uses the RAC/hdcompiler launcher pattern (`FD24`, `setlr_pc`, `pop xr0`,
+`BL memcpy`, `sp = er14`) and inserts `setlr_pc; setsfr` when the source does
+not provide startup setup. This prevents display chains from hanging after a
+successful injection.
+
+For a text chain, the payload must load XR0 with the font/line bytes and a
+NUL-terminated string pointer, call `line_print`, and finish with
+`render.ddd4`. When the 580 common launcher is used, code executes at `D730`
+but the string pool remains at the backup address `E9E0`; pointers must target
+the backup pool. See the upstream Wiz `docs/ROP.md` and the bundled ROP
+examples for the complete byte layout.

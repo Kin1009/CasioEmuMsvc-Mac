@@ -29,7 +29,8 @@
 	CFG_VAR(bool, lowPerformanceMode, false)\
 	CFG_VAR(bool, enableAutoTint, false)\
 	CFG_VAR(ImVec4, seedColor, ImVec4(0.5f, 0.5f, 0.5f, 1.0f))\
-	CFG_VAR(bool, enableDiscordRPC, true)\
+	CFG_VAR(bool, enableDiscordRPC, true)
+	CFG_VAR(bool, enableUpdateChecker, true)\
 	CFG_VAR(int, windowX, SDL_WINDOWPOS_CENTERED)\
 	CFG_VAR(int, windowY, SDL_WINDOWPOS_CENTERED)\
 	CFG_VAR(int, windowW, 1600)\

@@ -183,10 +183,10 @@ static const char ROP_DB_580[] = R"ROPDB(
 2086C basen_base_print
 23DCC smallprint
 08F7C line_print.col_0
-08F7E line_print
+08F80 line_print
 23DC8 printline
 09470 render.e3d4
-0947C render.ddd4
+0947E render.ddd4
 09848 render_bitmap
 09D34 memzero
 26086 reset_routine

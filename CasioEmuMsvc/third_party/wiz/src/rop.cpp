@@ -22,10 +22,14 @@
 //
 //   int counter at [EB40] = 0;
 //
-// The emitter is a C++ port of CasioC's casio-asm (v0): a call is the
-// hdcompiler chain word 0x30300000 + gadget address, `print("s", x, y)`
-// builds an xr0 argument block, and strings are appended to a pool whose
+// The emitter is a C++ port of CasioC's casio-asm (v0): a call is a raw
+// gadget address (or an input-area 0x30300000-prefixed word), `print("s", x,
+// y)` builds an xr0 argument block, and strings are appended to a pool whose
 // addresses are patched in.
+//
+// RAC-compatible ROP startup is inserted when the source does not provide it:
+// setlr; setsfr. This is the exact hdcompiler preamble required before
+// BL-based display routines on the 580.
 
 #include "rop.hpp"
 #include "rop_data.hpp"
@@ -625,6 +629,7 @@ struct Emitter {
     std::vector<std::pair<size_t, std::string>> patches;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
     uint32_t home = 0xE9E0;
+    uint32_t data_home = 0xE9E0;
 
     explicit Emitter(const Db& d) : db(d) {}
 
@@ -650,19 +655,17 @@ struct Emitter {
         return false;
     }
     void call(const std::string& name) {
+        // Keep old Wiz examples source-compatible, but compile the historical
+        // setlr_pc spelling as RAC's working setlr gadget.
+        const std::string lookup_name = lower(name) == "setlr_pc" ? "setlr" : name;
         uint32_t addr = 0; std::string found;
-        if (!find_addr(name, addr, found)) {
+        if (!find_addr(lookup_name, addr, found)) {
             log += "  ; error [E100]: gadget/label " + name + " not found (aliases tried)\n";
             return;
         }
-        // RAC/hdcompiler adds the 0x30300000 key-prefix only for chains
-        // entered directly from the calculator input area.  Main payloads
-        // copied to D730/E330 use the raw gadget address followed by 00 00.
-        uint32_t encoded = addr;
-        auto input = db.data.find("input_range");
-        if (input != db.data.end() && home >= input->second &&
-            home < input->second + 0xC8)
-            encoded += 0x30300000u;
+        // RAC/hdcompiler emits the 30 30 call-class tag for every gadget
+        // call, including payloads that are later copied to D730/E330.
+        const uint32_t encoded = addr + 0x30300000u;
         emit_le(encoded, 4);
         if (lower(found) != lower(name)) log += "  ; call " + name + " -> " + found + "\n";
         else log += "  ; call " + name + "\n";
@@ -753,6 +756,7 @@ struct Emitter {
                     const ExprP& ay = s->args[text_arg == 0 ? 2 : 1];
                     std::vector<uint8_t> enc; std::string err;
                     if (!charmap().encode(text->s, enc, err)) { log += "  ; error: " + err + "\n"; return; }
+                    enc.push_back(0);
                     uint32_t x = eval(ax, log), y = eval(ay, log);
                     call("pop xr0");
                     out.push_back((uint8_t)(x & 0xFF));
@@ -771,6 +775,7 @@ struct Emitter {
                         if (arg->k == Expr::Str) {
                             std::vector<uint8_t> enc; std::string err;
                             if (!charmap().encode(arg->s, enc, err)) { log += "  ; error: " + err + "\n"; continue; }
+                            enc.push_back(0);
                             size_t pos = out.size();
                             out.push_back(0); out.push_back(0);
                             str_pool.push_back({pos, enc});
@@ -847,6 +852,18 @@ struct Emitter {
     RopResult run(const Program& prog) {
         RopResult r;
         home = prog.has_org ? prog.org : 0xE9E0;
+        bool has_lr_setup = false;
+        bool has_sfr_setup = false;
+        for (const auto& f : prog.funcs) {
+            for (const auto& s : f.body) {
+                if (s->k != Stmt::Call) continue;
+                const std::string n = lower(s->name);
+                has_lr_setup = has_lr_setup || n == "setlr_pc" || n == "setlr";
+                has_sfr_setup = has_sfr_setup || n == "setsfr";
+            }
+        }
+        if (!has_lr_setup) call("setlr");
+        if (!has_sfr_setup) call("setsfr");
         for (auto& g : prog.globals) {
             uint32_t a = g.has_addr ? g.addr : alloc_var(g.name);
             alloc[g.name] = a;
@@ -855,17 +872,12 @@ struct Emitter {
         for (auto& f : prog.funcs) {
             log += "func " + f.name + "\n";
             for (auto& s : f.body) stmt(s);
-            if (f.body.empty() || (f.body.back()->k != Stmt::Return && f.body.back()->k != Stmt::Goto)) {
-                std::string end = "rop_end_" + f.name;
-                labels[end] = out.size();
-                jump_label(end, "goto " + end + " (halt)");
-            }
         }
         // append string pool
         for (auto& sp : str_pool) {
             size_t off = out.size();
             out.insert(out.end(), sp.second.begin(), sp.second.end());
-            uint32_t target = home + (uint32_t)off;
+            uint32_t target = data_home + (uint32_t)off;
             out[sp.first] = (uint8_t)(target & 0xFF);
             out[sp.first + 1] = (uint8_t)((target >> 8) & 0xFF);
             log += "  ; str pool -> [" + hex4(target) + "] " + std::to_string(sp.second.size()) + " bytes\n";
@@ -894,7 +906,7 @@ struct LauncherOpts {
     LauncherKind kind = LauncherKind::Common;
     uint32_t base = 0x8154;     // where the launcher bytes are placed
     bool has_base = false;
-    uint32_t length = 3;        // 580 program-size code: 1 short, 2 medium, 3 long
+    uint32_t length = 2;        // RAC 580 launcher size code: 1 short, 2 medium, 3 long
     uint32_t backup = 0;        // 0 = use the payload base (#org)
     uint32_t main = 0xD730;     // 580 address the payload is copied to
     bool has_length = false;
@@ -1030,6 +1042,7 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         Db db;
         db.load(r.model == "880" ? ROP_DB_880 : ROP_DB_580);
         Emitter em(db);
+        em.data_home = common ? backup : org;
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
         // `base` is where the debugger writes the payload.  It is not
@@ -1065,20 +1078,21 @@ RopResult build_rop(const std::string& source, const std::string& model) {
                 emit16(r.launcher, (backup - 2) & 0xFFFF);
                 emit_gadget(r.launcher, 0x75C0, 0x3032);
             } else {
-                // 580 "launcher chung": copy the payload from the injection
-                // address to <main>, then continue the chain there.
+                // RAC's proven 580 launcher chung: set LR, load destination and
+                // source into XR0, BL memcpy, then transfer SP to main-2.
                 r.launcher.push_back(0xFD);
                 r.launcher.push_back(0x24);
                 emit16(r.launcher, 0x3030);
-                emit_gadget(r.launcher, 0x7BDA, 0x3031);              // pop qr0
+                emit_gadget(r.launcher, 0x308D0, 0x3033);              // setlr_pc
+                emit_gadget(r.launcher, 0x17B34, 0x3031);              // pop xr0
+                emit16(r.launcher, main);                             // destination
+                emit16(r.launcher, backup);                           // source
+                emit_gadget(r.launcher, 0x09451, 0x3030);              // BL memcpy
                 r.launcher.push_back(0xFE);                           // size marker
                 r.launcher.push_back((uint8_t)(length & 0xFF));        // 01/02/03
-                emit16(r.launcher, backup);                           // injection
-                emit16(r.launcher, main);                             // execution
+                emit_gadget(r.launcher, 0x10742, 0x3031);              // pop er14
                 emit16(r.launcher, (main - 2) & 0xFFFF);
-                emit_gadget(r.launcher, 0x8932, 0x3031);              // BL memcpy
-                emit16(r.launcher, 0x3030);
-                emit_gadget(r.launcher, 0x1F74, 0x3032);              // sp = er6, pop er8
+                emit_gadget(r.launcher, 0x20D60, 0x3032);              // sp = er14, pop er14
             }
             r.log += "  ; launcher (" + std::string(r.model == "880" ? "880 common" : "580 common") +
                      ") " + std::to_string(r.launcher.size()) + " bytes\n";

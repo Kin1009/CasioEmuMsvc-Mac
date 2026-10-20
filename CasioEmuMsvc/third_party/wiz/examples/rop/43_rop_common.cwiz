@@ -1,0 +1,14 @@
+// Working 580 common-launcher example. Build as the 580 ROP payload target.
+#rop
+#for 580
+#org E9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    print(0x30, 0x01, "COMMON");
+    print(0x30, 0x11, "LAUNCHER");
+    render();
+}
