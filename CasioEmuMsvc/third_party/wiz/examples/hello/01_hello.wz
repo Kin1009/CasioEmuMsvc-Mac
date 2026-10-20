@@ -1,0 +1,8 @@
+# 01_hello - the smallest Wiz program that does something visible.
+# Build: build/wizc examples/hello/01_hello.wz
+
+def main():
+    clear()
+    text(8, 8, "Hello, Wiz!")
+    text(8, 24, "press any key")
+    wait_key()

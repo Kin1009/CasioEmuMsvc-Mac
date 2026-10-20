@@ -1,0 +1,105 @@
+# Pong - the classic two-paddle game, for the ClassWiz LCD.
+# Controls: UP / DOWN move your left-hand paddle. First to 8 points wins.
+# Kept deliberately simple so it reads as a tutorial: no sprites, just fillrect.
+
+const TOP = 8          # rows 0..7 are reserved for the score strip
+const W = 192
+const H = 64
+const PW = 3           # paddle width
+const PH = 14          # paddle height
+const PYMIN = 10       # top of the play area for a paddle
+const PYMAX = 48       # bottom of the play area for a paddle
+const WIN = 8
+
+py = 24                # your paddle y
+ay = 24                # opponent paddle y
+me = 0                 # your score
+you = 0                # opponent score
+bx = 96                # ball x
+by = 32                # ball y
+bdx = 2                # ball x velocity
+bdy = 1                # ball y velocity
+
+
+def reset(dir):
+    # serve a new ball from the centre, travelling towards `dir`
+    global bx, by, bdx, bdy
+    bx = 96
+    by = TOP + 6 + rand(H - TOP - 12)
+    bdx = dir * 2
+    if rand(2) == 0:
+        bdy = 1
+    else:
+        bdy = -1
+
+
+def draw():
+    clear()
+    rect(0, TOP, W, H - TOP)          # field border: top at y=TOP, bottom at y=63
+    fillrect(4, py, PW, PH)           # your paddle
+    fillrect(W - 4 - PW, ay, PW, PH)  # opponent paddle
+    fillrect(bx, by, 3, 3)            # ball
+    num(60, TOP + 2, me)
+    num(120, TOP + 2, you)
+
+
+def win_screen():
+    clear()
+    rect(0, TOP, W, H - TOP)
+    text(72, 29, "YOU WIN!")
+
+
+def main():
+    global py, ay, me, you, bx, by, bdx, bdy
+    srand(7)
+    reset(1)
+    buffered(1)          # draw into the back buffer, show it with flip(): no flicker
+    while True:
+        if key_down(K_UP):
+            py -= 3
+            if py < PYMIN:
+                py = PYMIN
+        if key_down(K_DOWN):
+            py += 3
+            if py > PYMAX:
+                py = PYMAX
+
+        # opponent loosely tracks the ball
+        if ay + PH // 2 < by and ay < PYMAX:
+            ay += 2
+        elif ay + PH // 2 > by + 3 and ay > PYMIN:
+            ay -= 2
+
+        bx += bdx
+        by += bdy
+        if by <= TOP + 1:
+            by = TOP + 1
+            bdy = 0 - bdy
+        if by >= H - 4:
+            by = H - 4
+            bdy = 0 - bdy
+
+        if bx <= 4 + PW:
+            if py <= by + 2 and by <= py + PH:
+                bx = 4 + PW
+                bdx = 0 - bdx
+            else:
+                you += 1
+                reset(1)
+        if bx >= W - 4 - PW - 3:
+            if ay <= by + 2 and by <= ay + PH:
+                bx = W - 4 - PW - 3
+                bdx = 0 - bdx
+            else:
+                me += 1
+                reset(-1)
+
+        if me >= WIN:
+            while True:
+                win_screen()
+                flip()
+                delay(20)
+
+        draw()
+        flip()
+        delay(3)

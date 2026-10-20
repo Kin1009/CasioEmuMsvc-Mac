@@ -1,0 +1,22 @@
+// 06_demo.cwiz - recursion, functions with default arguments, and print().
+//
+//   wizrun examples/cwiz/06_demo.cwiz
+
+int factorial(int n) { if (n <= 1) { return 1; } return n * factorial(n - 1); }
+int fib(int n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }
+int scale(int x, int k = 2) { return x * k; }
+
+void main() {
+    clear();
+
+    print(0, 8, "6! = ", factorial(6));
+    print(0, 16, "fib(12) = ", fib(12));
+    print(0, 24, "scale(7) = ", scale(7));
+    print(0, 32, "scale(7, 10) = ", scale(7, 10));
+    print(0, 40, "abs(-5) = ", abs(-5));
+
+    for (int i = 0; i < 8; i = i + 1) {
+        int d = 12 + i * 6;
+        circle(160, 32, d);
+    }
+}

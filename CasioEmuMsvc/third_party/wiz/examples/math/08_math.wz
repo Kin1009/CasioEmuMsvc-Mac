@@ -1,0 +1,9 @@
+# 06_math - basic arithmetic, clamped ranges, 8 px line grid.
+
+def main():
+    clear()
+    a = 7
+    b = 3
+    print(4, 8, "a = ", a, "  b = ", b)
+    printMini(4, 24, "sum = ", a + b)
+    printMini(4, 40, "prod = ", a * b)

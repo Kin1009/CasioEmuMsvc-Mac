@@ -107,6 +107,30 @@ std::string WizDataDir() {
 #endif
 }
 
+std::string WizExamplesDir() {
+	if (const char* env = std::getenv("WIZ_DATA_DIR")) {
+		if (*env) {
+			std::filesystem::path candidate = std::filesystem::path(env) / "examples";
+			std::error_code ec;
+			if (std::filesystem::is_directory(candidate, ec))
+				return candidate.string();
+		}
+	}
+	if (const char* base = SDL_GetBasePath()) {
+		const std::filesystem::path b(base);
+		const std::filesystem::path candidates[] = {
+			b / "wiz" / "examples",
+			b / ".." / "Resources" / "wiz" / "examples",
+		};
+		for (const auto& c : candidates) {
+			std::error_code ec;
+			if (std::filesystem::is_directory(c, ec))
+				return c.lexically_normal().string();
+		}
+	}
+	return (std::filesystem::path(WizDataDir()) / "examples").string();
+}
+
 // ---------------------------------------------------------------- small text
 std::vector<std::string> SplitLines(const std::string& text) {
 	std::vector<std::string> lines;
@@ -156,7 +180,7 @@ const char* kSampleSource =
 	"\n"
 	"void main() {\n"
 	"    clear();\n"
-	"    print_text(4, 4, \"Hello from CWiz\");\n"
+    "    print(4, 4, \"Hello from CWiz\");\n"
 	"    while (1) {\n"
 	"        if (key_hit(K_AC)) { presses = presses + 1; }\n"
 	"        print(4, 20, \"AC  \", presses);\n"
@@ -722,8 +746,10 @@ private:
 				SaveSource();
 			if (ImGui::MenuItem("Load", "Ctrl+O"))
 				LoadSource();
-			if (ImGui::MenuItem("Examples"))
-				SDL_OpenURL("file:///Users/kin/Desktop/Wiz/examples/");
+			if (ImGui::MenuItem("Examples")) {
+				const std::string examples = WizExamplesDir();
+				SDL_OpenURL(("file://" + examples).c_str());
+			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Build", "F5"))
 				DoBuild(false);

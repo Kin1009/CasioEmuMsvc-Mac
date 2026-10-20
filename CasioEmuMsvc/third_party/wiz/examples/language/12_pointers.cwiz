@@ -1,0 +1,82 @@
+// 08_pointers.cwiz - addresses, pointers and memory.
+//
+//   wizc  examples/cwiz/08_pointers.cwiz
+//   wizrun examples/cwiz/08_pointers.cwiz
+//
+// A pointer is a 16-bit address. Every CWiz variable already has an absolute
+// address, so `&x` is a compile-time constant and `*p` is a plain load or store
+// through a register pair. See GUIDE.md §20.2 for the caveats (RAM only, and
+// locals move during recursion).
+
+#define N 12
+
+int values[N];
+int total;
+
+// An `int *` steps two bytes per element, so `p[i]` and `*(p + i)` are the same
+// thing, and `q - p` counts elements rather than bytes.
+void fill_squares(int *p, int n) {
+    int i;
+    for (i = 0; i < n; i = i + 1) {
+        *p = i * i;
+        p++;                     // move to the next word
+    }
+}
+
+int sum(int *p, int n) {
+    int i;
+    int t = 0;
+    for (i = 0; i < n; i = i + 1) {
+        t = t + p[i];
+    }
+    return t;
+}
+
+// Writing through the argument is how a C-style function "returns" more than
+// one value here.
+void minmax(int *p, int n, int *lo, int *hi) {
+    int i;
+    *lo = p[0];
+    *hi = p[0];
+    for (i = 1; i < n; i = i + 1) {
+        if (p[i] < *lo) { *lo = p[i]; }
+        if (p[i] > *hi) { *hi = p[i]; }
+    }
+}
+
+rom8 char line1[20] = "pointers:";
+char buf[8] = "abcdefg";
+
+void main() {
+    int last;
+    int lo;
+    int hi;
+    int *p;
+    char *c;
+
+    fill_squares(values, N);      // an array decays to a pointer
+    total = sum(values, N);
+    minmax(values, N, &lo, &hi);  // &local, pointers keep the address
+
+    p = values;
+    last = p[N - 1];              // p[i]
+    last = *p;                    // *p is the same as p[0]
+
+    p = &values[5];               // the address of one element
+    *p = 999;                     // write through the pointer
+    p = p + 1;                    // step two bytes
+    p--;
+    last = *p + last;
+
+    c = buf;                      // char * steps one byte
+    c = c + 3;
+    *c = 'X';
+    last = last + buf[3];         // 'X'
+
+    clear();
+    text(0, 0, line1);
+    print(0, 12, "sum 0..", N - 1, " squares = ", total);
+    print(0, 24, "values[5] = ", values[5], " last = ", last);
+    print(0, 36, "min = ", lo, " max = ", hi);
+    print(0, 48, "buf = ", buf[0], " ", buf[3], " (char* wrote X)");
+}

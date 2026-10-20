@@ -263,7 +263,6 @@ int main(int argc, char* argv[]) {
 			logger::Info("[argv][Info] #%i: key '%s' already set\n", ix, key.c_str());
 	}
 	bool headless = argv_map.find("headless") != argv_map.end();
-	std::shared_ptr<casioemu::ModelResourceStore> startup_resources;
 	int sdlFlags = SDL_INIT_VIDEO | SDL_INIT_TIMER;
 	if (SDL_Init(sdlFlags) != 0)
 		PANIC("SDL_Init failed: %s\n", SDL_GetError());
@@ -274,14 +273,16 @@ int main(int argc, char* argv[]) {
 	if (headless && argv_map["model"].empty()) {
 		PANIC("No model path supplied.\n");
 	}
+for (;;) {
+	std::shared_ptr<casioemu::ModelResourceStore> startup_resources;
 	if (argv_map["model"].empty()) {
 		auto selection = sui_loop();
 		argv_map["model"] = std::move(selection.model_path);
 		startup_resources = std::move(selection.resources);
 		if (argv_map["model"].empty()) {
-      DiscordRPC::Shutdown();
+			DiscordRPC::Shutdown();
 			return -1;
-	  }
+		}
 	}
 
 	// After startupui has done its job:
@@ -328,6 +329,7 @@ int main(int argc, char* argv[]) {
 		});
 #endif
 	bool guiCreated = false;
+	bool reopen_startup = false;
 	auto frame_event = SDL_RegisterEvents(1);
 	bool busy = false;
 	bool running = true;
@@ -470,21 +472,15 @@ int main(int argc, char* argv[]) {
 					(!window || eventWindowId != SDL_GetWindowID(window))) {
 					break;
 				}
-#ifdef SINGLE_WINDOW
-				// In single-window builds this is the calculator's only window.
-				// Closing it should not take the debugger down with it: reboot
-				// the model to its main menu and bring the Calculator tab back.
+				// Closing the calculator is a session action, not an application
+				// quit.  Destroy this emulator session and let the outer loop open
+				// the startup selector again.  This also covers SINGLE_WINDOW builds,
+				// where the calculator owns the only SDL window.
 				if (emulator.window && eventWindowId == SDL_GetWindowID(emulator.window)) {
-					emulator.ResetToMainMenu();
-					for (auto* debug_window : windows) {
-						if (debug_window && debug_window->name &&
-							strcmp(debug_window->name, "Calculator") == 0) {
-							debug_window->BringToFront();
-						}
-					}
+					reopen_startup = true;
+					emulator.Shutdown();
 					break;
 				}
-#endif
 				// Let main() unwind normally: the emulator destructor joins the
 				// tick thread before the chipset (and the LCD history mutex it
 				// owns) is destroyed. std::exit(0) skipped that join and could
@@ -553,6 +549,11 @@ int main(int argc, char* argv[]) {
 #ifdef ENABLE_SENTRY
 	sentry_close();
 #endif
-  DiscordRPC::Shutdown();
+	DiscordRPC::Shutdown();
+	if (reopen_startup) {
+		argv_map["model"].clear();
+		continue;
+	}
 	return 0;
+}
 };

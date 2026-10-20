@@ -1,0 +1,44 @@
+// 06_catch.cwiz - reflex game twin.
+
+const int TOP = 8;
+const int W = 192;
+const int H = 64;
+const int S = 6;
+const int D = 4;
+
+int px = 90;
+int py = 36;
+int cx = 0;
+int cy = 0;
+int score = 0;
+
+void new_dot() {
+    cx = 4 + rand(W - 8 - D);
+    cy = TOP + 4 + rand(H - TOP - 8 - D);
+}
+
+int touching() {
+    if (px + S <= cx || cx + D <= px) return 0;
+    if (py + S <= cy || cy + D <= py) return 0;
+    return 1;
+}
+
+void main() {
+    srand(3);
+    new_dot();
+    buffered(1);
+    while (1) {
+        if (key_down(K_LEFT)) px = (px < 3) ? 1 : px - 2;
+        if (key_down(K_RIGHT)) px = (px > W - S - 2) ? W - S - 1 : px + 2;
+        if (key_down(K_UP)) py = (py < TOP + 3) ? TOP + 1 : py - 2;
+        if (key_down(K_DOWN)) py = (py > H - S - 2) ? H - S - 1 : py + 2;
+        if (touching()) { score += 1; new_dot(); }
+        clear();
+        rect(0, TOP, W, H - TOP);
+        fillrect(px, py, S, S);
+        rect(cx, cy, D, D);
+        print(4, TOP + 3, "Score ", score);
+        flip();
+        delay(4);
+    }
+}

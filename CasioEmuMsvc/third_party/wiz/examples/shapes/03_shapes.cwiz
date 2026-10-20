@@ -1,0 +1,15 @@
+// 03_shapes.cwiz - drawing library with 8 px line spacing.
+// Build: build/wizc examples/shapes/03_shapes.cwiz
+
+void main() {
+    clear();
+    rect(4, 4, 60, 30);
+    fillrect(70, 4, 40, 14);
+    circle(140, 26, 18);
+    disc(170, 26, 10);
+    line(4, 56, 188, 40);
+    sprite(4, 36, 16, 8, sprite_data);
+    text(70, 48, "shapes");
+}
+
+rom8 char sprite_data[16] = "\x3C\x3C\x66\x66\xC3\xC3\xC3\xC3\xFF\xFF\xC3\xC3\xC3\xC3\xC3\xC3";

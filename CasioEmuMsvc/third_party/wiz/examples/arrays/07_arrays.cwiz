@@ -1,0 +1,20 @@
+// 05_arrays.cwiz - RAM arrays with 8 px spacing.
+
+const int N = 32;
+int values[N];
+rom int squares[11] = {0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100};
+rom8 char title[20] = "CWiz arrays";
+int total;
+
+void main() {
+    int i;
+    for (i = 0; i <= 10; i = i + 1) values[i] = squares[i];
+    total = 0;
+    for (i = 0; i <= 10; i = i + 1) total = total + values[i];
+    clear();
+    text(0, 8, title);
+    text(0, 16, "sum 0..10:");
+    print(0, 24, total);
+    text(0, 32, "values[7] =");
+    num(80, 32, values[7]);
+}

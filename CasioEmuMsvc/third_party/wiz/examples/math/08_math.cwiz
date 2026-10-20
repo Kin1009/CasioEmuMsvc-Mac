@@ -1,0 +1,10 @@
+// 06_math.cwiz - arithmetic demo.
+
+void main() {
+    int a = 7;
+    int b = 3;
+    clear();
+    print(4, 8, "a = ", a, "  b = ", b);
+    printMini(4, 24, "sum = ", a + b);
+    printMini(4, 40, "prod = ", a * b);
+}

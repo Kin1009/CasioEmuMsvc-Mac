@@ -1,0 +1,10 @@
+// 02_text_demo.cwiz - showcase print vs printMini.
+// Build: build/wizc examples/text/02_text_demo.cwiz
+
+void main() {
+    clear();
+    print(4, 8, "CW MONO");
+    print(4, 24, "Score: 99");
+    printMini(4, 40, "MINI TEXT");
+    printMini(4, 56, "Hello!");
+}

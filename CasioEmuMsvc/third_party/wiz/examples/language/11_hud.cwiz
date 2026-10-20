@@ -1,0 +1,25 @@
+// 07_hud.cwiz - a small include file for 07_preproc.cwiz.
+//
+// This file is NOT a program: it has no main(). It is pulled in with
+// #include "07_hud.cwiz" from 07_preproc.cwiz, and #pragma once keeps the
+// preprocessor from inlining it twice.
+
+#pragma once
+
+#define HUD_LINES 3
+
+// A function-like macro. The parentheses around every use of `i` matter: the
+// argument is text, so hud_line(i + 1) must not turn into a precedence trap.
+#define HUD_X(i) ((i) * 4)
+
+// A macro whose body is only valid on one machine is still fine inside a
+// conditional - the branch that is not taken is never expanded.
+#if defined(__CW__)
+#define HUD_TAG "580"
+#elif defined(__CWII__)
+#define HUD_TAG "880"
+#else
+#define HUD_TAG "?"
+#endif
+
+rom8 char hud_title[20] = "CWiz directives";

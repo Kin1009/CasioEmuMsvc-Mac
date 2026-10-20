@@ -394,12 +394,18 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
         target_compile_definitions(${TARGET_NAME} PRIVATE
             CASIOEMU_WIZ_DATA_DIR="${WIZ_TOOLCHAIN_DIR}/data")
         if(APPLE AND BUILD_EXECUTABLE)
-            # Ship the data files (runtime.asm, boot templates) inside the bundle.
+            # Ship the complete Wiz data and example library inside the bundle.
+            # Keep the standalone repository self-contained: examples live next
+            # to the embedded toolchain and are copied into the app bundle.
+            set(WIZ_EXAMPLES_DIR "${WIZ_TOOLCHAIN_DIR}/examples")
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_directory
                     "${WIZ_TOOLCHAIN_DIR}/data"
                     "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz"
-                COMMENT "Copying the Wiz toolchain data files into the bundle")
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${WIZ_EXAMPLES_DIR}"
+                    "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
+                COMMENT "Copying the Wiz toolchain data and examples into the bundle")
         endif()
     else()
         message(STATUS "Wiz toolchain sources are missing; building without them")

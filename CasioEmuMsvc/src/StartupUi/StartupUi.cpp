@@ -1398,7 +1398,18 @@ namespace casioemu {
 			float tableHeight = 300.0f;
 			float buttonWidth = 200.0f;
 #endif
-			ImGui::Begin("StartupUI.Title"_lc);
+			// This is the startup application's client area.  Do not put it in a
+			// dock node or leave it as a second child window inside the SDL window.
+			// The SDL window itself is the startup window.
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+			ImGui::Begin("StartupUI.Title"_lc, nullptr,
+				ImGuiWindowFlags_NoTitleBar |
+				ImGuiWindowFlags_NoResize |
+				ImGuiWindowFlags_NoMove |
+				ImGuiWindowFlags_NoCollapse |
+				ImGuiWindowFlags_NoSavedSettings |
+				ImGuiWindowFlags_NoDocking);
 #ifdef __ANDROID__
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padding, padding));
 			ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(padding * 1.5f, padding));
@@ -2041,8 +2052,6 @@ StartupSelection sui_loop() {
 			ImGui_ImplSDLRenderer2_NewFrame();
 			ImGui_ImplSDL2_NewFrame();
 			ImGui::NewFrame();
-			ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
-			ImGui::SetNextWindowDockID(ImGui::GetCurrentContext()->DockContext.Nodes.Data[0].key, ImGuiCond_FirstUseEver); // TODO: ????????
 			ui.Render();
 			// static std::once_flag size_once;
 			// std::call_once(size_once, []() {
