@@ -173,6 +173,8 @@ const TargetChoice kTargets[] = {
 	{"880  fx-880BTG", "cwii", "cwiz"},
 	{"580  fx-580VN X", "cw", "cwiz"},
 	{"580 app (firmware patch)", "cwapp", "cwiz"},
+	{"580 ROP (payload)", "cwrop", "cwiz"},
+	{"880 ROP (payload)", "cwiirop", "cwiz"},
 };
 
 const char* kLanguages[] = {"Auto (by file name)", "Wiz (.wz)", "CWiz (.cwiz)"};
@@ -308,7 +310,22 @@ private:
 		return stock_rom_path_;
 	}
 
-	const wiz::Target& Target() const { return wiz::get_target(TargetName()); }
+	// ROP entries are output kinds, not new hardware: they compile for the same
+	// 580/880 chip but emit a gadget chain instead of a ROM image.
+	bool IsRopTarget() const {
+		const std::string name = TargetName();
+		return name == "cwrop" || name == "cwiirop";
+	}
+	const char* HardwareTarget() const {
+		const std::string name = TargetName();
+		if (name == "cwrop")
+			return "cw";
+		if (name == "cwiirop")
+			return "cwii";
+		return TargetName();
+	}
+
+	const wiz::Target& Target() const { return wiz::get_target(HardwareTarget()); }
 
 	std::string EffectiveLang() const {
 		if (lang_idx_ == 1)
@@ -343,7 +360,7 @@ private:
 	bool Compile(const std::string& src, wiz::BuildResult& out, Diag& diag,
 				 const std::string& forced_target = std::string()) {
 		try {
-			const std::string target = forced_target.empty() ? TargetName() : forced_target;
+			const std::string target = forced_target.empty() ? HardwareTarget() : forced_target;
 			if (EffectiveLang() == "cwiz")
 				out = wiz::build_cwiz(src, target, file_name_);
 			else
@@ -370,9 +387,10 @@ private:
 		wiz::set_data_dir(WizDataDir());
 
 		const std::string src = editor_.GetText();
-		// A `#rop` source is a gadget-chain payload, not a ROM image: compile it
-		// with the ROP backend and hand the bytes to the debugger.
-		if (wiz::source_is_rop(src)) {
+		// A ROP target (or a `#rop` source) is a gadget-chain payload, not a ROM
+		// image: compile it with the ROP backend and hand the bytes to the
+		// debugger.
+		if (IsRopTarget() || wiz::source_is_rop(src)) {
 			DoRopBuild(src, run_after);
 			return;
 		}
@@ -416,7 +434,7 @@ private:
 		built_ok_ = false;
 		editor_.SetErrorMarkers({});
 
-		const std::string model = std::string(TargetName()) == "cwii" ? "880" : "580";
+		const std::string model = std::string(HardwareTarget()) == "cwii" ? "880" : "580";
 		AddLog(Sev::Note, wiz::fmt("building for rop (%s)", ModelLabel(model == "880" ? "cwii" : "cw")));
 
 		wiz::RopResult rop = wiz::build_rop(src, model);
@@ -494,9 +512,8 @@ private:
 		editor_.SetErrorMarkers({});
 		wiz::set_data_dir(WizDataDir());
 
-		const std::string target = TargetName();
 		const std::vector<wiz::LintDiagnostic> results =
-			wiz::lint_source(editor_.GetText(), file_name_, target);
+			wiz::lint_source(editor_.GetText(), file_name_, HardwareTarget());
 
 		TextEditor::ErrorMarkers markers;
 		int errors = 0, warnings = 0, notes = 0;
