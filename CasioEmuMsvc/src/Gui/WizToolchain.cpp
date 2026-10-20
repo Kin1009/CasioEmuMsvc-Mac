@@ -15,6 +15,7 @@
 
 #include "Chipset/Chipset.hpp"
 #include "Chipset/ePSCpu.h"
+#include "Ext/SysDialog.h"
 
 #include <SDL.h>
 
@@ -24,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -564,7 +566,7 @@ private:
 	// Patch the stock ROM in memory, write the result as a session image and
 	// reboot the model on it.  The stock file is never modified: the emulator
 	// runs a duplicate, and "Stock ROM" switches back.
-	void PatchCurrentROM() {
+	void PatchCurrentROM(bool in_place = false, const std::string& base_file = std::string()) {
 		if (!m_emu)
 			return;
 		if (!Is580()) {
@@ -592,16 +594,22 @@ private:
 		}
 
 		const std::string stock = StockRomPath();
+		const std::string base = base_file.empty() ? stock : base_file;
 		std::vector<uint8_t> rom;
 		try {
-			rom = m_emu->ReadModelResource(stock);
+			if (base_file.empty()) {
+				rom = m_emu->ReadModelResource(base);
+			} else {
+				std::ifstream in(base_file, std::ios::binary);
+				rom.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+			}
 		} catch (const std::exception& e) {
-			AddLog(Sev::Error, std::string("cannot read the stock ROM: ") + e.what());
+			AddLog(Sev::Error, std::string("cannot read the ROM: ") + e.what());
 			return;
 		}
 		if (rom.size() != 262144) {
-			AddLog(Sev::Error, wiz::fmt("the stock ROM (%s) is %zu bytes, not a 256 KB fx-580VN X dump",
-									  stock.c_str(), rom.size()));
+			AddLog(Sev::Error, wiz::fmt("the ROM (%s) is %zu bytes, not a 256 KB fx-580VN X dump",
+									  base.c_str(), rom.size()));
 			return;
 		}
 
@@ -629,8 +637,21 @@ private:
 			return;
 		}
 
-		const std::string name = wiz::fmt("wiz/rom-patched-%c.bin", "123456789ABC"[patch_slot - 1]);
+		std::string name;
+		if (in_place)
+			name = stock;
+		else if (base_file.empty())
+			name = wiz::fmt("wiz/rom-patched-%c.bin", "123456789ABC"[patch_slot - 1]);
+		else {
+			std::string stem = std::filesystem::path(base_file).stem().string();
+			if (stem.empty())
+				stem = "custom";
+			name = "wiz/rom-" + stem + ".bin";
+		}
 		try {
+			// Keep the untouched base once, so "Stock ROM" can always recover.
+			if (in_place && !m_emu->HasModelResource(stock + ".orig"))
+				m_emu->WriteModelSessionResource(stock + ".orig", rom);
 			m_emu->WriteModelSessionResource(name, report.rom);
 		} catch (const std::exception& e) {
 			AddLog(Sev::Error, std::string("cannot write the patched image: ") + e.what());
@@ -656,8 +677,10 @@ private:
 		}
 
 		stock_rom_ = stock;
-		AddLog(Sev::Note, wiz::fmt("patched slot %c (%d bytes) & rebooted",
-								  "123456789ABC"[patch_slot - 1], report.code_size));
+		AddLog(Sev::Note, wiz::fmt("patched slot %c (%d bytes) & rebooted%s",
+								  "123456789ABC"[patch_slot - 1], report.code_size,
+								  in_place ? " (original ROM overwritten, backup at .orig)"
+										   : (base_file.empty() ? "" : " (custom ROM copy)")));
 	}
 
 	std::string Stem() const {
@@ -745,6 +768,13 @@ private:
 		if (stock.empty()) {
 			AddLog(Sev::Error, "no stock ROM path is known");
 			return;
+		}
+		// An in-place patch overwrote the stock resource; put the saved copy back.
+		if (m_emu->HasModelResource(stock + ".orig")) {
+			try {
+				m_emu->WriteModelSessionResource(stock, m_emu->ReadModelResource(stock + ".orig"));
+			} catch (const std::exception&) {
+			}
 		}
 		const bool was_paused = m_emu->GetPaused();
 		m_emu->SetPaused(true);
@@ -854,6 +884,12 @@ private:
 		if (ImGui::BeginMenu("Calculator")) {
 			if (ImGui::MenuItem("Patch ROM (slot)"))
 				PatchCurrentROM();
+			if (ImGui::MenuItem("Patch original ROM", nullptr, false, Is580()))
+				PatchCurrentROM(true);
+			if (ImGui::MenuItem("Custom ROM...", nullptr, false, Is580()))
+				SystemDialogs::OpenFileDialog([this](std::filesystem::path f) {
+					PatchCurrentROM(false, f.string());
+				});
 			if (ImGui::MenuItem("Stock ROM", nullptr, false, !StockRomPath().empty()))
 				RestoreStockRom();
 			ImGui::EndMenu();
