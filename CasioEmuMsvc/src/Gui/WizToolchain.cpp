@@ -414,6 +414,7 @@ private:
 			return;
 		}
 
+		rop_launcher_hex_.clear();
 		last_build_ = std::move(result);
 		last_build_source_ = src;
 		built_ok_ = true;
@@ -465,9 +466,11 @@ private:
 		rop_base_ = rop.base;
 		rop_launcher_ = std::move(rop.launcher);
 		rop_launcher_base_ = rop.launcher_base;
+		rop_launcher_hex_ = rop.launcher_hex;
 		AddLog(Sev::Note, wiz::fmt("payload %zu bytes @ %04X, launcher %zu bytes @ %04X",
 								   rop_bytes_.size(), rop_base_, rop_launcher_.size(),
 								   rop_launcher_base_));
+		AddLog(Sev::Note, "launcher: " + rop_launcher_hex_);
 
 		std::string directory;
 		if (m_emu)
@@ -982,6 +985,16 @@ private:
 		ImGui::SameLine();
 		if (ImGui::Button("Load"))
 			LoadSource();
+		if (!rop_launcher_hex_.empty()) {
+			ImGui::SameLine();
+			if (ImGui::Button("Copy launcher"))
+				ImGui::SetClipboardText(rop_launcher_hex_.c_str());
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+				ImGui::BeginTooltip();
+				ImGui::TextDisabled("Copy the %zu-byte launcher hex", rop_launcher_.size());
+				ImGui::EndTooltip();
+			}
+		}
 
 		if (Is580()) {
 			ImGui::SameLine();
@@ -1125,6 +1138,7 @@ private:
 	uint32_t rop_base_ = 0;
 	std::vector<uint8_t> rop_launcher_;
 	uint32_t rop_launcher_base_ = 0;
+	std::string rop_launcher_hex_;
 	std::string last_build_source_;
 	std::string stock_rom_;
 	std::string stock_rom_path_;

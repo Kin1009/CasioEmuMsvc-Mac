@@ -1,10 +1,22 @@
 // rop.cpp - CWiz-syntax front-end for the ROP (gadget chain) backend.
 //
-// The language is CWiz's C-like syntax with three extra directives:
+// The language is CWiz's C-like syntax with several extra directives:
 //
 //   #rop                 selects the ROP backend
 //   #for 580 | 880       picks the gadget database
 //   #org E9E0            payload base address (the `opn` of hdcompiler)
+//   #launcher common     the "launcher chung": copies the payload to its
+//                        execution address and jumps into it
+//   #launcher simple     the 10-byte pop er14 / sp = er14 stub
+//   #launcher 8154       the simple stub placed at an explicit address
+//
+// `#launcher common` accepts three optional values:
+//
+//   #launcher common <length> <backup> <main>
+//
+// length is short | medium | long (FE01/FE02/FE03), backup is where the
+// payload is injected (defaults to #org) and main is the address it is copied
+// to before it runs (580 defaults to D730).
 //
 // and fixed-address globals:
 //
@@ -868,8 +880,36 @@ struct Emitter {
     }
 };
 
+enum class LauncherKind { Common, Simple };
+
+struct LauncherOpts {
+    LauncherKind kind = LauncherKind::Common;
+    uint32_t base = 0x8154;     // where the launcher bytes are placed
+    uint32_t length = 3;        // 580 program-size code: 1 short, 2 medium, 3 long
+    uint32_t backup = 0;        // 0 = use the payload base (#org)
+    uint32_t main = 0xD730;     // 580 address the payload is copied to
+    bool has_length = false;
+    bool has_backup = false;
+    bool has_main = false;
+};
+
+uint32_t parse_number(std::string a) {
+    if (!a.empty() && a.front() == '[') a.erase(a.begin());
+    if (!a.empty() && a.back() == ']') a.pop_back();
+    if (a.rfind("0x", 0) == 0 || a.rfind("0X", 0) == 0) a = a.substr(2);
+    return (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
+}
+
+uint32_t parse_length(std::string a) {
+    const std::string l = lower(a);
+    if (l == "short" || l == "small") return 1;
+    if (l == "medium" || l == "mid") return 2;
+    if (l == "long" || l == "large") return 3;
+    return parse_number(a) & 0xFF;
+}
+
 std::string strip_directives(std::string src, std::string& model, uint32_t& org, bool& has_org,
-                             uint32_t& launcher, bool& has_launcher) {
+                             LauncherOpts& lopts) {
     std::string out;
     std::istringstream in(src);
     std::string line;
@@ -886,21 +926,51 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                 else if (ml == "880" || ml == "880btg") model = "880";
             } else if (dlow == "org") {
                 std::string a; ls >> a;
-                if (!a.empty() && a[0] == '[') a = a.substr(1);
-                if (!a.empty() && a.back() == ']') a.pop_back();
-                org = (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
+                org = parse_number(a);
                 has_org = true;
             } else if (dlow == "launcher") {
-                std::string a; ls >> a;
-                if (!a.empty() && a[0] == '[') a = a.substr(1);
-                if (!a.empty() && a.back() == ']') a.pop_back();
-                launcher = (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
-                has_launcher = true;
+                std::string a;
+                if (!(ls >> a)) {
+                    lopts.kind = LauncherKind::Common;
+                } else {
+                    const std::string al = lower(a);
+                    if (al == "common" || al == "shared" || al == "chung") {
+                        lopts.kind = LauncherKind::Common;
+                    } else if (al == "simple" || al == "stub") {
+                        lopts.kind = LauncherKind::Simple;
+                    } else {
+                        // Backwards compatible: `#launcher 8154` places the
+                        // simple stub at that address.
+                        lopts.kind = LauncherKind::Simple;
+                        lopts.base = parse_number(a);
+                    }
+                }
+                if (lopts.kind == LauncherKind::Common) {
+                    std::string v;
+                    if (ls >> v) { lopts.length = parse_length(v); lopts.has_length = true; }
+                    if (ls >> v) { lopts.backup = parse_number(v); lopts.has_backup = true; }
+                    if (ls >> v) { lopts.main = parse_number(v); lopts.has_main = true; }
+                } else {
+                    std::string v;
+                    if (ls >> v) lopts.base = parse_number(v);
+                }
             }
             out += "\n";
             continue;
         }
         out += line + "\n";
+    }
+    return out;
+}
+
+std::string hex_bytes(const std::vector<uint8_t>& bytes) {
+    static const char* kDigits = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size() * 3);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i) out.push_back(' ');
+        out.push_back(kDigits[bytes[i] >> 4]);
+        out.push_back(kDigits[bytes[i] & 0x0F]);
     }
     return out;
 }
@@ -924,9 +994,8 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         std::string m = r.model;
         uint32_t org = 0xE9E0;
         bool has_org = false;
-        uint32_t launcher = 0x8154;
-        bool has_launcher = false;
-        std::string body = strip_directives(source, m, org, has_org, launcher, has_launcher);
+        LauncherOpts lopts;
+        std::string body = strip_directives(source, m, org, has_org, lopts);
         r.model = m;
         Program prog = Parser(lex(body)).parse();
         if (prog.model.empty()) prog.model = m;
@@ -942,26 +1011,65 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
         r.base = prog.has_org ? prog.org : 0xE9E0;
-        // Launcher: pop er14 / addr = payload - 2 / sp = er14, pop er14.
-        // The last gadget pops the word at payload-2 into er14 and leaves SP
-        // exactly at the payload, so the gadget chain continues there.
-        r.launcher_base = launcher;
-        const uint32_t pop_er14 = 0x15C78;      // pop er14
-        const uint32_t set_sp = 0x20D60;        // sp = er14,pop er14
-        auto emit_call = [](std::vector<uint8_t>& out, uint32_t addr) {
-            uint32_t word = addr + 0x30300000u;
-            for (int i = 0; i < 4; ++i) { out.push_back((uint8_t)(word & 0xFF)); word >>= 8; }
+
+        auto emit16 = [](std::vector<uint8_t>& out, uint32_t v) {
+            out.push_back((uint8_t)(v & 0xFF));
+            out.push_back((uint8_t)((v >> 8) & 0xFF));
         };
-        emit_call(r.launcher, pop_er14);
-        const uint32_t entry = r.base >= 2 ? r.base - 2 : r.base;
-        r.launcher.push_back((uint8_t)(entry & 0xFF));
-        r.launcher.push_back((uint8_t)((entry >> 8) & 0xFF));
-        emit_call(r.launcher, set_sp);
+        // Chain words are: 16-bit gadget address followed by a 16-bit class
+        // tag (0x3030 call, 0x3031 pop, 0x3032 stack/flow).
+        auto emit_gadget = [](std::vector<uint8_t>& out, uint32_t addr, uint32_t tag) {
+            out.push_back((uint8_t)(addr & 0xFF));
+            out.push_back((uint8_t)((addr >> 8) & 0xFF));
+            out.push_back((uint8_t)(tag & 0xFF));
+            out.push_back((uint8_t)((tag >> 8) & 0xFF));
+        };
+
+        r.launcher_base = lopts.base;
+        const uint32_t backup = lopts.has_backup ? lopts.backup : r.base;
+        const uint32_t main = lopts.has_main ? lopts.main : 0xD730;
+        const uint32_t length = lopts.has_length ? lopts.length : 3;
+
+        if (lopts.kind == LauncherKind::Common) {
+            if (r.model == "880") {
+                // 880: fd 26 <payload-2> <sp gadget>
+                r.launcher.push_back(0xFD);
+                r.launcher.push_back(0x26);
+                emit16(r.launcher, (backup - 2) & 0xFFFF);
+                emit_gadget(r.launcher, 0x75C0, 0x3032);
+            } else {
+                // 580 "launcher chung": copy the payload from the injection
+                // address to <main>, then continue the chain there.
+                r.launcher.push_back(0xFD);
+                r.launcher.push_back(0x24);
+                emit16(r.launcher, 0x3030);
+                emit_gadget(r.launcher, 0x7BDA, 0x3031);              // pop qr0
+                r.launcher.push_back(0xFE);                           // size marker
+                r.launcher.push_back((uint8_t)(length & 0xFF));        // 01/02/03
+                emit16(r.launcher, backup);                           // injection
+                emit16(r.launcher, main);                             // execution
+                emit16(r.launcher, (main - 2) & 0xFFFF);
+                emit_gadget(r.launcher, 0x8932, 0x3031);              // BL memcpy
+                emit16(r.launcher, 0x3030);
+                emit_gadget(r.launcher, 0x1F74, 0x3032);              // sp = er6, pop er8
+            }
+            r.log += "  ; launcher (" + std::string(r.model == "880" ? "880 common" : "580 common") +
+                     ") " + std::to_string(r.launcher.size()) + " bytes\n";
+        } else {
+            // Simple 10-byte stub: pop er14 / payload-2 / sp = er14, pop er14.
+            const uint32_t pop_er14 = 0x15C78;
+            const uint32_t set_sp = 0x20D60;
+            emit_gadget(r.launcher, pop_er14 & 0xFFFF, 0x3031);
+            emit16(r.launcher, (r.base >= 2 ? r.base - 2 : r.base) & 0xFFFF);
+            emit_gadget(r.launcher, set_sp & 0xFFFF, 0x3032);
+            r.log += "  ; launcher (simple) " + std::to_string(r.launcher.size()) + " bytes\n";
+        }
+        r.launcher_hex = hex_bytes(r.launcher);
         char hb[16];
         std::snprintf(hb, sizeof hb, "%04X", r.launcher_base);
-        std::snprintf(hb + 8, sizeof hb - 8, "%04X", r.base);
-        r.log += std::string("  ; launcher @ ") + hb + " -> [" + (hb + 8) + "]\n";
-        (void)has_launcher;
+        char pb[16];
+        std::snprintf(pb, sizeof pb, "%04X", r.base);
+        r.log += std::string("  ; launcher @ ") + hb + " -> [" + pb + "]\n";
         return r;
     } catch (const std::exception& e) {
         RopResult bad;

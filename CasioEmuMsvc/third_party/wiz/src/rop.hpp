@@ -17,6 +17,7 @@ struct RopResult {
     // sets SP to the payload and lets the gadget chain continue there.
     std::vector<uint8_t> launcher;
     uint32_t launcher_base = 0x8154;
+    std::string launcher_hex;   // space-separated bytes, for pasting into a program
     std::string model;   // "580" or "880"
 };
 
