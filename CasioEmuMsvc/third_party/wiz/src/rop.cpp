@@ -655,7 +655,15 @@ struct Emitter {
             log += "  ; error [E100]: gadget/label " + name + " not found (aliases tried)\n";
             return;
         }
-        emit_le(addr + 0x30300000u, 4);
+        // RAC/hdcompiler adds the 0x30300000 key-prefix only for chains
+        // entered directly from the calculator input area.  Main payloads
+        // copied to D730/E330 use the raw gadget address followed by 00 00.
+        uint32_t encoded = addr;
+        auto input = db.data.find("input_range");
+        if (input != db.data.end() && home >= input->second &&
+            home < input->second + 0xC8)
+            encoded += 0x30300000u;
+        emit_le(encoded, 4);
         if (lower(found) != lower(name)) log += "  ; call " + name + " -> " + found + "\n";
         else log += "  ; call " + name + "\n";
     }
