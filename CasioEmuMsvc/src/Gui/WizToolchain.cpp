@@ -1069,15 +1069,14 @@ private:
 
 	void HandleShortcuts() {
 		const ImGuiIO& io = ImGui::GetIO();
-		if (io.WantTextInput)
-			return;
+		const bool mod = io.ConfigMacOSXBehaviors ? (io.KeySuper || io.KeyCtrl) : io.KeyCtrl;
 		if (ImGui::IsKeyPressed(ImGuiKey_F5))
-			DoBuild(io.KeyCtrl);
-		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L))
+			DoBuild(mod);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_L))
 			RunLint();
-		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_S))
 			SaveSource();
-		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_O))
 			LoadSource();
 	}
 

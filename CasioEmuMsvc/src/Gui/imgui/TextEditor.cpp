@@ -698,8 +698,10 @@ void TextEditor::HandleKeyboardInputs()
 {
 	ImGuiIO& io = ImGui::GetIO();
 	auto shift = io.KeyShift;
-	auto ctrl = io.ConfigMacOSXBehaviors ? io.KeySuper : io.KeyCtrl;
-	auto alt = io.ConfigMacOSXBehaviors ? io.KeyCtrl : io.KeyAlt;
+	// Accept both Cmd and Ctrl on macOS: Cmd is the system convention, Ctrl is
+	// what people coming from Windows/Linux try first.
+	auto ctrl = io.ConfigMacOSXBehaviors ? (io.KeySuper || io.KeyCtrl) : io.KeyCtrl;
+	auto alt = io.KeyAlt;
 
 	if (ImGui::IsWindowFocused())
 	{
@@ -778,8 +780,10 @@ void TextEditor::HandleMouseInputs()
 {
 	ImGuiIO& io = ImGui::GetIO();
 	auto shift = io.KeyShift;
-	auto ctrl = io.ConfigMacOSXBehaviors ? io.KeySuper : io.KeyCtrl;
-	auto alt = io.ConfigMacOSXBehaviors ? io.KeyCtrl : io.KeyAlt;
+	// Accept both Cmd and Ctrl on macOS: Cmd is the system convention, Ctrl is
+	// what people coming from Windows/Linux try first.
+	auto ctrl = io.ConfigMacOSXBehaviors ? (io.KeySuper || io.KeyCtrl) : io.KeyCtrl;
+	auto alt = io.KeyAlt;
 
 	if (ImGui::IsWindowHovered())
 	{
