@@ -14,6 +14,7 @@
 #include "WizToolchain.h"
 
 #include "Chipset/Chipset.hpp"
+#include "Chipset/ePSCpu.h"
 
 #include <SDL.h>
 
@@ -24,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -32,10 +34,12 @@
 #include "cpre.hpp"
 #include "lint.hpp"
 #include "patch.hpp"
+#include "rop.hpp"
 #include "targets.hpp"
 #include "version.hpp"
 #include "wiz.hpp"
 #include "imgui/TextEditor.h"
+#include "Ui.hpp"
 
 namespace {
 
@@ -276,6 +280,13 @@ private:
 	bool Is580() const {
 		return m_emu && m_emu->ModelDefinition.model_name.find("580") != std::string::npos;
 	}
+	static const char* ModelLabel(const std::string& target) {
+		if (target == "cwii")
+			return "fx-880BTG";
+		if (target == "cwapp")
+			return "fx-580VN X app";
+		return "fx-580VN X";
+	}
 
 	// The ROM that shipped with the model.  Build & Run / Patch replace
 	// ModelDefinition.rom_path with a session image, so remember the stock one
@@ -357,18 +368,22 @@ private:
 		wiz::set_data_dir(WizDataDir());
 
 		const std::string src = editor_.GetText();
+		// A `#rop` source is a gadget-chain payload, not a ROM image: compile it
+		// with the ROP backend and hand the bytes to the debugger.
+		if (wiz::source_is_rop(src)) {
+			DoRopBuild(src, run_after);
+			return;
+		}
 		// `wizc` auto-detects a #cwapp section.  The debugger must do the same,
 		// otherwise selecting "580 fx-580VN X" builds a plain 1 KB program and
 		// then tries to load it over the firmware.
 		if (TargetName() == std::string("cw") && EffectiveLang() == "cwiz" && SourceHasCwapp(src)) {
 			target_idx_ = 2;
-			AddLog(Sev::Note, "source has #cwapp; building the fx-580VN X firmware app");
+			AddLog(Sev::Note, "source has #cwapp; switching to the firmware app target");
 		}
 		const std::string target = TargetName();
-		const wiz::Target& tg = wiz::get_target(target);
 
-		AddLog(Sev::Note, wiz::fmt("building for %s (%s %s, %s)", target.c_str(), tg.chip.c_str(),
-								   tg.core.c_str(), EffectiveLang().c_str()));
+		AddLog(Sev::Note, wiz::fmt("building for %s (%s)", target.c_str(), ModelLabel(target)));
 		Diag diag;
 		wiz::BuildResult result;
 		if (!Compile(src, result, diag)) {
@@ -376,7 +391,6 @@ private:
 			if (diag.line > 0)
 				editor_.SetErrorMarkers({ {diag.line, diag.msg} });
 			AddLog(Sev::Error, wiz::fmt("%s: %s", SevName(diag.sev), diag.msg.c_str()));
-			AddLog(Sev::Note, "the diagnostics panel lists the problems");
 			return;
 		}
 
@@ -391,6 +405,76 @@ private:
 				PatchCurrentROM();
 			else
 				LoadIntoEmulator();
+		}
+	}
+
+	void DoRopBuild(const std::string& src, bool run_after) {
+		log_.clear();
+		diags_.clear();
+		built_ok_ = false;
+		editor_.SetErrorMarkers({});
+
+		const std::string model = std::string(TargetName()) == "cwii" ? "880" : "580";
+		AddLog(Sev::Note, wiz::fmt("building for rop (%s)", ModelLabel(model == "880" ? "cwii" : "cw")));
+
+		wiz::RopResult rop = wiz::build_rop(src, model);
+		std::istringstream lines(rop.log);
+		std::string line;
+		while (std::getline(lines, line)) {
+			const size_t start = line.find_first_not_of(" \t;");
+			if (start == std::string::npos)
+				continue;
+			const std::string text = line.substr(start);
+			if (text.rfind("error", 0) == 0)
+				AddLog(Sev::Error, text);
+			else if (text.rfind("warning", 0) == 0)
+				AddLog(Sev::Warning, text);
+		}
+		if (!rop.ok) {
+			AddLog(Sev::Error, rop.error);
+			diags_.push_back({Sev::Error, -1, -1, rop.error});
+			return;
+		}
+		if (rop.bytes.empty()) {
+			AddLog(Sev::Error, "the payload is empty");
+			return;
+		}
+
+		built_ok_ = true;
+		rop_bytes_ = std::move(rop.bytes);
+		rop_base_ = rop.base;
+		AddLog(Sev::Note, wiz::fmt("ROP %zu bytes @ %04X", rop_bytes_.size(), rop_base_));
+
+		std::string directory;
+		if (m_emu)
+			directory = m_emu->GetModelFilePath("wiz");
+		if (directory.empty())
+			directory = "wiz";
+		std::error_code ec;
+		std::filesystem::create_directories(directory, ec);
+		bin_path_ = (std::filesystem::path(directory) / (Stem() + ".bin")).string();
+		WriteFile(bin_path_, std::string(rop_bytes_.begin(), rop_bytes_.end()));
+		AddLog(Sev::Note, wiz::fmt("wrote %s", bin_path_.c_str()));
+
+		if (run_after)
+			InjectRop();
+	}
+
+	void InjectRop() {
+		if (!m_emu || !me_mmu || rop_bytes_.empty()) {
+			AddLog(Sev::Error, "the debugger is not attached");
+			return;
+		}
+		for (size_t i = 0; i < rop_bytes_.size(); ++i)
+			me_mmu->WriteData(rop_base_ + static_cast<uint32_t>(i), rop_bytes_[i], 0);
+		AddLog(Sev::Note, wiz::fmt("injected into RAM at %04X", rop_base_));
+
+		if (auto* cpu = m_emu->chipset.epscpu) {
+			if (rop_base_ >= 0x8000 && rop_base_ < 0x10000) {
+				cpu->SetPC(rop_base_);
+				m_emu->SetPaused(false);
+				AddLog(Sev::Note, "PC set to the payload; running");
+			}
 		}
 	}
 
@@ -440,7 +524,7 @@ private:
 		AddLog(Sev::Note, wiz::fmt("ROM %zu / %d bytes   RAM %d / %d bytes   %zu variable(s)",
 								   last_build_.rom.size(), tg.rom_limit, ram_used, ram_total,
 								   last_build_.variables.size()));
-		AddLog(Sev::Note, wiz::fmt("wrote %s (and %s)", bin_path_.c_str(), asm_path_.c_str()));
+		AddLog(Sev::Note, wiz::fmt("wrote %s & %s", bin_path_.c_str(), asm_path_.c_str()));
 	}
 
 	// Write source, listing and image next to the model, so an outer toolchain
@@ -565,10 +649,8 @@ private:
 		}
 
 		stock_rom_ = stock;
-		AddLog(Sev::Note, wiz::fmt("patched slot %c (%d bytes of program) and rebooted on a duplicate ROM",
+		AddLog(Sev::Note, wiz::fmt("patched slot %c (%d bytes) & rebooted",
 								  "123456789ABC"[patch_slot - 1], report.code_size));
-		AddLog(Sev::Note, "the stock ROM is untouched (at " + stock + "); \"Stock ROM\" switches back");
-		AddLog(Sev::Warning, "not verified on real hardware - use the emulator first");
 	}
 
 	std::string Stem() const {
@@ -646,7 +728,7 @@ private:
 			return;
 		}
 		stock_rom_ = stock;
-		AddLog(Sev::Note, "loaded into the running model (the stock ROM is still at " + stock + ")");
+		AddLog(Sev::Note, "loaded into the running model");
 	}
 
 	void RestoreStockRom() {
@@ -980,6 +1062,8 @@ private:
 	std::vector<std::pair<Sev, std::string>> log_;
 	std::vector<Diag> diags_;
 	wiz::BuildResult last_build_;
+	std::vector<uint8_t> rop_bytes_;
+	uint32_t rop_base_ = 0;
 	std::string last_build_source_;
 	std::string stock_rom_;
 	std::string stock_rom_path_;

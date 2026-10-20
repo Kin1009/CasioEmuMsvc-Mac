@@ -158,9 +158,19 @@ private:
 			}
 		}
 		if (!fit_) {
+			// The slider moves in whole pixels of its own track, so some exact
+			// values (2.00x) can be skipped.  Keep two decimals and let the
+			// buttons step precisely.
+			ImGui::SameLine();
+			if (ImGui::SmallButton("-##zoom"))
+				zoom_ = std::max(0.25f, std::round((zoom_ - 0.01f) * 100.0f) / 100.0f);
 			ImGui::SameLine();
 			ImGui::SetNextItemWidth(110.0f);
-			ImGui::SliderFloat("##zoom", &zoom_, 0.25f, 8.0f, "%.2fx");
+			if (ImGui::SliderFloat("##zoom", &zoom_, 0.25f, 8.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp))
+				zoom_ = std::round(zoom_ * 100.0f) / 100.0f;
+			ImGui::SameLine();
+			if (ImGui::SmallButton("+##zoom"))
+				zoom_ = std::min(8.0f, std::round((zoom_ + 0.01f) * 100.0f) / 100.0f);
 		}
 		ImGui::SameLine();
 		ImGui::TextDisabled("%dx%d", width, height);
