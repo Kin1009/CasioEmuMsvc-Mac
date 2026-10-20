@@ -1004,13 +1004,15 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             if (pm.find("880") != std::string::npos) r.model = "880";
             else if (pm.find("580") != std::string::npos) r.model = "580";
         }
-        if (has_org) { prog.org = org; prog.has_org = true; }
+        if (!has_org) org = (m == "880") ? 0xE330 : 0xE9E0;
+        prog.org = org;
+        prog.has_org = true;
         Db db;
         db.load(r.model == "880" ? ROP_DB_880 : ROP_DB_580);
         Emitter em(db);
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
-        r.base = prog.has_org ? prog.org : 0xE9E0;
+        r.base = prog.org;
 
         auto emit16 = [](std::vector<uint8_t>& out, uint32_t v) {
             out.push_back((uint8_t)(v & 0xFF));
