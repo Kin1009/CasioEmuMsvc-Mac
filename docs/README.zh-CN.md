@@ -188,5 +188,5 @@ git submodule update --init --recursive
 ## 💬 交流与反馈
 
 - 💬 **Discord 社区**: [discord.gg/NM39VPdJTf](https://discord.gg/NM39VPdJTf)
-- 📧 **邮件**: [telecomadm1919@gmail.com](mailto:telecomadm1919@gmail.com)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/telecomadm1145/CasioEmuMsvc/issues)
+- 📧 **邮件**: [khoi.nguyenminh100912@gmail.com](mailto:khoi.nguyenminh100912@gmail.com)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/Kin1009/CasioEmuMsvc-Mac/issues)

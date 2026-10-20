@@ -8,7 +8,7 @@
 //   #launcher common     the "launcher chung": copies the payload to its
 //                        execution address and jumps into it
 //   #launcher simple     the 10-byte pop er14 / sp = er14 stub
-//   #launcher 8154       the simple stub placed at an explicit address
+//   #launcher <address>  the simple stub placed at an explicit address
 //
 // `#launcher common` accepts three optional values:
 //
@@ -1034,9 +1034,7 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         if (lopts.has_base)
             r.launcher_base = lopts.base;
         else
-            r.launcher_base = (lopts.kind == LauncherKind::Common)
-                                  ? (r.model == "880" ? 0x9268u : 0xD180u)
-                                  : 0x8154u;
+            r.launcher_base = (r.model == "880" ? 0x9268u : 0xD180u);
         const uint32_t backup = lopts.has_backup ? lopts.backup : r.base;
         const uint32_t main = lopts.has_main ? lopts.main : 0xD730;
         const uint32_t length = lopts.has_length ? lopts.length : 3;

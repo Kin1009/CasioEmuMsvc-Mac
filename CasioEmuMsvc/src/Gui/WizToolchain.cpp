@@ -499,7 +499,9 @@ private:
 				me_mmu->WriteData(base + static_cast<uint32_t>(i), bytes[i], 0);
 			for (size_t i = 0; i < bytes.size(); ++i) {
 				if (me_mmu->ReadData(base + static_cast<uint32_t>(i), false) != bytes[i]) {
-					AddLog(Sev::Error, wiz::fmt("%s write failed @ %04X+%zu", what, base, i));
+					AddLog(Sev::Error, wiz::fmt("%s write failed @ %04X+%zu (not RAM)", what, base, i));
+					if (std::strcmp(what, "launcher") == 0)
+						AddLog(Sev::Error, "use #launcher common (580 D180, 880 9268)");
 					return false;
 				}
 			}
