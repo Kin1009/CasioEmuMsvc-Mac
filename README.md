@@ -30,7 +30,7 @@
 - 📸 **Snapshot system** with branching save-states and screen previews
 - 🔌 **Plugin API** — MCP (AI-driven), Python, Cw2tools, and custom plugins
 - 🚀 **Multi-platform** — Windows (MSVC), macOS, Linux (CMake/Ninja), Android (Gradle/NDK)
-- 🎨 **Theme manager**, localization, and Discord Rich Presence
+- 🎨 **Theme manager**, localization, Discord Rich Presence, and auto-update checker
 
 ---
 
@@ -49,5 +49,5 @@ After running this command, you can simply double-click the app to open it norma
 ## 💬 Community
 
 - 💬 **Discord**: [discord.gg/NM39VPdJTf](https://discord.gg/NM39VPdJTf)
-- 📧 **Email**: [khoi.nguyenminh100912@gmail.com](mailto:khoi.nguyenminh100912@gmail.com)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/Kin1009/CasioEmuMsvc-Mac/issues)
+- 📧 **Email**: [telecomadm1919@gmail.com](mailto:telecomadm1919@gmail.com)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/telecomadm1145/CasioEmuMsvc/issues)

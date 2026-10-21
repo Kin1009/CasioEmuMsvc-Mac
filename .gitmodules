@@ -7,9 +7,6 @@
 [submodule "SDL_image"]
 	path = SDL_image
 	url = https://github.com/libsdl-org/SDL_image.git
-[submodule "discord-rpc"]
-	path = discord-rpc
-	url = https://github.com/hieuxyz00/discord-rpc.git
 [submodule "sentry-native"]
 	path = sentry-native
 	url = https://github.com/getsentry/sentry-native.git
