@@ -409,3 +409,6 @@ app/src/main/assets/
 /AppIcon.iconset/
 # ImGui layout state: the app rewrites this next to its binary at run time.
 /CasioEmuMsvc.app/Contents/MacOS/imgui.ini
+
+# universal build output
+/build-universal/

@@ -1,2 +1,0 @@
-/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/SDL/CMakeFiles/CheckOBJC/CMakeFiles/edit_cache.dir
-/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/SDL/CMakeFiles/CheckOBJC/CMakeFiles/rebuild_cache.dir
