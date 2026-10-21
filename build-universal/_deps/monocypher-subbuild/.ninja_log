@@ -1,0 +1,21 @@
+# ninja log v7
+1	370	1792496534874127323	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-mkdir	66ed5463a0c59eaf
+1	370	1792496534874127323	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-mkdir	66ed5463a0c59eaf
+371	21221	1792496555716728716	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-download	84a776b24f0f7f7c
+371	21221	1792496555716728716	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-download	84a776b24f0f7f7c
+21221	25541	1792496555727052902	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-update	ec54e3ef901a4779
+21221	25541	1792496555727052902	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-update	ec54e3ef901a4779
+25541	28062	1792496562558709064	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-patch	be8ca02e01a5f56a
+25541	28062	1792496562558709064	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-patch	be8ca02e01a5f56a
+28062	31723	1792496566219868428	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-configure	3f04249efe82d08a
+28062	31723	1792496566219868428	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-configure	3f04249efe82d08a
+31723	34465	1792496568961774583	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-build	db54a8a4e46dfa4a
+31723	34465	1792496568961774583	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-build	db54a8a4e46dfa4a
+34466	37258	1792496571750955445	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-install	a248025e53d5946d
+34466	37258	1792496571750955445	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-install	a248025e53d5946d
+37259	39958	1792496574454052944	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-test	fa8729cd84fe875d
+37259	39958	1792496574454052944	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-test	fa8729cd84fe875d
+39959	43062	1792496577558282125	CMakeFiles/monocypher-populate-complete	4e7d81368ee36d72
+39959	43062	1792496577558282125	monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-done	4e7d81368ee36d72
+39959	43062	1792496577558282125	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/CMakeFiles/monocypher-populate-complete	4e7d81368ee36d72
+39959	43062	1792496577558282125	/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-done	4e7d81368ee36d72

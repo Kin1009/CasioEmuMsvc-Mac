@@ -1,0 +1,14 @@
+# Target labels
+ monocypher-populate
+# Source files and their labels
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/CMakeFiles/monocypher-populate
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/CMakeFiles/monocypher-populate.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/CMakeFiles/monocypher-populate-complete.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-build.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-configure.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-download.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-install.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-mkdir.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-patch.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-test.rule
+/Users/kin/Desktop/CasioEmuMsvc-Mac-stable/build-universal/_deps/monocypher-subbuild/monocypher-populate-prefix/src/monocypher-populate-stamp/monocypher-populate-update.rule

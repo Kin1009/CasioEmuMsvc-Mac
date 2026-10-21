@@ -494,6 +494,10 @@ private:
 			AddLog(Sev::Error, "the debugger is not attached");
 			return;
 		}
+		// Clear the injection area first (flappy-bird / repeated-run fix)
+		for (uint32_t z = rop_base_; z < rop_base_ + 256; ++z) me_mmu->WriteData(z, 0, 0);
+		for (uint32_t z = rop_launcher_base_; z < rop_launcher_base_ + 32; ++z) me_mmu->WriteData(z, 0, 0);
+
 		auto write_block = [this](uint32_t base, const std::vector<uint8_t>& bytes, const char* what) {
 			for (size_t i = 0; i < bytes.size(); ++i)
 				me_mmu->WriteData(base + static_cast<uint32_t>(i), bytes[i], 0);
@@ -513,7 +517,7 @@ private:
 		if (!write_block(rop_launcher_base_, rop_launcher_, "launcher"))
 			return;
 		if (rop_launcher_base_ == 0xD180 || rop_launcher_base_ == 0x9268)
-			AddLog(Sev::Note, "press EXE in Program mode to run the launcher");
+			AddLog(Sev::Note, "press LEFT then EXE");
 	}
 
 	// The linter is the same engine as the `wizlint` command-line tool: the
