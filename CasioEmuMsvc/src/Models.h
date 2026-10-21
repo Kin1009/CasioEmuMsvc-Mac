@@ -5,9 +5,9 @@
 
 namespace casioemu {
 	inline constexpr size_t GetRamBaseAddr(HardwareId hid) {
-		if (hid == HW_EPS6800)
+		if (IsEpsFamily(hid))
 			return 0;
-		if (hid == HW_TI)
+		if (hid == HW_TI_MATH_PRINT)
 			return 0xB000;
 		if (hid == HW_SOLARII)
 			return 0xE000;
@@ -15,9 +15,9 @@ namespace casioemu {
 																					   : 0x9000;
 	}
 	inline constexpr size_t GetRamSize(HardwareId hid) {
-		if (hid == HW_EPS6800)
+		if (IsEpsFamily(hid))
 			return 64 * 128;
-		if (hid == HW_TI)
+		if (hid == HW_TI_MATH_PRINT)
 			return 0xF000 - 0xB000;
 		if (hid == HW_SOLARII)
 			return 0x1000;
@@ -25,7 +25,7 @@ namespace casioemu {
 																					   : 0x6000;
 	}
 	inline constexpr size_t GetRamEditorSize(HardwareId hid) {
-		return hid == HW_SOLARII ? GetRamSize(hid) : 0x10000 - GetRamBaseAddr(hid);
+		return hid == HW_SOLARII || IsEpsFamily(hid) ? GetRamSize(hid) : 0x10000 - GetRamBaseAddr(hid);
 	}
 #define ColorA ImColor{40, 150, 40, 255}
 #define ColorB ImColor{40, 40, 150, 255}
@@ -545,7 +545,7 @@ namespace casioemu {
 			};
 #endif
 		}
-		case HardwareId::HW_TI: {
+		case HardwareId::HW_TI_MATH_PRINT: {
 			return {
 				{0xC33C, 300, SColor, "Input Area"},
 			};
@@ -556,12 +556,14 @@ namespace casioemu {
 #undef SColor
 	}
 	inline constexpr size_t GetInputAreaOffset(HardwareId hid) {
-		if (hid == HW_TI)
+		if (hid == HW_TI_MATH_PRINT)
 			return 0xC33C;
 		return hid == HW_ES_PLUS ? 0x8154 : hid == HW_CLASSWIZ ? 0xD180
 															   : 0x9268;
 	}
 	inline constexpr bool HasInputArea(HardwareId hid) {
+		if (IsEpsSegmentLcd(hid))
+			return false;
 		return hid != HW_SOLARII;
 	}
 	inline constexpr size_t GetInputAreaSize(HardwareId hid) {
@@ -571,9 +573,9 @@ namespace casioemu {
 		return GetInputAreaOffset(hid) + GetInputAreaOffset(hid);
 	}
 	inline constexpr size_t GetModeOffset(HardwareId hid) {
-		if (hid == HW_TI)
+		if (hid == HW_TI_MATH_PRINT)
 			return 0xB000;
-		if (hid == HW_EPS6800)
+		if (IsEpsFamily(hid))
 			return 0;
 		return hid == HW_ES_PLUS ? 0x80F9 : hid == HW_CLASSWIZ ? 0xD111
 															   : 0x91A1;
@@ -587,7 +589,7 @@ namespace casioemu {
 															   : 0xBA68;
 	}
 	inline constexpr size_t GetCursorOffset(HardwareId hid) {
-		if (hid == HW_TI)
+		if (hid == HW_TI_MATH_PRINT)
 			return 0xf000;
 		return hid == HW_ES_PLUS ? 0x8110 : hid == HW_CLASSWIZ ? 0xD155
 															   : 0x91E5;
@@ -618,7 +620,10 @@ namespace casioemu {
 		if (hid == HW_FX_5800P) {
 			return {};
 		}
-		if (hid == HW_TI) {
+		if (IsEpsFamily(hid)) {
+			return {};
+		}
+		if (hid == HW_TI_MATH_PRINT) {
 			return 0x8;
 		}
 		if (hid == HW_ES_PLUS) {
@@ -684,7 +689,7 @@ namespace casioemu {
 				{0x96DC, "z"},
 				{0x96EA, "PreAns"}};
 		}
-		else if (hid == HW_TI) {
+		else if (hid == HW_TI_MATH_PRINT) {
 			// size_t i = 0;
 			// return {
 			//	{0xE490 + 16 * i++, "x"},
@@ -698,7 +703,7 @@ namespace casioemu {
 			//	{0xE490 + 16 * i++, "ans"},
 			// }; // Invalid
 		}
-		else if (hid == HW_EPS6800)
+		else if (IsEpsFamily(hid))
 			;
 		else {
 			PANIC("HardwareId");

@@ -9,6 +9,7 @@
 #include "SysDialog.h"
 #include "U8Disas.h"
 #include "ePSCpu.h"
+#include "Chipset/T4xCore.hpp"
 #ifdef CASIOEMU_CORE_WEB
 #include "WebDebuggerGui.h"
 #endif
@@ -72,7 +73,7 @@ static bool IsImmediate(std::string_view word) {
 	return true;
 }
 
-static void RenderSyntaxHighlight(const char* text, bool is_label) {
+static void RenderSyntaxHighlight(const char* text, bool is_label, bool eps6800) {
 	if (is_label) {
 		// 标号整体着色为高亮黄
 		ImGui::TextColored(~ImVec4(1.0f, 1.0f, 0.4f, 1.0f), "%s", text);
@@ -100,7 +101,7 @@ static void RenderSyntaxHighlight(const char* text, bool is_label) {
 	std::vector<Token> tokens;
 
 	// 前13个字符在你的 U8Disas 生成规则里，必然是机器码的 Hex 区域（固定填充空格）
-	size_t hex_len = std::min<size_t>(13, sv.length());
+	size_t hex_len = eps6800 ? 0 : std::min<size_t>(13, sv.length());
 	if (hex_len > 0) {
 		tokens.push_back({col_hex, sv.substr(0, hex_len)});
 		sv.remove_prefix(hex_len);
@@ -178,6 +179,35 @@ CodeViewer::~CodeViewer() {
 	}
 }
 
+static bool Eps6800BranchTarget(casioemu::ePSCPU& cpu, uint32_t pc, uint16_t opcode, uint32_t& target) {
+	const uint16_t group = opcode & 0xff00u;
+	if ((opcode & 0xfff0u) == 0x0020u || (opcode & 0xfff0u) == 0x0030u) {
+		target = (static_cast<uint32_t>(opcode & 0x000fu) << 16) | cpu.ReadCodeWord(pc + 1);
+		return true;
+	}
+	if ((opcode & 0xf000u) == 0x3000u) {
+		target = opcode & 0x0fffu;
+		return true;
+	}
+	if ((opcode & 0xe000u) == 0xc000u || (opcode & 0xe000u) == 0xe000u) {
+		target = ((pc + 1) & ~0x1fffu) | (opcode & 0x1fffu);
+		return true;
+	}
+	if ((opcode & 0xf800u) == 0x5000u || (opcode & 0xf800u) == 0x5800u) {
+		target = ((pc + 1) & ~0xffffu) | cpu.ReadCodeWord(pc + 1);
+		return true;
+	}
+	switch (group) {
+	case 0x4700u: case 0x4800u: case 0x4900u:
+	case 0x5500u: case 0x5600u: case 0x5700u:
+	case 0x6000u:
+		target = ((pc + 1) & ~0xffffu) | cpu.ReadCodeWord(pc + 1);
+		return true;
+	default:
+		return false;
+	}
+}
+
 void CodeViewer::SetupHooks() {
 	SetupHook(on_instruction,
 		[&](casioemu::CPU& cup, InstructionEventArgs& iea) {
@@ -227,46 +257,90 @@ void CodeViewer::PrepareDisasm() {
 	is_loaded.store(false, std::memory_order_release);
 	auto build_disasm = [this]() {
 		std::vector<CodeElem> new_codes;
-		if (m_emu->chipset.epscpu) {
-			std::vector<CodeElem> finals;
-			finals.reserve(0x10000);
-
-#define READ_WORD_BE(ptr)         \
-	((uint32_t)(ptr)[0] << 16 |   \
-		(uint32_t)(ptr)[1] << 8 | \
-		(uint32_t)(ptr)[2] << 4 | \
-		(uint32_t)(ptr)[3])
-
-			auto ptr = m_emu->chipset.rom_data.data();
-			for (size_t i = 0; i < 0x10000; i++) {
-				if (i == 0)
-					finals.push_back(CodeElem{(uint32_t)(i), "reset:", 1, 0});
-				if (i == 2)
-					finals.push_back(CodeElem{(uint32_t)(i), "paint:", 1, 0});
-				if (i == 4)
-					finals.push_back(CodeElem{(uint32_t)(i), "reserved:", 1, 0});
-				if (i == 6)
-					finals.push_back(CodeElem{(uint32_t)(i), "reserved:", 1, 0});
-				if (i == 8)
-					finals.push_back(CodeElem{(uint32_t)(i), "tmrxi:", 1, 0});
-				if (i == 0xa)
-					finals.push_back(CodeElem{(uint32_t)(i), "reserved:", 1, 0});
+		if (auto* core = m_emu->chipset.t4x) {
+			for (size_t i = 0; i < m_emu->chipset.rom_data.size() / 2; ++i) {
+				CodeElem ce{};
+				ce.offset = static_cast<uint32_t>(i);
+				auto text = core->Disassemble(static_cast<uint16_t>(i));
+				uint16_t target;
+				if (core->BranchTarget(static_cast<uint16_t>(i), target)) ce.xref_operand = target;
+				std::snprintf(ce.srcbuf, sizeof(ce.srcbuf), "%s", text.c_str());
+				new_codes.push_back(ce);
+			}
+			max_row = static_cast<int>(new_codes.size());
+			codes = std::move(new_codes);
+			is_loaded.store(true, std::memory_order_release);
+		}
+		else if (m_emu->chipset.epscpu) {
+			const size_t rom_word_count = m_emu->chipset.epscpu->RomWordCount();
+			std::map<uint32_t, std::string> labels = {
+				{0x0000u, "reset"}, {0x0002u, "paint"}, {0x0004u, "reserved_04"},
+				{0x0006u, "reserved_06"}, {0x0008u, "tmrxi"}, {0x000au, "reserved_0a"},
+				{0x0010u, "test"}};
+			for (const auto& label : g_labels) {
+				if (label.address < rom_word_count)
+					labels[label.address] = label.name;
+			}
+			std::set<uint32_t> branch_targets;
+			new_codes.reserve(rom_word_count);
+			// The legacy disassembler consumes one byte per nibble. Build that view
+			// from logical words so both packed and unpacked model ROMs are safe.
+			std::vector<char> disasm_rom((rom_word_count + 1) * 4, 0);
+			for (uint32_t address = 0; address <= rom_word_count; ++address) {
+				const uint16_t word = m_emu->chipset.epscpu->ReadCodeWord(address);
+				const size_t offset = static_cast<size_t>(address) * 4;
+				disasm_rom[offset] = static_cast<char>((word >> 12) & 0x0f);
+				disasm_rom[offset + 1] = static_cast<char>((word >> 8) & 0x0f);
+				disasm_rom[offset + 2] = static_cast<char>((word >> 4) & 0x0f);
+				disasm_rom[offset + 3] = static_cast<char>(word & 0x0f);
+			}
+			for (size_t i = 0; i < rom_word_count; i++) {
 				if (i >= 0xc && i <= 0xf) {
-					finals.push_back(CodeElem{(uint32_t)(i), "<Code Option>", 0, 0});
+					new_codes.push_back(CodeElem{(uint32_t)(i), "<Code Option>", 0, 0});
 					continue;
 				}
-				if (i == 0x10)
-					finals.push_back(CodeElem{(uint32_t)(i), "test:", 1, 0});
 				CodeElem ce{};
 				ce.offset = i;
 				bool l = false;
-				auto str = decodeeps((char*)ptr, i, l);
+				auto str = decodeeps(disasm_rom.data(), i, l);
 				strncpy(ce.srcbuf, str, sizeof(ce.srcbuf) - 1);
 				ce.srcbuf[sizeof(ce.srcbuf) - 1] = '\0';
 				free(str);
-				finals.push_back(ce);
+				uint32_t target = 0;
+				if (Eps6800BranchTarget(*m_emu->chipset.epscpu, static_cast<uint32_t>(i),
+						m_emu->chipset.epscpu->ReadCodeWord(static_cast<uint32_t>(i)), target) && target < rom_word_count) {
+					ce.xref_operand = static_cast<int>(target);
+					branch_targets.insert(target);
+				}
+				new_codes.push_back(ce);
 				if (l)
 					i++;
+			}
+			for (uint32_t target : branch_targets) {
+				if (!labels.contains(target)) {
+					char name[24]{};
+					snprintf(name, sizeof(name), "loc_%04X", target);
+					labels.emplace(target, name);
+				}
+			}
+			std::vector<CodeElem> finals;
+			finals.reserve(new_codes.size() + labels.size());
+			for (auto ce : new_codes) {
+				if (auto it = labels.find(ce.offset); it != labels.end()) {
+					CodeElem label{};
+					label.offset = ce.offset;
+					label.is_label = true;
+					snprintf(label.srcbuf, sizeof(label.srcbuf), "%s:", it->second.c_str());
+					finals.push_back(label);
+				}
+				if (ce.xref_operand) {
+					if (auto it = labels.find(static_cast<uint32_t>(ce.xref_operand)); it != labels.end()) {
+						const size_t used = strnlen(ce.srcbuf, sizeof(ce.srcbuf));
+						if (used < sizeof(ce.srcbuf) - 4)
+							snprintf(ce.srcbuf + used, sizeof(ce.srcbuf) - used, " ; %s", it->second.c_str());
+					}
+				}
+				finals.push_back(ce);
 			}
 			new_codes = std::move(finals);
 			printf("[UI][Info] Finished!\n");
@@ -424,7 +498,7 @@ void CodeViewer::ExternalBP() {
 
 void CodeViewer::DrawContent() {
 	ImGuiListClipper c;
-	c.Begin(max_row, ImGui::GetTextLineHeight());
+	c.Begin(max_row, ImGui::GetTextLineHeightWithSpacing());
 	hovered_line = -1;
 	while (c.Step()) {
 		first_col = c.DisplayStart;
@@ -440,14 +514,37 @@ void CodeViewer::DrawContent() {
 					if (bb) {
 						ImGui::Text("   ");
 						if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-							break_points[line_i] = 1;
+							AddBreakpoint(e.offset);
 						}
 					}
 					else {
 						if (it->second == 1) {
 							ImGui::TextColored(~ImVec4(1.0, 0.0, 0.0, 1.0), " x ");
 							if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-								break_points.erase(line_i);
+								RemoveBreakpoint(e.offset);
+							}
+							if (m_emu->chipset.epscpu || m_emu->chipset.t4x) {
+								const std::string popup_id = "##eps_exec_bp_" + std::to_string(line_i);
+								if (ImGui::BeginPopupContextItem(popup_id.c_str())) {
+									auto details = m_emu->chipset.t4x ? m_emu->chipset.t4x->ExecutionBreakpointDetails() : m_emu->chipset.epscpu->ExecutionBreakpointDetails();
+									auto detail = std::find_if(details.begin(), details.end(), [&](const auto& item) {
+										return item.address == e.offset;
+									});
+									if (detail != details.end()) {
+										bool changed = ImGui::Checkbox("Enabled", &detail->enabled);
+										int skip_count = static_cast<int>(std::min<uint64_t>(detail->skip_count, 0x7fffffffu));
+										if (ImGui::InputInt("Skip count", &skip_count, 1, 10)) {
+											detail->skip_count = static_cast<uint64_t>(std::max(skip_count, 0));
+											changed = true;
+										}
+										ImGui::Text("Hit count: %llu", static_cast<unsigned long long>(detail->hit_count));
+										if (changed) {
+											if (m_emu->chipset.t4x) m_emu->chipset.t4x->ConfigureExecutionBreakpoint(*detail);
+											else m_emu->chipset.epscpu->ConfigureExecutionBreakpoint(*detail);
+										}
+									}
+									ImGui::EndPopup();
+								}
 							}
 						}
 						else {
@@ -478,6 +575,8 @@ void CodeViewer::DrawContent() {
 
 			// 绘制占位背景，响应用户点击逻辑（但不使用默认文本显示）
 			if (ImGui::Selectable("##sel", selected, ImGuiSelectableFlags_AllowItemOverlap)) {
+				if (!e.is_label)
+					selected_addr = e.offset;
 				if (e.xref_operand)
 					JumpTo(e.xref_operand);
 			}
@@ -487,13 +586,13 @@ void CodeViewer::DrawContent() {
 
 			// 光标回到本行的原点位置，准备绘制分色的文本内容
 			ImGui::SetCursorPos(pos);
-			RenderSyntaxHighlight(e.srcbuf, e.is_label);
+			RenderSyntaxHighlight(e.srcbuf, e.is_label, m_emu->chipset.epscpu != nullptr);
 
 			ImGui::PopID();
 		}
 	}
 	if (need_roll) {
-		float v = (float)cur_col / max_row * ImGui::GetScrollMaxY(); // 谁写的j7代码啊，跳着都吐了
+		float v = cur_col * ImGui::GetTextLineHeightWithSpacing();
 		auto origv = ImGui::GetScrollY();
 		if (v < origv || (v - origv > (ImGui::GetWindowHeight() - 200))) {
 			ImGui::SetScrollY(v);
@@ -564,8 +663,20 @@ void CodeViewer::Search(bool next) {
 		// Format from PrepareDisasm: "%04X         " or "%04X %04X    " followed by instruction
 		// Hex part is roughly first 13 characters.
 
-		std::string hex_part = haystack.substr(0, 13);
-		std::string instr_part = (haystack.length() > 13) ? haystack.substr(13) : "";
+		std::string hex_part;
+		std::string instr_part;
+		if (m_emu->chipset.epscpu) {
+			if (search_mode == 0) {
+				char word[5]{};
+				std::snprintf(word, sizeof(word), "%04X", m_emu->chipset.epscpu->ReadCodeWord(ce.offset));
+				hex_part = word;
+			}
+			instr_part = haystack;
+		}
+		else {
+			hex_part = haystack.substr(0, 13);
+			instr_part = (haystack.length() > 13) ? haystack.substr(13) : "";
+		}
 
 		// Clean hex part
 		std::string hex_clean = "";
@@ -631,14 +742,16 @@ void CodeViewer::ExportDisassembly() {
 	});
 #endif
 }
-static void ExtractMnemAndOps(const char* src, std::string& mnem, std::string& ops) {
+static void ExtractMnemAndOps(const char* src, std::string& mnem, std::string& ops, bool eps6800) {
 	std::string_view sv(src);
 	mnem.clear();
 	ops.clear();
 
-	if (sv.length() <= 13)
-		return; // 跳过前面固定长度的 Hex 区域
-	sv.remove_prefix(13);
+	if (!eps6800) {
+		if (sv.length() <= 13)
+			return; // 跳过前面固定长度的 Hex 区域
+		sv.remove_prefix(13);
+	}
 	while (!sv.empty() && std::isspace(sv.front()))
 		sv.remove_prefix(1);
 
@@ -834,7 +947,6 @@ static std::string GetInstructionHelp(const std::string& mnem, const std::string
 
 	return help;
 }
-static int s(bool x) { return x ? 1 : 0; }
 void CodeViewer::RenderCore() {
 #ifdef CASIOEMU_CORE_WEB
 	if (!disasm_requested) {
@@ -850,8 +962,23 @@ void CodeViewer::RenderCore() {
 		ImGui::Text("%c %s", spinner[idx], "CodeViewer.Loading"_lc);
 		return;
 	}
-	if (m_emu->chipset.epscpu) {
-		pc_cache = m_emu->chipset.epscpu->PC() >> 1;
+	if (auto* core = m_emu->chipset.t4x) {
+		// Keep the GUI mirror on this thread, including changes made while loading.
+		break_points.clear();
+		for (const auto address : core->ExecutionBreakpoints()) {
+			auto it = std::lower_bound(codes.begin(), codes.end(), address,
+				[](const CodeElem& line, uint32_t value) { return line.offset < value; });
+			if (it != codes.end() && it->offset == address)
+				break_points[static_cast<int>(it - codes.begin())] = 1;
+		}
+		const auto pc = core->ProgramCounter();
+		const bool paused = m_emu->GetPaused();
+		if (paused && (!core_was_paused || pc_cache != pc)) JumpTo(pc);
+		pc_cache = pc;
+		core_was_paused = paused;
+	}
+	else if (m_emu->chipset.epscpu) {
+		pc_cache = m_emu->chipset.epscpu->ProgramCounter();
 	}
 	ImVec2 sz;
 	h *= 10;
@@ -878,7 +1005,10 @@ void CodeViewer::RenderCore() {
 	}
 	ImGui::TextUnformatted(header.c_str());
 	ImGui::Separator();
-	ImGui::BeginChild("##scrolling", ImVec2(0, -30 * (1 + s(search_activated) + s(help_activated) * 1.6))); // Adjusted to make space for bottom controls
+	const float bottom_height = (2 + int(search_activated)) * ImGui::GetFrameHeightWithSpacing()
+		+ (help_activated ? 45.0f + ImGui::GetStyle().ItemSpacing.y : 0.0f)
+		+ ImGui::GetStyle().ItemSpacing.y;
+	ImGui::BeginChild("##scrolling", ImVec2(0, -bottom_height));
 	DrawContent();
 	ImGui::EndChild();
 	// ImGui::SameLine(); // ？？？
@@ -894,24 +1024,25 @@ void CodeViewer::RenderCore() {
 		// F5: Continue / Pause
 		if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
 			if (m_emu->GetPaused()) {
-				m_emu->SetPaused(false);
+				RequestContinue();
 			}
 			else {
 				trace_bp = 0;
 				stepping = false;
+				if (m_emu->chipset.epscpu)
+					m_emu->chipset.epscpu->CancelDebugRun();
 				m_emu->SetPaused(true);
 				JumpTo(pc_cache);
 			}
 		}
 		// F10: Trace (Step Over)
 		if (m_emu->GetPaused() && ImGui::IsKeyPressed(ImGuiKey_F10, false)) {
-			tracing = true;
-			m_emu->SetPaused(false);
+			RequestTrace();
 		}
-		// F11: Step (Step Into)
+		// F11: Step Into; Shift+F11: Step Out
 		if (m_emu->GetPaused() && ImGui::IsKeyPressed(ImGuiKey_F11, false)) {
-			stepping = true;
-			m_emu->SetPaused(false);
+			if (ImGui::GetIO().KeyShift) RequestStepOut();
+			else RequestStep();
 		}
 		// Ctrl+G: Go to PC
 		if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G, false)) {
@@ -961,7 +1092,7 @@ void CodeViewer::RenderCore() {
 		std::string help_text = "CodeViewer.Help.DefaultPrompt"_lc;
 		if (hovered_line >= 0 && hovered_line < codes.size() && !codes[hovered_line].is_label) {
 			std::string mnem, ops;
-			ExtractMnemAndOps(codes[hovered_line].srcbuf, mnem, ops);
+			ExtractMnemAndOps(codes[hovered_line].srcbuf, mnem, ops, m_emu->chipset.epscpu != nullptr);
 			help_text = GetInstructionHelp(mnem, ops);
 		}
 
@@ -988,39 +1119,39 @@ void CodeViewer::RenderCore() {
 	ImGui::SameLine();
 	if (m_emu->GetPaused()) {
 		if (UIHelpers::ButtonWithShortcut("CodeViewer.Step"_lc, "F11")) {
-			stepping = true;
-			m_emu->SetPaused(false);
+			RequestStep();
 		}
 		ImGui::SameLine();
 		if (UIHelpers::ButtonWithShortcut("CodeViewer.Trace"_lc, "F10")) {
-			tracing = true;
-			m_emu->SetPaused(false);
+			RequestTrace();
 		}
 		ImGui::SameLine();
 		if (UIHelpers::ButtonWithShortcut("CodeViewer.JumpOut"_lc, "Shift+F11")) {
-			auto stk = m_emu->chipset.cpu.stack.get();
-			if (!stk->empty()) {
-				if (!stk->back().is_jump) {
-					if (stk->back().lr_pushed) {
-						trace_bp = stk->back().lr;
-					}
-					else {
-						trace_bp = m_emu->chipset.cpu.reg_lcsr << 16 | m_emu->chipset.cpu.reg_lr;
-					}
-					m_emu->SetPaused(false);
-				}
-			}
+			RequestStepOut();
 		}
 		ImGui::SameLine();
 		if (UIHelpers::ButtonWithShortcut("CodeViewer.Continue"_lc, "F5")) {
-			m_emu->SetPaused(false);
+			RequestContinue();
 		}
 		ImGui::SameLine();
+		if (m_emu->chipset.epscpu || m_emu->chipset.t4x) {
+			if (ImGui::Button("Free Run"))
+				RequestContinue(false);
+			ImGui::SameLine();
+			ImGui::BeginDisabled(selected_addr == static_cast<uint32_t>(-1));
+			if (ImGui::Button("Run to cursor"))
+				RequestRunTo(selected_addr);
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+		}
 	}
 	else {
 		if (UIHelpers::ButtonWithShortcut("CodeViewer.Pause"_lc, "F5")) {
 			trace_bp = false;
 			stepping = false;
+			if (m_emu->chipset.epscpu)
+				m_emu->chipset.epscpu->CancelDebugRun();
+			if (m_emu->chipset.t4x) m_emu->chipset.t4x->CancelDebugRun();
 			m_emu->SetPaused(true);
 			JumpTo(pc_cache);
 		}
@@ -1038,16 +1169,46 @@ void CodeViewer::RenderCore() {
 }
 
 void CodeViewer::RequestStep() {
+	if (auto* core = m_emu->chipset.t4x) {
+		m_emu->SetPaused(true);
+		core->RequestStepInto();
+		m_emu->chipset.StepTiMultiView();
+		JumpTo(core->ProgramCounter());
+		return;
+	}
+	if (m_emu->chipset.epscpu) {
+		m_emu->chipset.epscpu->RequestStepInto();
+		m_emu->SetPaused(false);
+		return;
+	}
 	stepping = true;
 	m_emu->SetPaused(false);
 }
 
 void CodeViewer::RequestTrace() {
+	if (auto* core = m_emu->chipset.t4x) {
+		core->RequestStepOver(); m_emu->SetPaused(false); return;
+	}
+	if (m_emu->chipset.epscpu) {
+		m_emu->chipset.epscpu->RequestStepOver();
+		m_emu->SetPaused(false);
+		return;
+	}
 	tracing = true;
 	m_emu->SetPaused(false);
 }
 
 bool CodeViewer::RequestStepOut() {
+	if (auto* core = m_emu->chipset.t4x) {
+		if (!core->RequestStepOut()) return false;
+		m_emu->SetPaused(false); return true;
+	}
+	if (m_emu->chipset.epscpu) {
+		if (!m_emu->chipset.epscpu->RequestStepOut())
+			return false;
+		m_emu->SetPaused(false);
+		return true;
+	}
 	auto stk = m_emu->chipset.cpu.stack.get();
 	if (stk->empty() || stk->back().is_jump)
 		return false;
@@ -1058,33 +1219,92 @@ bool CodeViewer::RequestStepOut() {
 	return true;
 }
 
+void CodeViewer::RequestContinue(bool honor_breakpoints) {
+	if (m_emu->chipset.t4x) m_emu->chipset.t4x->RequestContinue(honor_breakpoints);
+	if (m_emu->chipset.epscpu)
+		m_emu->chipset.epscpu->RequestContinue(honor_breakpoints);
+	m_emu->SetPaused(false);
+}
+
+void CodeViewer::RequestRunTo(uint32_t word_address) {
+	if (m_emu->chipset.t4x && word_address < 65536) {
+		m_emu->chipset.t4x->RequestRunToAddress(uint16_t(word_address)); m_emu->SetPaused(false);
+	}
+	if (m_emu->chipset.epscpu) {
+		m_emu->chipset.epscpu->RequestRunToAddress(word_address);
+		m_emu->SetPaused(false);
+	}
+}
+
 void CodeViewer::AddBreakpoint(uint32_t address) {
+	if (auto* core = m_emu->chipset.t4x) {
+		core->AddExecutionBreakpoint(address);
+		return;
+	}
 	if (!is_loaded.load(std::memory_order_acquire))
 		return;
-	int idx = 0;
-	LookUp(address, &idx);
-	break_points[idx] = 1;
+	if (m_emu->chipset.epscpu) {
+		auto it = std::find_if(codes.begin(), codes.end(), [address](const CodeElem& line) {
+			return !line.is_label && line.offset == address;
+		});
+		if (it == codes.end())
+			return;
+		break_points[static_cast<int>(it - codes.begin())] = 1;
+		m_emu->chipset.epscpu->AddExecutionBreakpoint(address);
+	}
+	else {
+		int idx = 0;
+		LookUp(address, &idx);
+		break_points[idx] = 1;
+	}
 }
 
 void CodeViewer::RemoveBreakpoint(uint32_t address) {
+	if (auto* core = m_emu->chipset.t4x) {
+		core->RemoveExecutionBreakpoint(address);
+		return;
+	}
 	if (!is_loaded.load(std::memory_order_acquire))
 		return;
-	int idx = 0;
-	LookUp(address, &idx);
-	break_points.erase(idx);
+	if (m_emu->chipset.epscpu) {
+		auto it = std::find_if(codes.begin(), codes.end(), [address](const CodeElem& line) {
+			return !line.is_label && line.offset == address;
+		});
+		if (it != codes.end())
+			break_points.erase(static_cast<int>(it - codes.begin()));
+		m_emu->chipset.epscpu->RemoveExecutionBreakpoint(address);
+	}
+	else {
+		int idx = 0;
+		LookUp(address, &idx);
+		break_points.erase(idx);
+	}
 }
 
 void CodeViewer::ClearBreakpoints() {
+	if (auto* core = m_emu->chipset.t4x) {
+		core->ClearExecutionBreakpoints();
+		return;
+	}
 	break_points.clear();
+	if (m_emu->chipset.epscpu)
+		m_emu->chipset.epscpu->ClearExecutionBreakpoints();
 }
 
 std::vector<uint32_t> CodeViewer::GetBreakpoints() const {
+	if (m_emu->chipset.t4x) return m_emu->chipset.t4x->ExecutionBreakpoints();
 	std::vector<uint32_t> result;
 	for (const auto& [index, state] : break_points) {
 		if (state == 1 && index >= 0 && static_cast<size_t>(index) < codes.size())
 			result.push_back(codes[index].offset);
 	}
 	return result;
+}
+
+size_t CodeViewer::GetBreakpointCount() const {
+	if (auto* core = m_emu->chipset.t4x)
+		return core->ExecutionBreakpoints().size();
+	return break_points.size();
 }
 
 std::vector<CodeElem> CodeViewer::GetDisassembly(uint32_t address, size_t count) const {

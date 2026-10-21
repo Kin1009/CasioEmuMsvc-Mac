@@ -13,10 +13,15 @@
 #include "LabelFile.h"
 #include "LabelViewer.h"
 #include "MemBreakPoint.hpp"
+#include "ModelInfo.h"
 #include "Random.hpp"
+#include "RendererBackend.h"
 #include "Theme.h"
 #include "VariableWindow.h"
 #include "WatchWindow.hpp"
+#ifndef CASIOEMU_CORE_WEB
+#include "WizToolchain.h"
+#endif
 #ifndef CASIOEMU_CORE_WEB
 #include "QrCodeWindow.h"
 #endif
@@ -34,7 +39,11 @@
 #endif
 #include <Gui.h>
 #include <SDL.h>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #ifdef ENABLE_SENTRY
 #include <sentry.h>
 #endif
@@ -109,6 +118,16 @@ void RenderStatusBar() {
 		// Breakpoints count
 		int bpCount = code_viewer ? (int)code_viewer->GetBreakpointCount() : 0;
 		ImGui::Text("BP: %d", bpCount);
+
+		ImGui::SameLine(0.0f, 20.0f);
+		ImGui::TextDisabled("|");
+		ImGui::SameLine(0.0f, 20.0f);
+#ifndef CASIOEMU_CORE_WEB
+		// Toolchain: keep the calculator screen as a separate docked area.
+		ImGui::Checkbox("Dock screen", &g_dock_calc_screen);
+#else
+		ImGui::TextDisabled("%s", "CasioEmuMsvc");
+#endif
 	}
 	ImGui::End();
 	ImGui::PopStyleColor();
@@ -148,6 +167,10 @@ static ImGuiID RenderDockSpace(float reservedBottom) {
 static void RenderDebuggerGuiWindows() {
 #ifndef __ANDROID__
 	ImGuiID dockspace_id = RenderDockSpace(GetStatusBarHeight());
+#ifndef CASIOEMU_CORE_WEB
+	// The dock layout has to be settled before the windows render.
+	CalcScreenDockSync(g_dock_calc_screen, dockspace_id);
+#endif
 #endif
 	for (auto win : windows) {
 #ifndef __ANDROID__
@@ -295,49 +318,65 @@ void gui_loop() {
 }
 
 static CodeViewer* CreateDebuggerGuiWindows() {
-	while (!me_mmu)
+	while (!me_mmu && !m_emu->chipset.t4x)
 		std::this_thread::sleep_for(std::chrono::microseconds(1));
+	const bool multiview = m_emu->chipset.t4x != nullptr;
+	const bool nx_tools = !casioemu::IsEpsFamily(m_emu->hardware_id) && !multiview;
 	std::filesystem::path label_file = m_emu->GetModelFilePath("labels.txt");
-	if (std::filesystem::exists(label_file))
+	if (!label_file.empty() && std::filesystem::exists(label_file))
 		g_labels = parseFile(label_file.string());
-	else
+	else if (!m_emu->IsMemoryModel())
 		std::cout << "[Warning] " << label_file.string() << " doesn't exist. You can consider create one for better debugging experiences. Format: address(0x1234),func name(can be quoted)\n";
 
 	if (m_emu->hardware_id == casioemu::HW_FX_5800P) {
 		windows.push_back(CreateFx5800FileSystem());
 	}
 
-	if (m_emu->hardware_id != casioemu::HW_SOLARII) {
+	if (m_emu->hardware_id != casioemu::HW_SOLARII && nx_tools) {
 		windows.push_back(new VariableWindow());
 	}
 
-	for (auto item : std::initializer_list<UIWindow*>{
-			 new HwController(),
-			 new LabelViewer(),
-			 new WatchWindow(),
-			 CreateCallAnalysisWindow(),
-			 code_viewer = new CodeViewer(),
-			 injector = new Injector(),
-			 membp = new Breakpoints(),
-			 CreateAddressWindow(),
-			 // MakeAssemblerUI(),
+	windows.push_back(new HwController());
+	if (!multiview) windows.push_back(new LabelViewer());
+	auto* watch_window = new WatchWindow();
+	windows.push_back(watch_window);
+	windows.push_back(CreateCallAnalysisWindow());
+	windows.push_back(code_viewer = new CodeViewer());
+	m_emu->chipset.on_rom_changed = [] { if (code_viewer) code_viewer->PrepareDisasm(); };
+	if (nx_tools)
+		windows.push_back(injector = new Injector());
+	membp = new Breakpoints();
+	windows.push_back(membp);
+	if (!multiview) windows.push_back(CreateAddressWindow());
+	if (nx_tools) {
 #if !defined(TEST_BUILD)
-			 CreateRopCompilerWindow(),
+		windows.push_back(CreateRopCompilerWindow());
 #endif
+	}
 #if !defined(TEST_BUILD) && !defined(CASIOEMU_CORE_WEB)
-			 new PluginLogWindow(),
+	windows.push_back(new PluginLogWindow());
 #endif
 #if !defined(TEST_BUILD)
-			 snapshot_window = static_cast<SnapshotWindow*>(CreateSnapshotWindow()),
+	windows.push_back(snapshot_window = static_cast<SnapshotWindow*>(CreateSnapshotWindow()));
 #endif
 #ifndef CASIOEMU_CORE_WEB
-			 new QrCodeWindow(),
+	if (nx_tools)
+		windows.push_back(new QrCodeWindow());
 #endif
-			 MakeThemeWindow(),
-			 CreateBitmapViewer(), })
+	windows.push_back(MakeThemeWindow());
+	if (!multiview) {
+		auto* bitmap_window = CreateBitmapViewer();
+		windows.push_back(bitmap_window);
+	}
+	for (auto item : GetEditors()) {
 		windows.push_back(item);
-	for (auto item : GetEditors())
-		windows.push_back(item);
+	}
+#ifndef CASIOEMU_CORE_WEB
+	// The Wiz / CWiz toolchain and the model's screen as a debugger window (the
+	// status bar can move the screen into a dock area of its own).
+	windows.push_back(CreateToolchainWindow());
+	windows.push_back(CreateCalcScreenWindow());
+#endif
 
 #ifdef __ANDROID__
 	for (auto item : windows) {
@@ -393,6 +432,7 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 #ifdef _WIN32
 	EnableDarkTitleBar(GetSDLWindowHandle(window));
 #endif
+	casioemu::SetPreferredRendererDriverHint();
 	renderer = SDL_CreateRenderer(window, -1,
 		SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
 #endif
@@ -455,6 +495,15 @@ void CleanupWebDebuggerGuiWindows() {
 namespace UIHelpers {
 
 	void JumpToMemory(uint32_t addr) {
+		if (m_emu->chipset.t4x) {
+			const char* name = addr < 64 ? "T4x Registers (nibbles)" :
+				addr >= 0x100 && addr < 0x500 ? "T4x WRAM (nibbles)" :
+				addr >= 0x1000 && addr < 0x2000 ? "T4x DRAM (bytes)" : nullptr;
+			if (name) for (auto* win : windows) if (strcmp(win->name, name) == 0) {
+				win->GotoMemoryAddress(addr); return;
+			}
+			return;
+		}
 		// Prefer the "Ram" window; fall back to any window that overrides GotoMemoryAddress.
 		UIWindow* fallback = nullptr;
 		for (auto* win : windows) {

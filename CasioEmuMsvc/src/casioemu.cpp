@@ -1,4 +1,6 @@
 #include "Config.hpp"
+#include "Gui/PopUpDisplay.h"
+#include "Gui/ThemeManager.h"
 #include "Ui.hpp"
 #include "imgui_impl_sdl2.h"
 
@@ -12,6 +14,7 @@
 #include <SDL.h>
 #include <SDL_image.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +27,7 @@
 #include <map>
 #include <mutex>
 #include <ostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #if _WIN32
@@ -40,7 +44,10 @@
 #ifdef ENABLE_SENTRY
 #include <sentry.h>
 #endif
-
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <unistd.h>
+#endif
 #include "StartupUi/StartupUi.h"
 #include <Gui.h>
 #include <Plugin/PluginMan.h>
@@ -134,6 +141,46 @@ static bool IsPointInImGuiWindow(float x, float y) {
 	return false;
 }
 
+static Uint32 GetEventWindowId(const SDL_Event& event) {
+	switch (event.type) {
+	case SDL_WINDOWEVENT:
+		return event.window.windowID;
+	case SDL_KEYDOWN:
+	case SDL_KEYUP:
+		return event.key.windowID;
+	case SDL_TEXTEDITING:
+	case SDL_TEXTINPUT:
+		return event.text.windowID;
+	case SDL_MOUSEMOTION:
+		return event.motion.windowID;
+	case SDL_MOUSEBUTTONDOWN:
+	case SDL_MOUSEBUTTONUP:
+		return event.button.windowID;
+	case SDL_MOUSEWHEEL:
+		return event.wheel.windowID;
+	default:
+		return 0;
+	}
+}
+
+static void ProcessImGuiEvent(const SDL_Event& event) {
+#ifdef __ANDROID__
+	if (event.type == SDL_TEXTINPUT) {
+		ThemeManager::Instance().RegisterInputGlyphs(event.text.text);
+	}
+#endif
+	ImGui_ImplSDL2_ProcessEvent(&event);
+}
+
+static bool IsScreenMirrorWindowEvent(const SDL_Event& event) {
+	const Uint32 windowId = GetEventWindowId(event);
+	if (windowId == 0) {
+		return false;
+	}
+	SDL_Window* eventWindow = SDL_GetWindowFromID(windowId);
+	return eventWindow && SDL_GetWindowData(eventWindow, SCREEN_MIRROR_WINDOW_DATA_KEY);
+}
+
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
 	SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
@@ -154,6 +201,16 @@ int main(int argc, char* argv[]) {
 #endif
 #ifdef __ANDROID__
 	chdir(SDL_AndroidGetExternalStoragePath());
+#elif defined(__APPLE__)
+	char path[1024];
+	uint32_t size = sizeof(path);
+	if (_NSGetExecutablePath(path, &size) == 0) {
+		char* last_slash = strrchr(path, '/');
+		if (last_slash) {
+			*last_slash = '\0';
+			chdir(path);
+		}
+	}
 #endif
 	g_local.Load();
 	ThemeManager::Instance().LoadSettings();
@@ -206,6 +263,7 @@ int main(int argc, char* argv[]) {
 			logger::Info("[argv][Info] #%i: key '%s' already set\n", ix, key.c_str());
 	}
 	bool headless = argv_map.find("headless") != argv_map.end();
+	std::shared_ptr<casioemu::ModelResourceStore> startup_resources;
 	int sdlFlags = SDL_INIT_VIDEO | SDL_INIT_TIMER;
 	if (SDL_Init(sdlFlags) != 0)
 		PANIC("SDL_Init failed: %s\n", SDL_GetError());
@@ -217,8 +275,9 @@ int main(int argc, char* argv[]) {
 		PANIC("No model path supplied.\n");
 	}
 	if (argv_map["model"].empty()) {
-		auto s = sui_loop();
-		argv_map["model"] = std::move(s);
+		auto selection = sui_loop();
+		argv_map["model"] = std::move(selection.model_path);
+		startup_resources = std::move(selection.resources);
 		if (argv_map["model"].empty()) {
       DiscordRPC::Shutdown();
 			return -1;
@@ -234,7 +293,7 @@ int main(int argc, char* argv[]) {
 
 	bool no_dbg = !argv_map["no_dbg"].empty();
 	low_perf_ext = !argv_map["low_perf_ext"].empty();
-	Emulator emulator(argv_map);
+	Emulator emulator(argv_map, false, std::move(startup_resources));
 	m_emu = &emulator;
 
 	// static std::atomic<bool> running(true);
@@ -247,7 +306,7 @@ int main(int argc, char* argv[]) {
 
 		[&](const SDL_Event& translatedEvent, TouchTarget target) {
 			if (target == TouchTarget::ImGui) {
-				ImGui_ImplSDL2_ProcessEvent(&translatedEvent);
+				ProcessImGuiEvent(translatedEvent);
 				return;
 			}
 
@@ -358,8 +417,9 @@ int main(int argc, char* argv[]) {
 
 			SDL_RenderPresent(emulator.renderer);
 #else
-			if (!no_dbg)
+			if (!no_dbg) {
 				gui_loop();
+			}
 			emulator.Frame();
 			SDL_RenderPresent(emulator.renderer);
 #endif
@@ -386,10 +446,26 @@ int main(int argc, char* argv[]) {
 	hld:
 		int wid, hei;
 		SDL_GetWindowSize(window, &wid, &hei);
+		const Uint32 eventWindowId = GetEventWindowId(event);
+		if (IsScreenMirrorWindowEvent(event)) {
+			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+				event.key.windowID = SDL_GetWindowID(emulator.window);
+				emulator.UIEvent(event);
+			}
+			continue;
+		}
 		switch (event.type) {
 		case SDL_WINDOWEVENT:
 			switch (event.window.event) {
 			case SDL_WINDOWEVENT_CLOSE:
+				// The mirror event watcher can destroy its window before this queued
+				// close event reaches the main loop. In that case SDL_GetWindowFromID
+				// can no longer identify it, so only close the application for one of
+				// the two actual application windows.
+				if ((!emulator.window || eventWindowId != SDL_GetWindowID(emulator.window)) &&
+					(!window || eventWindowId != SDL_GetWindowID(window))) {
+					break;
+				}
 				emulator.Shutdown();
 				std::exit(0);
 				break;
@@ -413,14 +489,14 @@ int main(int argc, char* argv[]) {
 		case SDL_TEXTINPUT:
 		case SDL_MOUSEWHEEL:
 #ifdef SINGLE_WINDOW
-			ImGui_ImplSDL2_ProcessEvent(&event);
+			ProcessImGuiEvent(event);
 			if (ImGui::GetIO().WantCaptureMouse) {
 				break;
 			}
 #else
 			if (!no_dbg)
-				if ((SDL_GetKeyboardFocus() != emulator.window) && guiCreated) {
-					ImGui_ImplSDL2_ProcessEvent(&event);
+				if (guiCreated && eventWindowId != 0 && window && eventWindowId == SDL_GetWindowID(window)) {
+					ProcessImGuiEvent(event);
 					break;
 				}
 #endif

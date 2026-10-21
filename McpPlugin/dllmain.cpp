@@ -300,7 +300,7 @@ json ToolDefinitions() {
         },
         {
             {"name", "read_code"},
-            {"description", "Read 16-bit instruction words from code space."},
+            {"description", "Read 16-bit instruction words from a byte address in code space; the address is aligned down to an even byte and consecutive words are two bytes apart."},
             {"inputSchema", ObjectSchema({
                 {"address", {{"type", "integer"}, {"minimum", 0}, {"maximum", kMaxAddress}}},
                 {"count", {{"type", "integer"}, {"minimum", 0}, {"maximum", kMaxCodeWords}}},
@@ -308,7 +308,7 @@ json ToolDefinitions() {
         },
         {
             {"name", "write_code"},
-            {"description", "Patch bytes in the loaded ROM image."},
+            {"description", "Patch consecutive logical code bytes starting at a byte address. Use the same byte-address unit on EPS and non-EPS architectures."},
             {"inputSchema", ObjectSchema({
                 {"address", {{"type", "integer"}, {"minimum", 0}, {"maximum", kMaxAddress}}},
                 {"bytes", {{"type", "array"}, {"maxItems", kMaxMemoryTransfer}, {"items", {{"type", "integer"}, {"minimum", 0}, {"maximum", 255}}}}},
@@ -366,6 +366,11 @@ json ToolDefinitions() {
                 {"address", {{"type", "integer"}, {"minimum", 0}, {"maximum", kMaxAddress}}},
                 {"write", {{"type", "boolean"}}},
                 {"break_when_hit", {{"type", "boolean"}, {"default", true}}},
+				{"enabled", {{"type", "boolean"}, {"default", true}}},
+				{"compare_data", {{"type", "boolean"}, {"default", false}}},
+				{"data", {{"type", "integer"}, {"minimum", 0}, {"maximum", 255}, {"default", 0}}},
+				{"mask", {{"type", "integer"}, {"minimum", 0}, {"maximum", 255}, {"default", 255}}},
+				{"skip_count", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295u}, {"default", 0}}},
             }, {"address", "write"})},
         },
         {
@@ -747,6 +752,11 @@ json CallTool(const std::string& name, const json& args) {
                 {"write", bp.Write},
                 {"break_when_hit", bp.BreakWhenHit},
                 {"hit_count", bp.HitCount},
+				{"enabled", bp.Enabled},
+				{"compare_data", bp.CompareData},
+				{"data", bp.Data},
+				{"mask", bp.Mask},
+				{"skip_count", bp.SkipCount},
             });
         return ToolResult({{"breakpoints", std::move(breakpoints)}});
     }
@@ -764,6 +774,7 @@ json CallTool(const std::string& name, const json& args) {
             hits.push_back({
                 {"program_counter", hit.ProgramCounter},
                 {"link_register", hit.LinkRegister},
+                {"value", hit.Value},
                 {"stack", hit.Stack},
                 {"registers", std::move(registers)},
             });
@@ -774,10 +785,19 @@ json CallTool(const std::string& name, const json& args) {
         uint32_t address = 0;
         bool write = false;
         bool breakWhenHit = args.value("break_when_hit", true);
+		bool enabled = args.value("enabled", true);
+		bool compareData = args.value("compare_data", false);
+		uint32_t data = 0;
+		uint32_t mask = 0xff;
+		uint32_t skipCount = 0;
         if (!GetInteger(args, "address", address, error, 0, kMaxAddress)
-            || !GetBool(args, "write", write, error))
+			|| !GetBool(args, "write", write, error)
+			|| (args.contains("data") && !GetInteger(args, "data", data, error, 0, 0xff))
+			|| (args.contains("mask") && !GetInteger(args, "mask", mask, error, 0, 0xff))
+			|| (args.contains("skip_count") && !GetInteger(args, "skip_count", skipCount, error, 0, 0xffffffffu)))
             return ToolError(error);
-        return g_debugger->AddMemoryBreakpoint(address, write, breakWhenHit)
+		return g_debugger->AddMemoryBreakpoint(address, write, breakWhenHit, enabled, compareData,
+			static_cast<uint8_t>(data), static_cast<uint8_t>(mask), skipCount)
             ? ToolResult({{"success", true}})
             : ToolError("Memory breakpoint debugger is unavailable");
     }

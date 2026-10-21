@@ -38,6 +38,7 @@ private:
 
 	std::atomic_bool is_loaded{false};
 	bool disasm_requested = false;
+	bool core_was_paused = false;
 	bool need_roll = false;
 	bool search_activated = false;
 	bool help_activated = true;
@@ -72,6 +73,8 @@ public:
 	void RequestStep();
 	void RequestTrace();
 	bool RequestStepOut();
+	void RequestContinue(bool honor_breakpoints = true);
+	void RequestRunTo(uint32_t word_address);
 	void AddBreakpoint(uint32_t address);
 	void RemoveBreakpoint(uint32_t address);
 	void ClearBreakpoints();
@@ -79,5 +82,5 @@ public:
 	std::vector<CodeElem> GetDisassembly(uint32_t address, size_t count) const;
 	void Search(bool next);
 	void ExportDisassembly();
-	size_t GetBreakpointCount() const { return break_points.size(); }
+	size_t GetBreakpointCount() const;
 };

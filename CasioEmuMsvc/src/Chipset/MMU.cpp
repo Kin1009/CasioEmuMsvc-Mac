@@ -2,6 +2,7 @@
 
 #include "CPU.hpp"
 #include "Chipset.hpp"
+#include "ePSCpu.h"
 #include "Emulator.hpp"
 #include "Gui/Hooks.h"
 #include "Gui/Ui.hpp"
@@ -63,7 +64,7 @@ namespace casioemu {
 				return le_read(rom[offset]);
 			else
 				return 0;
-		case HW_TI:
+		case HW_TI_MATH_PRINT:
 		case HW_CLASSWIZ:
 			if (emulator.chipset.SegmentAccess && segment_index == 5)
 				segment_index = 0;
@@ -74,28 +75,22 @@ namespace casioemu {
 					return (segment_index == 0 && segment_offset >= 0xFE00) ? 0xFFFF : le_read(rom[offset]);
 			}
 			return 0;
-		case HW_CLASSWIZ_II:
-			if (segment_index == 8)
-				return le_read(rom[offset & 0x7ffff]);
+		case HW_CLASSWIZ_II: {
+			// The highest code-address bit is ignored; align the instruction word.
+			offset &= 0x7FFFE;
 			segment_index &= 7;
 			if (segment_index == 7) {
-				if (segment_offset >= 0x2000) {
-					return 0xffff;
-				}
-				else {
-					return le_read(rom[0x5E000 + segment_offset]);
-				}
-			}
-			if (segment_index > 6)
-				return 0xFFFF;
-			if (segment_index == 5) {
-				if (segment_offset >= 0xe000)
+				if (segment_offset >= 0x2000)
 					return 0xFFFF;
+				offset = 0x5E000 + segment_offset;
 			}
-			if (emulator.chipset.remap)
-				return le_read(rom[offset + ((segment_index == 0 && segment_offset < 0x200) ? 0xFE00 : 0)]);
-			else
-				return (segment_index == 0 && segment_offset >= 0xFE00) ? 0xFFFF : le_read(rom[offset]);
+			else if (segment_index == 5 && segment_offset >= 0xE000)
+				return 0xFFFF;
+			// In particular, segments 6/E have no backing in a 0x60000-byte ROM.
+			if (offset >= rom_size || rom_size - offset < sizeof(uint16_t))
+				return 0xFFFF;
+			return le_read(rom[offset]);
+		}
 		case HW_FX_5800P:
 			if (segment_index < 2)
 				return le_read(rom[offset]);
@@ -103,12 +98,24 @@ namespace casioemu {
 				return le_read(emulator.chipset.flash_data[offset & 0x7ffff]);
 			return 0xFFFF;
 		case HW_EPS6800:
-			return le_read(emulator.chipset.rom_data[offset]);
+		case HW_EPS6009:
+		case HW_EPS9500:
+		case HW_EPS6800_W192:
+			return emulator.chipset.epscpu
+				/* ReadCode uses byte offsets on the legacy paths; convert to the
+				 * word address expected by the EPS core. */
+				? emulator.chipset.epscpu->ReadCodeWord(static_cast<uint32_t>(offset >> 1))
+				: 0xffff;
 		default:
 			return 0;
 		}
 	}
 	uint8_t MMU::ReadData(size_t offset, bool softwareRead) {
+		if (IsEpsFamily(emulator.hardware_id)) {
+			if (!emulator.chipset.epscpu)
+				return 0xff;
+			return emulator.chipset.epscpu->ReadDebugMemory(static_cast<uint32_t>(offset));
+		}
 		if (emulator.chipset.cpu.reg_dsr) {
 			offset = (((size_t)emulator.chipset.cpu.reg_dsr) << 16) | (offset & 0xFFFF);
 		}
@@ -175,6 +182,11 @@ namespace casioemu {
 	}
 
 	void MMU::WriteData(size_t offset, uint8_t data, bool softwareWrite) {
+		if (IsEpsFamily(emulator.hardware_id)) {
+			if (emulator.chipset.epscpu)
+				emulator.chipset.epscpu->WriteDebugMemory(static_cast<uint32_t>(offset), data);
+			return;
+		}
 		if (emulator.chipset.cpu.reg_dsr) {
 			offset = (((size_t)emulator.chipset.cpu.reg_dsr) << 16) | (offset & 0xFFFF);
 		}

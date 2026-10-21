@@ -7,9 +7,14 @@
 #include "Peripheral/ExternalInterrupts.hpp"
 #include "Peripheral/IOPorts.hpp"
 #include <SDL.h>
+#include <condition_variable>
 #include <forward_list>
+#include <functional>
 #include <iosfwd>
+#include <mutex>
+#include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace casioemu {
@@ -34,7 +39,9 @@ namespace casioemu {
 		enum RunMode {
 			RM_STOP,
 			RM_HALT,
-			RM_RUN
+			RM_RUN,
+			RM_DEEP_HALT,
+			RM_HALT_H
 		};
 		RunMode run_mode;
 
@@ -47,10 +54,27 @@ namespace casioemu {
 		size_t pending_interrupt_count;
 		bool interrupts_active[INT_COUNT];
 		void AcceptInterrupt();
+		void EnterStandby(RunMode mode);
+		bool HasWakeRequest(RunMode mode) const;
+		void LoadStateUnchecked(std::istream& is);
+		bool AdvanceStandbyWake();
+		uint64_t standby_wake_ticks = 0;
+		template<typename Transfer>
+		void TransferTiState(Transfer transfer) {
+			transfer(run_mode, standby_wake_ticks, data_int_mask, data_int_pending,
+				interrupts_active, pending_interrupt_count, isMIBlocked,
+				data_FCON, data_FCON1, data_LTBR, data_HTBR, data_LTBADJ,
+				ClockDiv, LSCLKMode, LSCLKTickCounter, HSCLKTickCounter,
+				HSCLKTimeCounter, SYSCLKTickCounter, LSCLKTimeCounter,
+				LSCLKThresh, LSCLKFreqAddition, LSCLK_output, HSCLK_output,
+				LSCLKTick, HSCLKTick, SYSCLKTick, OSCLKTick, LTBCReset, HTBCReset,
+				tiKey, tiDiagMode, SegmentAccess, remap);
+		}
 		void RaiseSoftware(size_t index);
 
 		void ConstructPeripherals();
 		void DestructPeripherals();
+		void SetupEpsCpu();
 
 		void ConstructClockGenerator();
 		void GenerateTickForClock();
@@ -73,6 +97,12 @@ namespace casioemu {
 		int LSCLKFreqAddition{};
 
 		bool real_hardware;
+		std::thread eps_ram_save_thread;
+		std::mutex eps_ram_save_thread_mutex;
+		std::condition_variable eps_ram_save_thread_cv;
+		bool eps_ram_save_thread_stop{};
+		/* Serializes PersistEpsRam with other RAM operations and teardown. */
+		std::mutex eps_ram_save_mutex;
 
 	public:
 		void* QueryInterface(const char* name);
@@ -84,18 +114,21 @@ namespace casioemu {
 		CPU& cpu;
 		MMU& mmu;
 		class ePSCPU* epscpu = 0;
+		class T4xCore* t4x = nullptr;
+		void RunTiMultiViewFrame();
+		bool StepTiMultiView(unsigned instructions = 1);
 
 		std::vector<unsigned char> rom_data;
 		std::vector<unsigned char> flash_data;
 
 		bool remap = false;
 
-		InterruptSource* MaskableInterrupts;
-		size_t EffectiveMICount;
+		InterruptSource* MaskableInterrupts = nullptr;
+		size_t EffectiveMICount = 0;
 
 		// Reserve these pointers to make it easy for other peripherals to input to pins.
-		IOPorts* ioport;
-		ExternalInterrupts* EXIhandle;
+		IOPorts* ioport = nullptr;
+		ExternalInterrupts* EXIhandle = nullptr;
 
 		bool WDT_enabled = false;
 
@@ -115,6 +148,7 @@ namespace casioemu {
 		bool LSCLKMode;
 
 		bool LSCLKTick, HSCLKTick, SYSCLKTick;
+		bool OSCLKTick = false;
 		bool LTBCReset, HTBCReset;
 
 		const int HTBROutputCount = 128;
@@ -151,6 +185,8 @@ namespace casioemu {
 		void Reset();
 		void Break();
 		void Halt();
+		void DeepHalt();
+		void HaltH();
 		void Stop();
 		bool GetRunningState();
 		void RaiseEmulator();
@@ -165,11 +201,16 @@ namespace casioemu {
 		void RemovePortInput(int, int);
 
 		void Tick();
+		bool RunEpsFrame(uint32_t idle_timer_cycles = 0);
 		void EmulatorTick();
 		void Frame();
 		void UIEvent(SDL_Event event);
 		void SaveStateAll(std::ostream& os);
 		void LoadStateAll(std::istream& is);
+		void PersistEpsRam();
+		bool ReloadRom(std::string& error);
+		bool WriteTiCode(size_t address, std::span<const uint8_t> bytes);
+		std::function<void()> on_rom_changed;
 
 		template <typename T>
 		T* QueryInterface() {

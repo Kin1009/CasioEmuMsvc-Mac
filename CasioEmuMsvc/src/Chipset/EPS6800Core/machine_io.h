@@ -1,0 +1,108 @@
+/* Emulated machine execution, input, and LCD framebuffer boundary. */
+#ifndef FX_EMU_CORE_MACHINE_IO_H
+#define FX_EMU_CORE_MACHINE_IO_H
+
+#include "lcd_geometry.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* LCD geometry exposed to host frontends */
+#define MACHINE_LCD_VISIBLE_WIDTH FX_EMU_LCD_VISIBLE_WIDTH
+#define MACHINE_LCD_VISIBLE_HEIGHT FX_EMU_LCD_VISIBLE_HEIGHT
+#define MACHINE_LCD_PAGE_HEIGHT FX_EMU_LCD_PAGE_HEIGHT
+#define MACHINE_LCD_PAGE_COUNT (MACHINE_LCD_VISIBLE_HEIGHT / MACHINE_LCD_PAGE_HEIGHT)
+#define MACHINE_LCD_FRAMEBUFFER_SIZE (MACHINE_LCD_VISIBLE_WIDTH * MACHINE_LCD_PAGE_COUNT)
+
+struct machine_state;
+
+enum machine_cpu_mode {
+	MACHINE_CPU_MODE_SLOW = 0,
+	MACHINE_CPU_MODE_FAST = 1,
+	MACHINE_CPU_MODE_IDLE = 2,
+	MACHINE_CPU_MODE_SLEEP = 3
+};
+
+struct machine_lcd_control {
+	uint8_t lcdarh;
+	uint8_t lcdcon;
+	uint8_t contrast;
+	uint8_t all_pixels_on;
+};
+
+enum machine_lcd_change_kind {
+	MACHINE_LCD_CHANGE_BYTE = 0,
+	MACHINE_LCD_CHANGE_CONTROL = 1
+};
+
+typedef void (*machine_lcd_change_callback)(
+	void *user,
+	int kind,
+	size_t offset,
+	uint8_t old_value,
+	uint8_t new_value
+);
+
+/* Host execution boundary.  Callers can schedule the machine without
+ * depending on the internal cpu_state/timer_state representation. */
+enum machine_cpu_mode machine_state_cpu_mode(const struct machine_state *state);
+uint8_t machine_state_interrupt_pending(const struct machine_state *state);
+size_t machine_state_lcd_raw_size(const struct machine_state *state);
+uint32_t machine_state_idle_timer1_cycles_per_tick(const struct machine_state *state);
+void machine_state_advance_cycles_split(
+	struct machine_state *state,
+	uint32_t cycles,
+	bool tick_fast_timers,
+	bool tick_timer1
+);
+void machine_state_advance_instruction_cycles(
+	struct machine_state *state,
+	uint32_t timer_cycles,
+	bool tick_fast_timers,
+	uint32_t timer1_cycles
+);
+/* Timer1's independent oscillator runs in both active and Idle modes. */
+void machine_state_tick_timer1(struct machine_state *state, uint32_t cycles);
+void machine_state_tick_idle_timer1(struct machine_state *state, uint32_t cycles);
+void machine_state_run_frame(struct machine_state *state);
+
+/* Copies page-major visible LCD bytes: page * MACHINE_LCD_VISIBLE_WIDTH + column. */
+size_t machine_state_lcd_copy_framebuffer(const struct machine_state *state, uint8_t *data, size_t size);
+/* Copies the visible framebuffer and normalized display control state together. */
+size_t machine_state_lcd_copy_display(
+	const struct machine_state *state,
+	uint8_t *data,
+	size_t size,
+	struct machine_lcd_control *control
+);
+/* Copies physical LCD RAM without applying display-wide controller overrides. */
+size_t machine_state_lcd_copy_raw_memory(const struct machine_state *state, uint8_t *data, size_t size);
+bool machine_state_lcd_get_control(const struct machine_state *state, struct machine_lcd_control *control);
+void machine_state_set_lcd_change_callback(
+	struct machine_state *state,
+	machine_lcd_change_callback callback,
+	void *user
+);
+/* Raw LCD RAM access used by debugger/editor surfaces. */
+uint8_t machine_state_lcd_read_memory(const struct machine_state *state, size_t address);
+bool machine_state_lcd_write_memory(struct machine_state *state, size_t address, uint8_t value);
+
+void machine_state_keydown(struct machine_state *state, uint8_t key);
+void machine_state_restore_keydown(struct machine_state *state, uint8_t key);
+void machine_state_keyup(struct machine_state *state, uint8_t key);
+void machine_state_ondown(struct machine_state *state);
+void machine_state_onup(struct machine_state *state);
+void machine_state_set_portb_input(struct machine_state *state, uint8_t mask, uint8_t value);
+void machine_state_set_portc_input(struct machine_state *state, uint8_t mask, uint8_t value);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FX_EMU_CORE_MACHINE_IO_H */
+

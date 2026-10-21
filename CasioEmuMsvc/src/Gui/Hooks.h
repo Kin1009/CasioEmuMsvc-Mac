@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Chipset/Chipset.hpp"
 #include <functional>
+#include <string>
 
 // this is the new cpp style hook library
 // for script & ui
@@ -22,7 +23,17 @@ struct InstructionEventArgs {
 	uint32_t pc_before;
 	uint32_t pc_after;
 	bool should_break{};
+	uint8_t stack_pointer{};
 };
+struct StandaloneFunctionEventArgs {
+	FunctionEventArgs function{};
+	uint32_t accumulator{};
+	std::string backtrace;
+};
+
+using EpsFunctionEventArgs = StandaloneFunctionEventArgs;
+extern std::function<void(const StandaloneFunctionEventArgs&)> on_t4x_call_function;
+extern std::function<void(const StandaloneFunctionEventArgs&)> on_t4x_function_return;
 
 extern std::function<void(casioemu::CPU&, InstructionEventArgs&)> on_instruction;
 
@@ -36,6 +47,14 @@ extern std::function<void(casioemu::Chipset&, InterruptEventArgs&)> on_brk;
 extern std::function<void(casioemu::Chipset&, InterruptEventArgs&)> on_interrupt;
 
 extern std::function<void(casioemu::Chipset&)> on_reset;
+
+// EPS6800-neutral hooks avoid pretending that the EPS core is the nX-U8 CPU/MMU.
+extern std::function<void(InstructionEventArgs&)> on_eps_instruction;
+extern std::function<void(const EpsFunctionEventArgs&)> on_eps_call_function;
+extern std::function<void(const EpsFunctionEventArgs&)> on_eps_function_return;
+extern std::function<void(MemoryEventArgs&)> on_eps_memory_read;
+extern std::function<void(MemoryEventArgs&)> on_eps_memory_write;
+extern std::function<void(casioemu::Chipset&, InterruptEventArgs&)> on_eps_interrupt;
 
 #define RaiseEvent(func, ...) \
 	if (func)                 \

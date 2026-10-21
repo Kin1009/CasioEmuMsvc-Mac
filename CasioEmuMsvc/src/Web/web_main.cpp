@@ -1,6 +1,7 @@
 #include "Chipset/Chipset.hpp"
 #include "Chipset/MMU.hpp"
 #include "Emulator.hpp"
+#include "ModelConfig.h"
 #include "ModelInfo.h"
 
 #include <SDL.h>
@@ -23,9 +24,7 @@ casioemu::MMU* me_mmu = nullptr;
 casioemu::Emulator* m_emu = nullptr;
 uint32_t pc_cache = 0;
 
-int screen_flashing_threshold = 20;
 float screen_fading_blending_coefficient = 0.0f;
-bool enable_screen_fading = false;
 float screen_flashing_brightness_coeff = 1.5f;
 bool screen_residual_enabled = true;
 float screen_residual_alpha_scale = 1.0f;
@@ -67,37 +66,24 @@ namespace {
 	}
 
 	bool ValidateModelFolder(const std::filesystem::path& model_path, std::string& error) {
-		const auto config_path = model_path / "config.bin";
-		if (!FileExists(config_path)) {
-			error = "config.bin was not found in the selected model folder.";
-			return false;
-		}
-
 		casioemu::ModelInfo model;
-		std::ifstream config(config_path, std::ios::binary);
-		if (!config) {
-			error = "config.bin could not be opened.";
-			return false;
-		}
-
-		try {
-			model.Read(config);
-		}
-		catch (const std::exception& ex) {
-			error = std::string("config.bin could not be parsed: ") + ex.what();
+		std::string loaded_from;
+		std::string load_error;
+		if (!casioemu::LoadModelInfoFromFolder(model_path, model, &loaded_from, &load_error)) {
+			error = std::string("Model configuration could not be loaded: ") + load_error;
 			return false;
 		}
 
 		if (model.interface_path.empty() || !FileExists(model_path / model.interface_path)) {
-			error = "The interface image referenced by config.bin was not found.";
+			error = "The interface image referenced by the model configuration was not found.";
 			return false;
 		}
 		if (model.rom_path.empty() || !FileExists(model_path / model.rom_path)) {
-			error = "The ROM image referenced by config.bin was not found.";
+			error = "The ROM image referenced by the model configuration was not found.";
 			return false;
 		}
-		if (model.hardware_id == casioemu::HW_FX_5800P && (model.flash_path.empty() || !FileExists(model_path / model.flash_path))) {
-			error = "The flash image referenced by config.bin was not found.";
+		if (!model.flash_path.empty() && !FileExists(model_path / model.flash_path)) {
+			error = "The flash image referenced by the model configuration was not found.";
 			return false;
 		}
 

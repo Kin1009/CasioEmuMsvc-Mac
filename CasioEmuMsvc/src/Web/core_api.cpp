@@ -1,10 +1,12 @@
 #include "Chipset/CPU.hpp"
 #include "Chipset/Chipset.hpp"
 #include "Chipset/MMU.hpp"
+#include "Chipset/ePSCpu.h"
 #include "Emulator.hpp"
 #include "ModelInfo.h"
 #include "Models.h"
 #include "Peripheral/Keyboard.hpp"
+#include "Peripheral/BatteryBackedRAM.hpp"
 #include "Peripheral/Screen.hpp"
 #include "Romu.h"
 #include "Snapshot.h"
@@ -19,11 +21,15 @@
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <typeinfo>
 #include <vector>
 #include <unistd.h>
 
@@ -39,9 +45,7 @@ extern casioemu::MMU* me_mmu;
 extern casioemu::Emulator* m_emu;
 extern uint32_t pc_cache;
 
-extern int screen_flashing_threshold;
 extern float screen_fading_blending_coefficient;
-extern bool enable_screen_fading;
 extern float screen_flashing_brightness_coeff;
 extern bool screen_residual_enabled;
 extern float screen_residual_alpha_scale;
@@ -63,6 +67,18 @@ namespace {
 	std::vector<uint8_t> g_frame_rgba;
 	std::vector<uint8_t> g_source_frame_rgba;
 	std::vector<uint8_t> g_status_alpha;
+	std::vector<casioemu::StatusIndicatorInfo> g_web_status_indicators;
+	struct WebEpsConfig {
+		int port_b_mask = 0;
+		int port_b_value = 0;
+		int port_c_mask = 0;
+		int port_c_value = 0;
+		int cycles_per_second = 0;
+		int timer1_source_hz = 0;
+		int timer_cycle_divisor = 0;
+		bool ice_timer_scheduling = false;
+	};
+	WebEpsConfig g_web_eps_config;
 	std::vector<uint8_t> g_snapshot_buffer;
 	bool g_qr_active = false;
 	int g_qr_version = 0;
@@ -273,10 +289,10 @@ namespace {
 		g_gui_background_checked = false;
 	}
 
-	casioemu::ModelInfo MakeWebModel(bool real_hardware, bool is_sample_rom, int pd_value, int model_type, bool legacy_ko, bool classwiz_graph) {
-	const auto hardware_id = HardwareIdFromCoreType(model_type);
+	casioemu::ModelInfo MakeWebModel(bool real_hardware, bool is_sample_rom, int pd_value, int model_type, bool legacy_ko) {
+		const auto hardware_id = HardwareIdFromCoreType(model_type);
 		casioemu::ModelInfo model{};
-	model.csr_mask = hardware_id == casioemu::HW_SOLARII ? 0x0 : (hardware_id == casioemu::HW_ES_PLUS ? 0x1 : 0xf);
+		model.csr_mask = hardware_id == casioemu::HW_SOLARII ? 0x0 : (hardware_id == casioemu::HW_ES_PLUS ? 0x1 : 0xf);
 		model.hardware_id = hardware_id;
 		model.real_hardware = real_hardware;
 		model.pd_value = static_cast<unsigned char>(pd_value & 0xff);
@@ -287,20 +303,56 @@ namespace {
 			model.flash_path = kFlashPath;
 		}
 		model.enable_new_screen = false;
+		if (hardware_id == casioemu::HW_EPS6009) {
+			model.screen_width = 96;
+			model.screen_height = 31;
+			model.screen_scale_y = 1.0f;
+		}
 		model.is_sample_rom = is_sample_rom;
 		model.legacy_ko = legacy_ko;
-		model.u16_mode = hardware_id == casioemu::HW_CLASSWIZ || hardware_id == casioemu::HW_CLASSWIZ_II || hardware_id == casioemu::HW_TI;
-		model.LARGE_model = hardware_id != casioemu::HW_SOLARII;
-		model.ml620_mirroring = hardware_id != casioemu::HW_CLASSWIZ;
+		model.u16_mode = hardware_id == casioemu::HW_CLASSWIZ || hardware_id == casioemu::HW_CLASSWIZ_II || hardware_id == casioemu::HW_TI_MATH_PRINT;
+		model.LARGE_model = hardware_id != casioemu::HW_SOLARII && !casioemu::IsEpsFamily(hardware_id);
+		model.ml620_mirroring = hardware_id != casioemu::HW_CLASSWIZ && !casioemu::IsEpsFamily(hardware_id);
 		model.ink_color = {0, 0, 0};
+		if (casioemu::IsEpsFamily(hardware_id)) {
+			const auto* descriptor = casioemu::FindHardwareDescriptor(hardware_id);
+			// Dot-matrix status alphas share the first 192 entries of the pixel
+			// buffer. Check against the model's status bits once hardware is known;
+			// EPS6009 uses a separate segment layout and may have more indicators.
+			if (descriptor->eps_status_size != 0) {
+				if (g_web_status_indicators.size() > descriptor->eps_status_size * 8)
+					throw std::runtime_error("Too many status indicators for the selected EPS model.");
+				for (const auto& indicator : g_web_status_indicators) {
+					if (indicator.byte_offset >= descriptor->eps_status_size)
+						throw std::runtime_error("Status indicator byte is outside the selected EPS model's LCD status area.");
+				}
+			}
+			model.status_indicators = g_web_status_indicators;
+		}
+		if (casioemu::IsEpsFamily(hardware_id)) {
+			auto hexByte = [](int value) {
+				char buffer[8]{};
+				std::snprintf(buffer, sizeof(buffer), "0x%02X", static_cast<unsigned int>(value));
+				return std::string(buffer);
+			};
+			model.extra["port_b_input_mask"] = hexByte(g_web_eps_config.port_b_mask);
+			model.extra["port_b_input_value"] = hexByte(g_web_eps_config.port_b_value);
+			model.extra["port_c_input_mask"] = hexByte(g_web_eps_config.port_c_mask);
+			model.extra["port_c_input_value"] = hexByte(g_web_eps_config.port_c_value);
+			if (g_web_eps_config.cycles_per_second > 0)
+				model.extra["cycles_per_second"] = std::to_string(g_web_eps_config.cycles_per_second);
+			if (g_web_eps_config.timer1_source_hz > 0)
+				model.extra["timer1_source_hz"] = std::to_string(g_web_eps_config.timer1_source_hz);
+			if (g_web_eps_config.timer_cycle_divisor > 0)
+				model.extra["timer_cycle_divisor"] = std::to_string(g_web_eps_config.timer_cycle_divisor);
+			if (g_web_eps_config.ice_timer_scheduling)
+				model.extra["ice_timer_scheduling"] = "1";
+		}
 		if (!real_hardware) {
 			model.extra["limit_spd"] = "1";
 		}
-		if (classwiz_graph) {
-			model.extra["classwiz_graph"] = "1";
-		}
-
-		for (int ko = 0; ko < 8; ++ko) {
+		const int ko_count = casioemu::IsEpsFamily(hardware_id) ? 16 : 8;
+		for (int ko = 0; ko < ko_count; ++ko) {
 			for (int ki = 0; ki < 8; ++ki) {
 				casioemu::ButtonInfo button{};
 				button.kiko = (ko << 4) | ki;
@@ -312,6 +364,12 @@ namespace {
 		on.kiko = 0xFF;
 		on.keyname = "";
 		model.buttons.push_back(on);
+		if (casioemu::IsEpsFamily(hardware_id)) {
+			casioemu::ButtonInfo reset{};
+			reset.kiko = casioemu::BUTTON_KIKO_RESET;
+			reset.keyname = "";
+			model.buttons.push_back(reset);
+		}
 		return model;
 	}
 
@@ -361,15 +419,46 @@ namespace {
 			region->description == "Segment4");
 	}
 
+	constexpr uint32_t kFx5800pStateMagic = 0x53503835; // "58PS"
+	constexpr uint32_t kFx5800pStateVersion = 1;
+	constexpr int kFx5800pPramLen = 0x8000;
+	constexpr int kFx5800pFlashLen = 0x80000;
+	constexpr int kFx5800pStateHeaderLen = 20;
+
+	void WriteLe32(uint8_t* out, uint32_t value) {
+		out[0] = static_cast<uint8_t>(value & 0xff);
+		out[1] = static_cast<uint8_t>((value >> 8) & 0xff);
+		out[2] = static_cast<uint8_t>((value >> 16) & 0xff);
+		out[3] = static_cast<uint8_t>((value >> 24) & 0xff);
+	}
+
+	uint32_t ReadLe32(const uint8_t* in) {
+		return static_cast<uint32_t>(in[0]) |
+			(static_cast<uint32_t>(in[1]) << 8) |
+			(static_cast<uint32_t>(in[2]) << 16) |
+			(static_cast<uint32_t>(in[3]) << 24);
+	}
+
+	IRam* GetRamPeripheral() {
+		return g_emulator ? static_cast<IRam*>(g_emulator->chipset.QueryInterface(typeid(IRam).name())) : nullptr;
+	}
+
 	bool UserRamRange(uint32_t& addr, int& len) {
 		if (!g_emulator) return false;
+		if (casioemu::IsEpsFamily(g_emulator->hardware_id)) {
+			if (!g_emulator->chipset.epscpu) return false;
+			const uint32_t linear_size = g_emulator->chipset.epscpu->DebugLinearMemorySize();
+			if (linear_size <= 0x80u) return false;
+			addr = 0x80u;
+			len = static_cast<int>(linear_size - addr);
+			return true;
+		}
 		switch (g_emulator->hardware_id) {
 		case casioemu::HW_CLASSWIZ_II:
 			addr = 0x9000;
 			len = 0x4000;
 			return true;
 		case casioemu::HW_ES_PLUS:
-		case casioemu::HW_EPS6800:
 			addr = 0x8000;
 			len = 0x2000;
 			return true;
@@ -418,6 +507,68 @@ namespace {
 			cur += chunk;
 			out_pos += static_cast<int>(chunk);
 		}
+		return 0;
+	}
+
+	int Fx5800pRamLen() {
+		uint32_t addr = 0;
+		int len = 0;
+		return UserRamRange(addr, len) ? len : 0;
+	}
+
+	int Fx5800pPersistentStateSize() {
+		const int ram_len = Fx5800pRamLen();
+		if (ram_len <= 0) return 0;
+		return kFx5800pStateHeaderLen + ram_len + kFx5800pPramLen + kFx5800pFlashLen;
+	}
+
+	int SaveFx5800pPersistentState(uint8_t* out, int max_len) {
+		const int ram_len = Fx5800pRamLen();
+		const int state_len = Fx5800pPersistentStateSize();
+		if (state_len <= 0) return -2;
+		if (max_len < state_len) return -state_len;
+
+		IRam* ram = GetRamPeripheral();
+		if (!ram || !ram->GetRam() || !ram->GetPRam()) return -3;
+		if (static_cast<int>(g_emulator->chipset.flash_data.size()) < kFx5800pFlashLen) return -4;
+
+		WriteLe32(out, kFx5800pStateMagic);
+		WriteLe32(out + 4, kFx5800pStateVersion);
+		WriteLe32(out + 8, static_cast<uint32_t>(ram_len));
+		WriteLe32(out + 12, kFx5800pPramLen);
+		WriteLe32(out + 16, kFx5800pFlashLen);
+
+		int pos = kFx5800pStateHeaderLen;
+		std::memcpy(out + pos, ram->GetRam(), ram_len);
+		pos += ram_len;
+		std::memcpy(out + pos, ram->GetPRam(), kFx5800pPramLen);
+		pos += kFx5800pPramLen;
+		std::memcpy(out + pos, g_emulator->chipset.flash_data.data(), kFx5800pFlashLen);
+		return 0;
+	}
+
+	int LoadFx5800pPersistentState(const uint8_t* in, int len) {
+		if (len < kFx5800pStateHeaderLen) return 2;
+		if (ReadLe32(in) != kFx5800pStateMagic) return 3;
+		if (ReadLe32(in + 4) != kFx5800pStateVersion) return 4;
+
+		const int ram_len = static_cast<int>(ReadLe32(in + 8));
+		const int pram_len = static_cast<int>(ReadLe32(in + 12));
+		const int flash_len = static_cast<int>(ReadLe32(in + 16));
+		const int expected_ram_len = Fx5800pRamLen();
+		if (ram_len != expected_ram_len || pram_len != kFx5800pPramLen || flash_len != kFx5800pFlashLen) return 5;
+		if (len < kFx5800pStateHeaderLen + ram_len + pram_len + flash_len) return 6;
+
+		IRam* ram = GetRamPeripheral();
+		if (!ram || !ram->GetRam() || !ram->GetPRam()) return 7;
+		if (static_cast<int>(g_emulator->chipset.flash_data.size()) < flash_len) return 8;
+
+		int pos = kFx5800pStateHeaderLen;
+		std::memcpy(ram->GetRam(), in + pos, ram_len);
+		pos += ram_len;
+		std::memcpy(ram->GetPRam(), in + pos, pram_len);
+		pos += pram_len;
+		std::memcpy(g_emulator->chipset.flash_data.data(), in + pos, flash_len);
 		return 0;
 	}
 
@@ -813,18 +964,24 @@ void WebDebuggerQueueDownload(const char* path, const char* name) {
 		return true;
 	}
 
-	int InitRealRomCore(const uint8_t* rom, int len, const uint8_t* flash, int flash_len, int pd_value, int model_type, int legacy_ko, int classwiz_graph) {
+	int InitRealRomCore(const uint8_t* rom, int len, const uint8_t* flash, int flash_len, int pd_value, int model_type, int legacy_ko) {
 		if (!rom || len <= 0) return -1;
 		const auto hardware_id = HardwareIdFromCoreType(model_type);
-		if (hardware_id == casioemu::HW_FX_5800P && (!flash || flash_len <= 0)) return -4;
+		const bool has_flash = flash && flash_len > 0;
+		if (hardware_id == casioemu::HW_FX_5800P && (!has_flash || flash_len != 0x80000)) return -4;
+		if (has_flash && casioemu::IsEpsFamily(hardware_id) && flash_len < 0x10000) return -4;
 		try {
 			EnsureSdl();
 			StopMainLoop();
 			GuiResetState();
 			g_emulator.reset();
 			if (!WriteRomFile(rom, len)) return -2;
-			if (flash && flash_len > 0 && !WriteFlashFile(flash, flash_len)) return -4;
-			auto model = MakeWebModel(true, false, pd_value, model_type, legacy_ko != 0, classwiz_graph != 0);
+			if (has_flash && !WriteFlashFile(flash, flash_len)) return -4;
+			auto model = MakeWebModel(true, false, pd_value, model_type, legacy_ko != 0);
+			// EPS W192 models may or may not have an external flash image. Only
+			// attach the resource when the caller actually supplied one.
+			if (has_flash && casioemu::IsEpsFamily(hardware_id))
+				model.flash_path = kFlashPath;
 			const auto model_dir = CurrentWebModelDir();
 			std::filesystem::create_directories(model_dir);
 			g_emulator = std::make_unique<casioemu::Emulator>(model, false, true, model_dir);
@@ -844,20 +1001,52 @@ void WebDebuggerQueueDownload(const char* path, const char* name) {
 
 extern "C" {
 
+int casioemu_core_set_status_indicators(const uint32_t* packed, int count) {
+	// MakeWebModel validates hardware-specific limits when the core is created.
+	if (count < 0 || count > 4096 || (count > 0 && !packed)) return 1;
+	std::vector<casioemu::StatusIndicatorInfo> indicators;
+	indicators.reserve(static_cast<size_t>(count));
+	std::set<std::pair<unsigned short, unsigned char>> used;
+	for (int i = 0; i < count; ++i) {
+		const auto byte_offset = static_cast<unsigned short>(packed[i] >> 8);
+		const auto bit = static_cast<unsigned char>(packed[i] & 0xff);
+		if (bit > 7 || !used.emplace(byte_offset, bit).second) return 2;
+		indicators.push_back({"status" + std::to_string(i), byte_offset, bit});
+	}
+	g_web_status_indicators = std::move(indicators);
+	return 0;
+}
+
+int casioemu_core_set_eps_config(
+	int port_b_mask, int port_b_value, int port_c_mask, int port_c_value,
+	int cycles_per_second, int timer1_source_hz, int timer_cycle_divisor,
+	int ice_timer_scheduling) {
+	if (port_b_mask < 0 || port_b_mask > 0xff || port_b_value < 0 || port_b_value > 0xff
+		|| port_c_mask < 0 || port_c_mask > 0xff || port_c_value < 0 || port_c_value > 0xff
+		|| cycles_per_second < 0 || timer1_source_hz < 0 || timer_cycle_divisor < 0
+		|| (ice_timer_scheduling != 0 && ice_timer_scheduling != 1)) return 1;
+	g_web_eps_config = {
+		port_b_mask, port_b_value, port_c_mask, port_c_value,
+		cycles_per_second, timer1_source_hz, timer_cycle_divisor,
+		ice_timer_scheduling != 0,
+	};
+	return 0;
+}
+
 int casioemu_core_set_model_id(const char* model_id) {
 	SetCoreModelId(model_id);
 	return 0;
 }
 
-int casioemu_core_init_real_rom(const uint8_t* rom, int len, int pd_value, int model_type, int legacy_ko, int classwiz_graph) {
-	return InitRealRomCore(rom, len, nullptr, 0, pd_value, model_type, legacy_ko, classwiz_graph);
+int casioemu_core_init_real_rom(const uint8_t* rom, int len, int pd_value, int model_type, int legacy_ko) {
+	return InitRealRomCore(rom, len, nullptr, 0, pd_value, model_type, legacy_ko);
 }
 
-int casioemu_core_init_real_rom_with_flash(const uint8_t* rom, int rom_len, const uint8_t* flash, int flash_len, int pd_value, int model_type, int legacy_ko, int classwiz_graph) {
-	return InitRealRomCore(rom, rom_len, flash, flash_len, pd_value, model_type, legacy_ko, classwiz_graph);
+int casioemu_core_init_real_rom_with_flash(const uint8_t* rom, int rom_len, const uint8_t* flash, int flash_len, int pd_value, int model_type, int legacy_ko) {
+	return InitRealRomCore(rom, rom_len, flash, flash_len, pd_value, model_type, legacy_ko);
 }
 
-int casioemu_core_init_sim_rom(const uint8_t* rom, int len, int is_sample_rom, int pd_value, int model_type, int legacy_ko, int classwiz_graph) {
+int casioemu_core_init_sim_rom(const uint8_t* rom, int len, int is_sample_rom, int pd_value, int model_type, int legacy_ko) {
 	if (!rom || len <= 0) return -1;
 	try {
 		EnsureSdl();
@@ -867,7 +1056,7 @@ int casioemu_core_init_sim_rom(const uint8_t* rom, int len, int is_sample_rom, i
 		const auto hardware_id = HardwareIdFromCoreType(model_type);
 		auto normalized_rom = NormalizeSimulatorRomForWeb(rom, len, hardware_id);
 		if (!WriteRomFile(normalized_rom.data(), static_cast<int>(normalized_rom.size()))) return -2;
-		auto model = MakeWebModel(false, is_sample_rom != 0, pd_value, model_type, legacy_ko != 0, classwiz_graph != 0);
+		auto model = MakeWebModel(false, is_sample_rom != 0, pd_value, model_type, legacy_ko != 0);
 		const auto model_dir = CurrentWebModelDir();
 		std::filesystem::create_directories(model_dir);
 		g_emulator = std::make_unique<casioemu::Emulator>(model, false, true, model_dir);
@@ -1018,8 +1207,9 @@ int casioemu_core_update_frame() {
 	g_source_frame_rgba.resize(static_cast<size_t>(g_frame_width) * static_cast<size_t>(g_frame_height) * 4);
 	const auto& color = g_emulator->ModelDefinition.ink_color;
 	g_screen_provider->WriteFrameRgba(g_source_frame_rgba.data(), color.r, color.g, color.b);
-	const int display_height = std::max(0, g_frame_height - 1);
-	const int source_start_row = 1;
+	const bool has_embedded_status_row = g_emulator->hardware_id != casioemu::HW_EPS6009;
+	const int source_start_row = has_embedded_status_row ? 1 : 0;
+	const int display_height = std::max(0, g_frame_height - source_start_row);
 	g_frame_rgba.resize(static_cast<size_t>(g_frame_width) * static_cast<size_t>(display_height) * 4);
 	for (int y = 0; y < display_height; ++y) {
 		const auto* src = g_source_frame_rgba.data() + (static_cast<size_t>(source_start_row + y) * g_frame_width * 4);
@@ -1082,6 +1272,12 @@ int casioemu_core_save_user_ram(uint8_t* out, int max_len) {
 	int len = 0;
 	if (!UserRamRange(addr, len)) return -2;
 	if (max_len < len) return -len;
+	if (casioemu::IsEpsFamily(g_emulator->hardware_id)) {
+		if (!g_emulator->chipset.epscpu) return -2;
+		for (int i = 0; i < len; ++i)
+			out[i] = g_emulator->chipset.epscpu->ReadDebugMemory(addr + static_cast<uint32_t>(i));
+		return 0;
+	}
 	return ReadDataBulk(addr, len, out);
 }
 
@@ -1091,10 +1287,40 @@ int casioemu_core_load_user_ram(const uint8_t* in, int len) {
 	int ram_len = 0;
 	if (!UserRamRange(addr, ram_len)) return 2;
 	const int copy_len = std::min(len, ram_len);
+	if (casioemu::IsEpsFamily(g_emulator->hardware_id)) {
+		if (!g_emulator->chipset.epscpu) return 2;
+		for (int i = 0; i < copy_len; ++i)
+			g_emulator->chipset.epscpu->WriteDebugMemory(addr + static_cast<uint32_t>(i), in[i]);
+		return 0;
+	}
 	for (int i = 0; i < copy_len; ++i) {
 		g_emulator->chipset.mmu.WriteData(addr + i, in[i], false);
 	}
 	return 0;
+}
+
+int casioemu_core_persistent_ram_size() {
+	if (!g_emulator) return 0;
+	if (g_emulator->hardware_id == casioemu::HW_FX_5800P) {
+		return Fx5800pPersistentStateSize();
+	}
+	return casioemu_core_user_ram_size();
+}
+
+int casioemu_core_save_persistent_ram(uint8_t* out, int max_len) {
+	if (!g_emulator || !out || max_len < 0) return -1;
+	if (g_emulator->hardware_id == casioemu::HW_FX_5800P) {
+		return SaveFx5800pPersistentState(out, max_len);
+	}
+	return casioemu_core_save_user_ram(out, max_len);
+}
+
+int casioemu_core_load_persistent_ram(const uint8_t* in, int len) {
+	if (!g_emulator || !in || len < 0) return 1;
+	if (g_emulator->hardware_id == casioemu::HW_FX_5800P) {
+		return LoadFx5800pPersistentState(in, len);
+	}
+	return casioemu_core_load_user_ram(in, len);
 }
 
 uint32_t casioemu_core_snapshot_ptr() {
@@ -1111,7 +1337,7 @@ int casioemu_core_save_snapshot() {
 		const std::filesystem::path snapshot_path = std::filesystem::path(kCoreDir) / "state.snapshot";
 		std::filesystem::create_directories(kCoreDir);
 		SnapshotManager manager;
-		const uint32_t id = manager.SaveSnapshot(*g_emulator, 0, "WebCalcEmu");
+		const uint32_t id = manager.SaveSnapshot(*g_emulator, 0, "webemu");
 		manager.ExportNode(snapshot_path, id);
 		std::ifstream in(snapshot_path, std::ios::binary);
 		if (!in) return 2;

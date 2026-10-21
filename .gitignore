@@ -387,3 +387,25 @@ build-parent-check/
 /CasioEmuMsvc/temp/
 
 app/src/main/assets/
+
+# ---------------------------------------------------------------------------
+# Local additions for this macOS-only, self-contained working copy.
+#
+# The dependency checkouts below are named in .gitmodules (or fetched at
+# configure time). They are present in this working copy so that it builds
+# as-is, but they are third-party source and are not tracked here: the
+# CasioEmuMsvc repository proper is the source of truth for them.
+#
+# The ROM dumps under models/ are copyrighted firmware images and are not part
+# of the project; they were supplied separately.
+# ---------------------------------------------------------------------------
+/SDL/
+/SDL_image/
+/sentry-native/
+/discord-rpc/
+/CasioEmuMsvc/third_party/asmjit/
+/models/
+# Generated during the macOS build (from AppIcon.icns).
+/AppIcon.iconset/
+# ImGui layout state: the app rewrites this next to its binary at run time.
+/CasioEmuMsvc.app/Contents/MacOS/imgui.ini
