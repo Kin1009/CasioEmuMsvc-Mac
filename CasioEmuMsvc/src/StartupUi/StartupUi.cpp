@@ -291,6 +291,19 @@ public:
 			return;
 		}
 
+		if (!init_failed) {
+			// VS Code-style welcome / start screen
+			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true);
+			ImGui::Text("CasioEmuMsvc");
+			ImGui::SameLine();
+			if (ImGui::Button("Recent")) {}
+			ImGui::SameLine();
+			if (ImGui::Button("New Calculator")) {}
+			ImGui::SameLine();
+			if (ImGui::Button("Open Folder")) {}
+			ImGui::EndChild();
+		}
+
 		auto y = ImGui::GetCursorPosY();
 		const bool is_board_model = IsBoardModel();
 		const int model_width = is_board_model ? imgSp.dest.w : imgSp.src.w;
