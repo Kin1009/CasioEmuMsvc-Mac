@@ -292,7 +292,7 @@ public:
 		}
 
 		if (!init_failed) {
-			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true, ImGuiWindowFlags_NoScrollbars | ImGuiWindowFlags_NoCollapse);
+			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse);
 			ImGui::Text("CasioEmuMsvc");
 			ImGui::SameLine();
 			if (ImGui::Button("Recent")) {}
