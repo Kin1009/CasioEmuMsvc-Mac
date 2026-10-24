@@ -292,15 +292,17 @@ public:
 		}
 
 		if (!init_failed) {
-			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse);
-			ImGui::Text("CasioEmuMsvc");
-			ImGui::SameLine();
-			if (ImGui::Button("Recent")) {}
-			ImGui::SameLine();
-			if (ImGui::Button("New Calculator")) {}
-			ImGui::SameLine();
-			if (ImGui::Button("Open Folder")) {}
+			ImGui::BeginChild("##Welcome", ImVec2(-1, ImGui::GetContentRegionAvail().y), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse);
+			ImGui::SetCursorPosY(20);
+			ImGui::TextDisabled("CasioEmuMsvc — Calculator Emulator");
+			ImGui::Separator();
+			ImGui::TextDisabled("Recent sessions:");
+			if (ImGui::Button("Open Calculator (fx-580VN X)", ImVec2(-1, 30))) {}
+			if (ImGui::Button("New Calculator Session", ImVec2(-1, 30))) {}
+			if (ImGui::Button("Open Folder (Wiz Editor)", ImVec2(-1, 30))) {}
 			ImGui::EndChild();
+			// VS Code-style welcome replaces old startup view
+			return;
 		}
 
 		auto y = ImGui::GetCursorPosY();
