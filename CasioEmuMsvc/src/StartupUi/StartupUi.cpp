@@ -301,8 +301,7 @@ public:
 			if (ImGui::Button("New Calculator Session", ImVec2(-1, 30))) {}
 			if (ImGui::Button("Open Folder (Wiz Editor)", ImVec2(-1, 30))) {}
 			ImGui::EndChild();
-			// VS Code-style welcome replaces old startup view
-			return;
+			// Welcome banner shown; continue to model view below
 		}
 
 		auto y = ImGui::GetCursorPosY();
