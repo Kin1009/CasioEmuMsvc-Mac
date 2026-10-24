@@ -92,6 +92,30 @@ void LoadPlugins() {
         }
     }
 }
+#elif defined(__APPLE__)
+#include <dlfcn.h>
+#include <dirent.h>
+#include <sys/stat.h>
+void LoadPlugins() {
+    g_PluginLoadLog += "[INFO] Starting macOS Plugin Loader\n";
+    const char* dir = "plugins";
+    DIR* d = opendir(dir);
+    if (!d) { g_PluginLoadLog += "[WARN] No plugins/ folder\n"; return; }
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.find(".plugin") == std::string::npos && name.find(".dylib") == std::string::npos) continue;
+        std::string path = std::string(dir) + "/" + name;
+        g_PluginLoadLog += "[INFO] Found: " + name + "\n";
+        void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        if (h) {
+            auto load = (PluginLoad)dlsym(h, "fPluginLoad");
+            if (load) { load(g_pluginapi); g_PluginLoadLog += "[SUCCESS] Loaded: " + name + "\n"; }
+            else g_PluginLoadLog += "[INFO] Dependency (no fPluginLoad): " + name + "\n";
+        } else g_PluginLoadLog += "[ERROR] dlopen: " + std::string(dlerror()) + "\n";
+    }
+    closedir(d);
+}
 #else
 void LoadPlugins() {}
 #endif
