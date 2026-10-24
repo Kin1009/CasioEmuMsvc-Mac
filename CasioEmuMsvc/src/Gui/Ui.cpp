@@ -186,35 +186,12 @@ static void SetupDefaultDockLayout(ImGuiID dockspace_id) {
 
 static void RenderDebuggerGuiWindows() {
 #ifndef __ANDROID__
-	// VS Code-style session tabs
-	if (ImGui::BeginTabBar("##SessionTabs", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
-		for (auto win : windows) {
-			if (win && win->name && ImGui::BeginTabItem(win->name)) {
-				if (ImGui::Button("Close")) { win->open = false; }
-				ImGui::EndTabItem();
-			}
-		}
-		if (ImGui::TabItemButton("+ New", ImGuiTabItemFlags_Trailing)) {
-			// open start screen / new calc
-		}
-		ImGui::EndTabBar();
-	}
+	// VS Code-style session tabs disabled temporarily to avoid UI duplication
+	// (see plan.md 5.2; restore after session model is fully stable)
 #endif
 
-	// Left sidebar file explorer (simplified)
-	ImGui::Begin("##Sidebar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-	ImGui::TextDisabled("File Explorer");
-	ImGui::Separator();
-	if (std::filesystem::exists("examples")) {
-		for (auto& entry : std::filesystem::directory_iterator("examples")) {
-			if (entry.is_directory()) {
-				if (ImGui::Selectable(entry.path().filename().string().c_str())) {
-					// open folder
-				}
-			}
-		}
-	}
-	ImGui::End();
+	// Left sidebar file explorer disabled temporarily
+	// (see plan.md 5.3; restore after file-manager integration is stable)
 
 #ifndef __ANDROID__
 	ImGuiID dockspace_id = RenderDockSpace(GetStatusBarHeight());

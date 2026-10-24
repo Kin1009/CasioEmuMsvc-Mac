@@ -266,7 +266,7 @@ static const TextEditor::LanguageDefinition& WizLanguage() {
 			"if", "else", "endloop", "loop", "until", "while", "do", "def", "endfor",
 		};
 		for (auto& k : identifiers) {
-			Identifier id;
+			TextEditor::Identifier id;
 			id.mDeclaration = "Built-in function";
 			langDef.mIdentifiers.insert(std::make_pair(std::string(k), id));
 		}
@@ -280,7 +280,7 @@ static const TextEditor::LanguageDefinition& WizLanguage() {
 			"alloc", "free", "wait", "pulse", "set", "get", "run",
 		};
 		for (auto& k : directiveKeys)
-			langDef.mPreprocIdentifiers.insert(std::make_pair(std::string(k), {}));
+			langDef.mPreprocIdentifiers.insert(std::make_pair(std::string(k), TextEditor::Identifier()));
 
 		// Keep the standard C++ comments and strings so existing code stays readable.
 		langDef.mCommentStart = "/*";
@@ -1211,12 +1211,45 @@ private:
 
 		const float status_height = ImGui::GetTextLineHeightWithSpacing() + 2.0f;
 		const float editor_height = std::max(80.0f, ImGui::GetContentRegionAvail().y - status_height);
-		editor_.Render("##wiz_source", ImVec2(-1, editor_height), true);
-		RenderAutocompleteDropdown();
+		float avail_w = ImGui::GetContentRegionAvail().x;
+		float left_w = avail_w * 0.58f;
+		ImGui::BeginChild("##wiz_editor_left", ImVec2(left_w, editor_height), true);
+		editor_.Render("##wiz_source", ImVec2(-1, editor_height - status_height), true);
+		// RenderAutocompleteDropdown(); // disabled temporarily to prevent random popups
 		const auto cursor = editor_.GetCursorPosition();
 		ImGui::TextDisabled("Ln %d, Col %d   |   %d lines", cursor.mLine + 1, cursor.mColumn + 1,
-							editor_.GetTotalLines());
+								editor_.GetTotalLines());
+		const std::string lang_name = EffectiveLang();
+		const std::string target_name = (TargetName() == std::string("cwii") ? "880" : (TargetName() == std::string("cwapp") ? "580 app" : (TargetName() == std::string("cwrop") ? "580 rop" : (TargetName() == std::string("cwiirop") ? "880 rop" : "580"))));
+		std::string badge = (lang_name == "cwiz" ? "CWiz" : "Wiz");
+		badge += " · ";
+		badge += target_name;
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(0.85f, 0.9f, 0.6f, 1.0f), "[%s]", badge.c_str());
 		IdentifyDirectiveTargetLang(file_name_);
+		ImGui::EndChild();
+
+		ImGui::SameLine();
+		ImGui::BeginChild("##wiz_docs_ref", ImVec2(-1, editor_height), true);
+		ImGui::TextUnformatted("Reference");
+		ImGui::Separator();
+		std::vector<std::string> refs = {"docs/EDITOR.md", "editor.md", "EDITOR.md"};
+		bool loaded = false;
+		for (const auto& r : refs) {
+			std::ifstream f(r);
+			if (f) {
+				std::string line; int count = 0;
+				while (std::getline(f, line) && count < 30) {
+					ImGui::TextWrapped("%s", line.c_str()); count++;
+				}
+				loaded = true; break;
+			}
+		}
+		if (!loaded) {
+			ImGui::TextDisabled("docs/EDITOR.md (reference)");
+			ImGui::TextWrapped("Directives: #for (580/880), #cwapp (580), #slot (580), #rop (580/880), org/db/dw/def/loop/if/while/return.");
+		}
+		ImGui::EndChild();
 		ImGui::EndChild();
 	}
 
@@ -1382,9 +1415,8 @@ private:
 	}
 
 	void SyncEditorSettings() {
-		// Feature 1.7: sync editor settings with ThemeManager
+		// Feature 1.7: sync editor settings with ThemeManager (font scale + palette)
 		RefreshEditorPalette();
-		SyncEditorSettings();
 		editor_.SetPalette(ThemeManager::Instance().IsDarkMode() ? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
 	}
 
