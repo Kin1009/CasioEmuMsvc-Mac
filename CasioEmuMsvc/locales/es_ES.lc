@@ -222,6 +222,7 @@ Theme.Tint=Activar tinte
 Theme.SeedColor=Color semilla
 Theme.MD=Extraer del fondo
 Theme.EnableDiscordRPC=Habilitar Discord RPC
+Theme.EnableUpdateChecker=Habilitar comprobación de actualizaciones
 CodeViewer.Search=Buscar:
 CodeViewer.Hex=Hex
 CodeViewer.Inst=Instrucción

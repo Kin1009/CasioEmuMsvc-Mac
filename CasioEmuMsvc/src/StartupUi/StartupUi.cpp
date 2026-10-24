@@ -24,6 +24,7 @@
 #include "Ui.hpp"
 #include "sdl_win32_extra.h"
 #include <Gui.h>
+#include <Gui/ThemeManager.h>
 #include <SDL.h>
 #include <SDL_image.h>
 #include <array>
@@ -815,7 +816,10 @@ namespace casioemu {
 		bool show_update = false;
 		bool update_result_consumed = false;
 		StartupUi() {
-			update_checker.Start();
+			// The update check reaches out to GitHub, so it only runs when the
+			// user left the setting enabled (Theme > Integrations).
+			if (ThemeManager::Instance().Settings().enableUpdateChecker)
+				update_checker.Start();
 			std::ifstream api_settings{"online_api.cfg"};
 			if (api_settings) {
 				std::string value;
@@ -1457,7 +1461,11 @@ namespace casioemu {
 			float tableHeight = 300.0f;
 			float buttonWidth = 200.0f;
 #endif
-			ImGui::Begin("StartupUI.Title"_lc);
+			ImGui::SetNextWindowPos({0, 0}, ImGuiCond_Appearing);
+		ImGui::SetNextWindowSize({io.DisplaySize.x, io.DisplaySize.y}, ImGuiCond_Appearing);
+		ImGui::Begin("StartupUI.Title"_lc, nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 #ifdef __ANDROID__
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padding, padding));
 			ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(padding * 1.5f, padding));
@@ -2042,6 +2050,7 @@ StartupSelection sui_loop() {
 	// RebuildFont();
 	io.WantCaptureKeyboard = true;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_NavNoCaptureKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	ThemeManager::Instance().ApplyDefaultTheme();
 	ImGui::GetStyle().Colors[ImGuiCol_WindowBg].w = 1.0f;
@@ -2123,6 +2132,10 @@ StartupSelection sui_loop() {
 					if (languages.empty()) {
 						languages.push_back("en_US");
 					}
+					std::sort(languages.begin(), languages.end());
+					auto english = std::find(languages.begin(), languages.end(), "en_US");
+					selected_language_index = english == languages.end()
+						? 0 : static_cast<int>(english - languages.begin());
 				}
 				ImGui::OpenPopup("LanguageChooser");
 				once = false;

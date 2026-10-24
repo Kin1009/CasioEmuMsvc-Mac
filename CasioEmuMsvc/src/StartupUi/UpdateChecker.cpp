@@ -19,10 +19,13 @@
 
 namespace casioemu {
 namespace {
-constexpr const char* kApi = "https://api.github.com/repos/telecomadm1145/CasioEmuMsvc/releases?per_page=1";
-constexpr const char* kReleaseBase = "https://github.com/telecomadm1145/CasioEmuMsvc/releases/tag/";
+// The macOS fork publishes its own universal builds as vMAJOR.MINOR.PATCH
+// releases. Do not point at the upstream repository: its stable-<timestamp>
+// auto-builds are not the packages this app installs.
+constexpr const char* kApi = "https://api.github.com/repos/Kin1009/CasioEmuMsvc-Mac/releases?per_page=1";
+constexpr const char* kReleaseBase = "https://github.com/Kin1009/CasioEmuMsvc-Mac/releases/tag/";
 constexpr const char* kCachePath = "update-check.json";
-constexpr auto kCacheLifetime = std::chrono::hours(1);
+constexpr auto kCacheLifetime = std::chrono::hours(24 * 3);
 constexpr std::size_t kMaxResponseSize = 1024 * 1024;
 size_t Write(void* p, size_t s, size_t n, void* u) {
 	const auto bytes = s * n; auto& body = *static_cast<std::string*>(u);
@@ -30,19 +33,58 @@ size_t Write(void* p, size_t s, size_t n, void* u) {
 	body.append(static_cast<char*>(p), bytes); return bytes;
 }
 
-bool SetTrustedReleaseUrl(UpdateInfo& release) {
-	constexpr std::string_view prefix = "stable-";
-	if (release.tag.size() < prefix.size() + 14 + 1 + 7 || release.tag.size() > prefix.size() + 14 + 1 + 40
-		|| release.tag.compare(0, prefix.size(), prefix) != 0) return false;
-	const std::size_t timestamp_begin = prefix.size();
-	const std::size_t separator = timestamp_begin + 14;
-	for (std::size_t i = timestamp_begin; i < separator; ++i)
-		if (release.tag[i] < '0' || release.tag[i] > '9') return false;
-	if (release.tag[separator] != '-') return false;
-	for (std::size_t i = separator + 1; i < release.tag.size(); ++i) {
-		const char ch = release.tag[i];
-		if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) return false;
+// GitHub release notes contain typographic punctuation (non-breaking hyphens,
+// curly quotes, ...) that the bundled ImGui font subset may not carry. Without
+// this, those bytes render as '?' in the middle of words such as "write?-back".
+std::string UiText(std::string text) {
+	static constexpr std::pair<std::string_view, std::string_view> replacements[] = {
+		{"\xE2\x80\x90", "-"}, {"\xE2\x80\x91", "-"}, {"\xE2\x80\x92", "-"},
+		{"\xE2\x80\x93", "-"}, {"\xE2\x80\x94", "-"}, {"\xE2\x80\x95", "-"},
+		{"\xE2\x80\x98", "'"}, {"\xE2\x80\x99", "'"},
+		{"\xE2\x80\x9C", "\""}, {"\xE2\x80\x9D", "\""},
+		{"\xE2\x80\xA2", "*"}, {"\xE2\x80\xA6", "..."},
+		{"\xC2\xA0", " "}, {"\xE2\x80\xAF", " "}, {"\xC2\xAD", ""},
+	};
+	for (const auto& [from, to] : replacements) {
+		std::string out;
+		out.reserve(text.size());
+		std::size_t pos = 0;
+		while (pos < text.size()) {
+			const std::size_t hit = text.find(from, pos);
+			if (hit == std::string::npos) {
+				out.append(text, pos, std::string::npos);
+				break;
+			}
+			out.append(text, pos, hit - pos);
+			out.append(to);
+			pos = hit + from.size();
+		}
+		text = std::move(out);
 	}
+	return text;
+}
+
+bool SetTrustedReleaseUrl(UpdateInfo& release) {
+	// Only follow a simple vMAJOR.MINOR.PATCH tag from the fork. This rejects
+	// the old upstream stable-<timestamp>-<hash> cache entries as well.
+	constexpr std::string_view prefix = "v";
+	if (release.tag.size() < prefix.size() + 5 || release.tag.size() > 32
+		|| release.tag.compare(0, prefix.size(), prefix) != 0) return false;
+	int dots = 0;
+	bool digit = false;
+	for (std::size_t i = prefix.size(); i < release.tag.size(); ++i) {
+		const char ch = release.tag[i];
+		if (ch >= '0' && ch <= '9') {
+			digit = true;
+		} else if (ch == '.') {
+			if (!digit) return false;
+			++dots;
+			digit = false;
+		} else {
+			return false;
+		}
+	}
+	if (!digit || dots != 2) return false;
 	release.url = std::string(kReleaseBase) + release.tag;
 	return true;
 }
@@ -71,7 +113,8 @@ std::optional<UpdateInfo> LoadCachedRelease() {
 			SDL_Log("[UpdateChecker] Cached result expired");
 			return std::nullopt;
 		}
-		UpdateInfo release{cache.value("tag", ""), {}, cache.value("title", ""), cache.value("notes", "")};
+		UpdateInfo release{cache.value("tag", ""), {}, UiText(cache.value("title", "")),
+			UiText(cache.value("notes", ""))};
 		if (!SetTrustedReleaseUrl(release)) {
 			SDL_Log("[UpdateChecker] Ignoring cache with invalid release tag");
 			return std::nullopt;
@@ -172,7 +215,8 @@ UpdateInfo Check() {
 		const auto it = json.find(name);
 		return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
 	};
-	UpdateInfo release{string_value("tag_name"), {}, string_value("name"), string_value("body")};
+	UpdateInfo release{string_value("tag_name"), {}, UiText(string_value("name")),
+		UiText(string_value("body"))};
 	if (!SetTrustedReleaseUrl(release)) {
 		SDL_Log("[UpdateChecker] Ignoring release with invalid tag: %s", release.tag.c_str());
 		return {};

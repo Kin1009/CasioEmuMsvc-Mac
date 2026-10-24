@@ -440,7 +440,7 @@ private:
 		const std::string model = std::string(HardwareTarget()) == "cwii" ? "880" : "580";
 		AddLog(Sev::Note, wiz::fmt("building for rop (%s)", ModelLabel(model == "880" ? "cwii" : "cw")));
 
-		wiz::RopResult rop = wiz::build_rop(src, model);
+		wiz::RopResult rop = wiz::build_rop(src, model, EffectiveLang());
 		std::istringstream lines(rop.log);
 		std::string line;
 		while (std::getline(lines, line)) {
@@ -1149,29 +1149,61 @@ private:
 		ImGui::EndChild();
 	}
 
+	void RenderClearRamSection() {
+		static char ram_addr_str[32] = "E9E0";
+		static int ram_size_int = 256;
+		ImGui::PushItemWidth(80);
+		ImGui::InputText("Addr", ram_addr_str, sizeof(ram_addr_str), ImGuiInputTextFlags_CharsHexadecimal);
+		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(120);
+		if (ImGui::InputInt("Size", &ram_size_int)) ram_size_int = std::max(1, std::min(ram_size_int, 65536));
+		ImGui::SameLine();
+		if (ImGui::Button("Clear RAM")) {
+			uint32_t addr = 0;
+			std::istringstream ss(ram_addr_str);
+			if (ss >> std::hex >> addr) {
+				for (int i = 0; i < ram_size_int; ++i) if (m_emu && me_mmu) me_mmu->WriteData(addr + i, 0, true);
+				AddLog(Sev::Note, wiz::fmt("cleared RAM [%04X] %d bytes", addr, ram_size_int));
+			} else {
+				AddLog(Sev::Error, "Clear RAM: invalid hex address");
+			}
+		}
+	}
+
 	void RenderOutputPanel(float height) {
 		ImGui::BeginChild("##wiz_output_panel", ImVec2(-1, height), true);
 		ImGui::TextUnformatted("Build output");
-		ImGui::Separator();
-
-		if (ImGui::Button("Clear"))
-			log_.clear();
-		ImGui::SameLine();
-		if (ImGui::Button("Copy"))
-			ImGui::SetClipboardText(LogText().c_str());
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", built_ok_ ? "last build: ok" : "last build: not run or failed");
 		ImGui::Separator();
 
-		ImGui::BeginChild("##wiz_log", ImVec2(-1, -1), false);
-		for (const auto& item : log_) {
-			ImGui::PushStyleColor(ImGuiCol_Text, DiagColor(item.first));
-			ImGui::TextWrapped("%s", item.second.c_str());
-			ImGui::PopStyleColor();
+		if (ImGui::BeginTabBar("##wiz_output_tabs")) {
+			if (ImGui::BeginTabItem("Log")) {
+				if (ImGui::Button("Clear"))
+					log_.clear();
+				ImGui::SameLine();
+				if (ImGui::Button("Copy"))
+					ImGui::SetClipboardText(LogText().c_str());
+				ImGui::Separator();
+
+				ImGui::BeginChild("##wiz_log", ImVec2(-1, -1), false);
+				for (const auto& item : log_) {
+					ImGui::PushStyleColor(ImGuiCol_Text, DiagColor(item.first));
+					ImGui::TextWrapped("%s", item.second.c_str());
+					ImGui::PopStyleColor();
+				}
+				if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+					ImGui::SetScrollHereY(1.0f);
+				ImGui::EndChild();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Result")) {
+				RenderResultTab();
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
 		}
-		if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-			ImGui::SetScrollHereY(1.0f);
-		ImGui::EndChild();
 		ImGui::EndChild();
 	}
 
@@ -1228,6 +1260,47 @@ private:
 			SaveSource();
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_O))
 			LoadSource();
+	}
+
+	void RenderResultTab() {
+		if (!built_ok_ && rop_bytes_.empty()) {
+			ImGui::TextDisabled("No build result yet. Run Build & Run first.");
+			return;
+		}
+		if (!rop_bytes_.empty()) {
+			ImGui::Separator();
+			ImGui::Text("ROP payload @ %04X (%zu bytes)", rop_base_, rop_bytes_.size());
+			ImGui::Text("Launcher @ %04X (%zu bytes)  hex: %s",
+				rop_launcher_base_, rop_launcher_.size(), rop_launcher_hex_.c_str());
+			ImGui::SameLine();
+			if (ImGui::Button("Copy launcher"))
+				ImGui::SetClipboardText(rop_launcher_hex_.c_str());
+			ImGui::Separator();
+		}
+		if (!last_build_.rom.empty()) {
+			if (ImGui::Button("Download .bin")) {
+				AddLog(Sev::Note, wiz::fmt("download: %zu ROM bytes", last_build_.rom.size()));
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Copy hex")) {
+				std::string hex;
+				for (uint8_t b : last_build_.rom) {
+					char buf[4];
+					snprintf(buf, sizeof(buf), "%02X ", b);
+					hex += buf;
+				}
+				ImGui::SetClipboardText(hex.c_str());
+			}
+		}
+		if (!rop_bytes_.empty()) {
+			std::string hex;
+			for (uint8_t b : rop_bytes_) {
+				char buf[4];
+				snprintf(buf, sizeof(buf), "%02X ", b);
+				hex += buf;
+			}
+			ImGui::TextWrapped("%s", hex.c_str());
+		}
 	}
 
 	std::string LogText() const {

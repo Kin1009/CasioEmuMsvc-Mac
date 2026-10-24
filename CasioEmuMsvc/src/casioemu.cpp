@@ -331,26 +331,6 @@ for (;;) {
 	bool guiCreated = false;
 	bool reopen_startup = false;
 	auto frame_event = SDL_RegisterEvents(1);
-	bool busy = false;
-	bool running = true;
-	std::thread t3([&]() {
-		SDL_Event se{};
-		se.type = frame_event;
-		se.user.windowID = SDL_GetWindowID(emulator.window);
-		while (running) {
-			if (!busy)
-				SDL_PushEvent(&se);
-#ifdef __ANDROID__
-			SDL_Delay(40);
-#else
-			if (ThemeManager::Instance().Settings().lowPerformanceMode || low_perf_ext)
-				SDL_Delay(24);
-			else
-				SDL_Delay(1);
-#endif
-		}
-	});
-	t3.detach();
 #ifdef DBG
 	if (!no_dbg) {
 		test_gui(&guiCreated, emulator.window, emulator.renderer);
@@ -373,11 +353,22 @@ for (;;) {
 #endif
 	while (emulator.Running()) {
 		SDL_Event event{};
-		busy = false;
 		DiscordRPC::Update();
-		if (!SDL_PollEvent(&event))
-			continue;
-		busy = true;
+		Uint32 frame_wait_ms = 16;
+#ifdef __ANDROID__
+		frame_wait_ms = 40;
+#else
+		if (ThemeManager::Instance().Settings().lowPerformanceMode || low_perf_ext)
+			frame_wait_ms = 24;
+#endif
+		if (!SDL_WaitEventTimeout(&event, frame_wait_ms)) {
+			// Render on a stable ~60 Hz cadence when there are no input/window
+			// events. The old detached 1 ms event producer forced this loop to
+			// spin and contend with the emulator's timer thread.
+			event = {};
+			event.type = frame_event;
+			event.user.windowID = SDL_GetWindowID(emulator.window);
+		}
 		if (event.type == frame_event) {
 			SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 			SDL_RenderClear(renderer);
@@ -506,6 +497,19 @@ for (;;) {
 		case SDL_KEYUP:
 		case SDL_TEXTINPUT:
 		case SDL_MOUSEWHEEL:
+			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP || event.type == SDL_TEXTINPUT) {
+				// In single-window mode the calculator and editor share one SDL
+				// window; only the active Calculator dock tab should capture keys.
+				const bool separate_calc_window = emulator.window && emulator.window != window;
+				const bool calc_window = separate_calc_window && eventWindowId == SDL_GetWindowID(emulator.window);
+				if (calc_window || calculator_panel_focused) {
+					// SDL emits text input separately from keydown. Suppress both for
+					// the calculator target so editors cannot receive printable keys.
+					if (event.type != SDL_TEXTINPUT)
+						emulator.UIEvent(event);
+					break;
+				}
+			}
 #ifdef SINGLE_WINDOW
 			ProcessImGuiEvent(event);
 			if (ImGui::GetIO().WantCaptureMouse) {
@@ -515,18 +519,15 @@ for (;;) {
 			if (!no_dbg)
 				if (guiCreated && eventWindowId != 0 && window && eventWindowId == SDL_GetWindowID(window)) {
 					ProcessImGuiEvent(event);
-					break;
-				}
+			}
 #endif
-			[[fallthrough]];
+			if (event.type != SDL_KEYDOWN && event.type != SDL_KEYUP)
+				emulator.UIEvent(event);
+			break;
 		default:
 			emulator.UIEvent(event);
 			break;
 		}
-	}
-	running = false;
-	if (t3.joinable()) {
-		t3.join();
 	}
 	if (bg_txt) {
 		SDL_DestroyTexture(bg_txt);

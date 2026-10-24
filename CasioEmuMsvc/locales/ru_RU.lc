@@ -222,6 +222,7 @@ Theme.Tint=Включить оттенок
 Theme.SeedColor=Базовый цвет
 Theme.MD=Извлечь из фона
 Theme.EnableDiscordRPC=Включить Discord RPC
+Theme.EnableUpdateChecker=Включить проверку обновлений
 CodeViewer.Search=Поиск:
 CodeViewer.Hex=Hex
 CodeViewer.Inst=Инструкция

@@ -49,6 +49,7 @@ private:
 	SDL_Texture* texture = nullptr;
 	int width = 0, height = 0;
 	std::vector<uint8_t> pixels;
+	std::vector<uint8_t> uploaded_pixels;
 };
 #endif
 } // namespace casioemu

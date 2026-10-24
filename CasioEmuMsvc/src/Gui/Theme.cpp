@@ -19,13 +19,45 @@
 extern SDL_Surface* background;
 extern SDL_Texture* bg_txt;
 
-class ThemeWindow : public UIWindow {
+class SettingsWindow : public UIWindow {
 private:
 	bool showFileDialog;
 	char tempInjectionFilePath[256];
+	bool tabsApplied = false;
+
+	std::string HiddenTabsValue() const {
+		std::string hidden;
+		for (const auto* win : windows) {
+			if (win && win->name && std::strcmp(win->name, "Settings") != 0 && !win->open) {
+				hidden += "|";
+				hidden += win->name;
+			}
+		}
+		if (!hidden.empty()) hidden += "|";
+		return hidden;
+	}
+
+	void ApplySavedTabVisibility(const ThemeSettings& settings) {
+		const std::string hidden(settings.hiddenTabs);
+		if (hidden.empty()) {
+			for (auto* win : windows)
+				if (win && win->name && std::strcmp(win->name, "Settings") == 0) win->open = true;
+			return;
+		}
+		for (auto* win : windows) {
+			if (!win || !win->name) continue;
+			if (std::strcmp(win->name, "Settings") == 0) {
+				win->open = true;
+				continue;
+			}
+			const std::string token = std::string("|") + win->name + "|";
+			if (hidden.find(token) != std::string::npos)
+				win->open = false;
+		}
+	}
 
 public:
-	ThemeWindow() : UIWindow("Theme"), showFileDialog(false) {
+	SettingsWindow() : UIWindow("Settings"), showFileDialog(false) {
 		auto& settings = ThemeManager::Instance().Settings();
 		strncpy(tempInjectionFilePath, settings.injectionFilePath, sizeof(tempInjectionFilePath));
 	}
@@ -36,7 +68,13 @@ public:
 		});
 		auto& tm = ThemeManager::Instance();
 		auto& settings = tm.Settings();
+		if (!tabsApplied) {
+			ApplySavedTabVisibility(settings);
+			tabsApplied = true;
+		}
 
+		if (ImGui::BeginTabBar("##settings_pages")) {
+		if (ImGui::BeginTabItem("General")) {
 		UIHelpers::SectionHeader("Appearance");
 
 		if (ImGui::Button("Ui.DarkMode"_lc)) {
@@ -212,6 +250,9 @@ public:
 				DiscordRPC::UpdatePresence("");
 			}
 		}
+		if (ImGui::Checkbox("Theme.EnableUpdateChecker"_lc, &settings.enableUpdateChecker)) {
+			tm.SaveSettings();
+		}
 #endif
 
 		UIHelpers::SectionHeader("Advanced Style Settings");
@@ -233,9 +274,39 @@ public:
 			tm.SaveSettings();
 			tm.RequestFontRebuild();
 		}
+
+		ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Tabs")) {
+		UIHelpers::SectionHeader("Tab visibility");
+		ImGui::TextWrapped("Choose which workspace tabs are shown. Settings is always available so hidden tabs can be restored.");
+		bool tabVisibilityChanged = false;
+		for (auto* win : windows) {
+			if (!win || !win->name) continue;
+			const bool isSettings = std::strcmp(win->name, "Settings") == 0;
+			if (isSettings) {
+				bool alwaysVisible = true;
+				ImGui::BeginDisabled();
+				ImGui::Checkbox(win->name, &alwaysVisible);
+				ImGui::EndDisabled();
+				continue;
+			}
+			if (ImGui::Checkbox(win->name, &win->open))
+				tabVisibilityChanged = true;
+		}
+		const std::string hiddenTabs = HiddenTabsValue();
+		if (tabVisibilityChanged || hiddenTabs != settings.hiddenTabs) {
+			strncpy(settings.hiddenTabs, hiddenTabs.c_str(), sizeof(settings.hiddenTabs));
+			settings.hiddenTabs[sizeof(settings.hiddenTabs) - 1] = '\0';
+			tm.SaveSettings();
+		}
+		ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
 	}
+}
 };
 
-UIWindow* MakeThemeWindow() {
-	return new ThemeWindow();
+UIWindow* MakeSettingsWindow() {
+	return new SettingsWindow();
 }

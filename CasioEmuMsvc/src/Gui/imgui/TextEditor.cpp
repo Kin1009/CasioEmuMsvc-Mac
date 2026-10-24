@@ -768,6 +768,9 @@ void TextEditor::HandleKeyboardInputs()
 			for (int i = 0; i < io.InputQueueCharacters.Size; i++)
 			{
 				auto c = io.InputQueueCharacters[i];
+				// Skip newline queued by ImGui since we handle Enter manually with auto-indent
+				if (c == '\n')
+					continue;
 				if (c != 0 && (c == '\n' || c >= 32))
 					EnterCharacter(c, shift);
 			}

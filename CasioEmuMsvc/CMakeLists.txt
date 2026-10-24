@@ -185,6 +185,16 @@ if(NOT CASIOEMU_WEB)
 
     if(TARGET asmjit::asmjit)
         message(STATUS "Target asmjit::asmjit FOUND after add_subdirectory")
+        if(APPLE)
+            # AsmJit links the C runtime as the bare library "c".  On macOS the
+            # compiler driver links it implicitly, and an explicit -lc can pick
+            # up a stale /usr/local/lib/libc.a and break the link.
+            get_target_property(ASMJIT_LINK_LIBRARIES asmjit INTERFACE_LINK_LIBRARIES)
+            if(ASMJIT_LINK_LIBRARIES)
+                list(REMOVE_ITEM ASMJIT_LINK_LIBRARIES "c")
+                set_property(TARGET asmjit PROPERTY INTERFACE_LINK_LIBRARIES "${ASMJIT_LINK_LIBRARIES}")
+            endif()
+        endif()
     else()
         message(WARNING "Target asmjit::asmjit NOT FOUND after add_subdirectory")
     endif()
@@ -394,19 +404,48 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
         target_compile_definitions(${TARGET_NAME} PRIVATE CASIOEMU_WIZ_TOOLCHAIN)
         target_compile_definitions(${TARGET_NAME} PRIVATE
             CASIOEMU_WIZ_DATA_DIR="${WIZ_TOOLCHAIN_DIR}/data")
+        # The example library: prefer the checkout's examples/ directory so a
+        # rebuild always ships the current library; fall back to the vendored
+        # copy for the standalone repository.
+        set(WIZ_EXAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
+        if(NOT IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
+            set(WIZ_EXAMPLES_DIR "${WIZ_TOOLCHAIN_DIR}/examples")
+        endif()
+        if(IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
+            message(STATUS "Wiz examples: ${WIZ_EXAMPLES_DIR}")
+            target_compile_definitions(${TARGET_NAME} PRIVATE
+                CASIOEMU_WIZ_EXAMPLES_DIR="${WIZ_EXAMPLES_DIR}")
+        else()
+            message(WARNING "No Wiz example library found; the app will not show examples")
+        endif()
         if(APPLE AND BUILD_EXECUTABLE)
             # Ship the complete Wiz data and example library inside the bundle.
             # Keep the standalone repository self-contained: examples live next
             # to the embedded toolchain and are copied into the app bundle.
-            set(WIZ_EXAMPLES_DIR "${WIZ_TOOLCHAIN_DIR}/examples")
-            add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${WIZ_TOOLCHAIN_DIR}/data"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz"
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${WIZ_EXAMPLES_DIR}"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
-                COMMENT "Copying the Wiz toolchain data and examples into the bundle")
+            if(IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
+                add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${WIZ_TOOLCHAIN_DIR}/data"
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${WIZ_EXAMPLES_DIR}"
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
+                    COMMENT "Copying the Wiz toolchain data and examples into the bundle")
+            endif()
+            # The models are read from "./models" next to the executable, so the
+            # bundle needs them.  Replace the directory instead of merging into
+            # it: a leftover "fx-580VN X 1" folder crashes the model loader.
+            if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/models")
+                add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/MacOS/models"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${CMAKE_SOURCE_DIR}/models"
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/MacOS/models"
+                    COMMENT "Copying the models into the bundle")
+            endif()
         endif()
     else()
         message(STATUS "Wiz toolchain sources are missing; building without them")
@@ -433,6 +472,12 @@ if(CASIOEMU_WEB)
     target_compile_definitions(${TARGET_NAME} PRIVATE DISABLE_SENTRY ASMJIT_NO_JIT CASIOEMU_WEB)
 else()
     target_compile_definitions(${TARGET_NAME} PRIVATE ASMJIT_STATIC)
+endif()
+
+if(NOT CASIOEMU_ENABLE_SENTRY)
+    # The Sentry runtime is not built, so the crash reporter has to be
+    # compiled out as well (Config.hpp keys off DISABLE_SENTRY).
+    target_compile_definitions(${TARGET_NAME} PRIVATE DISABLE_SENTRY)
 endif()
 
 if(WIN32)
@@ -606,7 +651,7 @@ endif()
 
 if(CASIOEMU_ENABLE_SENTRY AND NOT ANDROID AND NOT IOS AND NOT CASIOEMU_WEB)
     target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/discord-rpc/include)
-    target_link_libraries(${TARGET_NAME} PRIVATE discord-rpc sentry::sentry)
+    target_link_libraries(${TARGET_NAME} PRIVATE discord-rpc sentry::sentry "-framework Cocoa")
 elseif(NOT ANDROID AND NOT IOS AND NOT CASIOEMU_WEB)
     target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/discord-rpc/include)
     target_link_libraries(${TARGET_NAME} PRIVATE discord-rpc)

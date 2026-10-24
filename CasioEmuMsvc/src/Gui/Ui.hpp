@@ -19,6 +19,7 @@ extern casioemu::MMU* me_mmu;
 extern casioemu::Emulator* m_emu;
 extern SDL_Window* window;
 extern SDL_Renderer* renderer;
+extern bool calculator_panel_focused;
 extern std::vector<Label> g_labels;
 extern uint32_t pc_cache;
 extern CodeViewer* code_viewer;
@@ -44,6 +45,9 @@ public:
 	ImGuiWindowFlags flags{};
 
 	virtual void Render() {
+		// Settings is the recovery point for hidden tabs and must always remain available.
+		if (name && std::strcmp(name, "Settings") == 0)
+			open = true;
 		if (!open)
 			return;
 #ifdef __ANDROID__
@@ -61,6 +65,8 @@ public:
 #else
 		if (ImGui::Begin(name, &open, flags)) {
 #endif
+			if (name && std::strcmp(name, "Calculator") == 0)
+				calculator_panel_focused = ImGui::IsWindowFocused();
 			RenderCore();
 		}
 		ImGui::End();
@@ -72,6 +78,8 @@ public:
 			if (m_emu)
 				m_emu->ResetToMainMenu();
 		}
+		if (name && std::strcmp(name, "Settings") == 0)
+			open = true;
 
 #ifdef __ANDROID__
 		ImGui::PopStyleVar();

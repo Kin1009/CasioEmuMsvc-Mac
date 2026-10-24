@@ -57,6 +57,7 @@ char* n_ram_buffer = 0;
 casioemu::MMU* me_mmu = 0;
 SDL_Window* window = 0;
 SDL_Renderer* renderer = 0;
+bool calculator_panel_focused = false;
 
 std::vector<Label> g_labels;
 
@@ -264,6 +265,7 @@ static void RenderDebuggerGuiWindows() {
 void gui_loop() {
 	if (!m_emu->Running())
 		return;
+	calculator_panel_focused = false;
 
 	ImGuiIO& io = ImGui::GetIO();
 
@@ -334,7 +336,7 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 	if (nx_tools)
 		windows.push_back(new QrCodeWindow());
 #endif
-	windows.push_back(MakeThemeWindow());
+	windows.push_back(MakeSettingsWindow());
 	if (!multiview) {
 		auto* bitmap_window = CreateBitmapViewer();
 		windows.push_back(bitmap_window);
@@ -460,6 +462,7 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 
 	io.WantCaptureKeyboard = true;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_NavNoCaptureKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
 	ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);

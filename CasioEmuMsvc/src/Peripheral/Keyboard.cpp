@@ -115,6 +115,8 @@ namespace casioemu {
 
 		// Maps from keycode to an index to (buttons).
 		std::unordered_map<SDL_Keycode, size_t> keyboard_map;
+		std::unordered_map<SDL_Keycode, size_t> held_keyboard_keys;
+		size_t keyboard_button_holds[BUTTON_SLOT_COUNT]{};
 
 		bool p0, p1, p146;
 
@@ -147,6 +149,52 @@ namespace casioemu {
 		void RecalculateGhost();
 		void RecalculateEmuInput(); // Declaration for new function
 		bool AnyFingerPressing();	// Declaration for new function
+		void HandleKeyboardKey(SDL_Keycode keycode, bool pressed) {
+			auto mapping = keyboard_map.find(keycode);
+			if (pressed) {
+				if (mapping == keyboard_map.end() || mapping->second >= std::size(buttons) ||
+					buttons[mapping->second].type == Button::BT_NONE)
+					return;
+				if (!held_keyboard_keys.emplace(keycode, mapping->second).second)
+					return; // Ignore SDL key-repeat; one down must pair with one up.
+				if (keyboard_button_holds[mapping->second]++ == 0)
+					PressButton(buttons[mapping->second], false, -1);
+				return;
+			}
+
+			auto held = held_keyboard_keys.find(keycode);
+			if (held == held_keyboard_keys.end())
+				return;
+			const size_t button_index = held->second;
+			held_keyboard_keys.erase(held);
+			if (button_index >= std::size(buttons) || keyboard_button_holds[button_index] == 0)
+				return;
+			if (--keyboard_button_holds[button_index] != 0)
+				return; // Another host key is still holding this calculator key.
+			if (TryReleaseButton(buttons[button_index])) {
+				if (real_hardware)
+					RecalculateGhost();
+				else
+					RecalculateEmuInput();
+			}
+		}
+		void ReleaseKeyboardKeys() {
+			held_keyboard_keys.clear();
+			bool released = false;
+			for (size_t index = 0; index < std::size(buttons); ++index) {
+				if (keyboard_button_holds[index] == 0)
+					continue;
+				keyboard_button_holds[index] = 0;
+				if (TryReleaseButton(buttons[index]))
+					released = true;
+			}
+			if (released) {
+				if (real_hardware)
+					RecalculateGhost();
+				else
+					RecalculateEmuInput();
+			}
+		}
 		void* QueryInterface(const char* name) override {
 			if (strcmp(name, typeid(IKeyboardAutomation).name()) == 0) {
 				return (IKeyboardAutomation*)this;
@@ -217,17 +265,7 @@ namespace casioemu {
 			}
 		}
 		void HandleKeycode(int keycode, bool pressed) override {
-			auto iterator = keyboard_map.find(static_cast<SDL_Keycode>(keycode));
-			if (iterator == keyboard_map.end()) return;
-			if (pressed) {
-				PressButton(buttons[iterator->second], false, iterator->second);
-			}
-			else {
-				if (TryReleaseButton(buttons[iterator->second])) {
-					if (real_hardware) RecalculateGhost();
-					else RecalculateEmuInput();
-				}
-			}
+			HandleKeyboardKey(static_cast<SDL_Keycode>(keycode), pressed);
 		}
 	};
 	struct DelayedReleaseParam {
@@ -494,6 +532,9 @@ namespace casioemu {
 		}
 
 	init_kbd: {
+		keyboard_map.clear();
+		held_keyboard_keys.clear();
+		std::fill(std::begin(keyboard_button_holds), std::end(keyboard_button_holds), 0);
 		for (auto& button : buttons)
 			button = {};
 
@@ -575,9 +616,21 @@ namespace casioemu {
 			BuildButtonShape(button, btn);
 		}
 	}
+	// Space is the conventional host binding for the calculator's EXE key.
+	// Treat both Enter keys as aliases when a model does not define them itself.
+	if (keyboard_map.find(SDLK_RETURN) == keyboard_map.end()) {
+		auto exe_key = keyboard_map.find(SDLK_SPACE);
+		if (exe_key != keyboard_map.end())
+			keyboard_map[SDLK_RETURN] = exe_key->second;
 	}
+	if (keyboard_map.find(SDLK_KP_ENTER) == keyboard_map.end()) {
+		auto exe_key = keyboard_map.find(SDLK_SPACE);
+		if (exe_key != keyboard_map.end())
+			keyboard_map[SDLK_KP_ENTER] = exe_key->second;
+	}
+}
 
-	void Keyboard::Reset() {
+void Keyboard::Reset() {
 		p0 = false;
 		p1 = false;
 		p146 = false;
@@ -694,6 +747,10 @@ namespace casioemu {
 			SDL_GetWindowSize(emulator.window, &window_w, &window_h);
 			ReleaseAt(event.tfinger.x * window_w, event.tfinger.y * window_h, event.tfinger.fingerId);
 		} break;
+		case SDL_WINDOWEVENT:
+			if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+				ReleaseKeyboardKeys();
+			break;
 		case SDL_MOUSEBUTTONDOWN:
 			// Mouse clicks do not carry finger ID, treat as new press or stick
 			// The PressAt/PressButton will handle if a button is already pressed by a finger
@@ -748,9 +805,8 @@ namespace casioemu {
 
 		case SDL_KEYDOWN:
 		case SDL_KEYUP:
+		{
 			SDL_Keycode keycode = event.key.keysym.sym;
-			auto iterator = keyboard_map.find(keycode);
-			// printf("[Keyboard][Info] SDL_Keycode: %x(%s)\n", keycode, SDL_GetKeyName(keycode));
 #ifndef CASIOEMU_CORE_WEB
 			if (event.key.keysym.sym == SDLK_F12 && event.key.state == SDL_PRESSED) {
 				if (event.key.keysym.mod & KMOD_CTRL) {
@@ -773,24 +829,14 @@ namespace casioemu {
 				printf("Factory test/Ti Diag status: %d\n", factory_test);
 				return;
 			}
-			if (iterator == keyboard_map.end())
-				break;
-			if (event.key.state == SDL_PRESSED)
-				PressButton(buttons[iterator->second], false, iterator->second);
-			else {
-				if (TryReleaseButton(buttons[iterator->second])) {
-					if (real_hardware)
-						RecalculateGhost();
-					else
-						RecalculateEmuInput();
-				}
-			}
+			HandleKeyboardKey(keycode, event.type == SDL_KEYDOWN);
 			break;
 		}
 	}
+}
 
-	void Keyboard::Uninitialise() {
-		DestroyButtonShapes();
+void Keyboard::Uninitialise() {
+	DestroyButtonShapes();
 		for (auto& button : buttons) {
 			if (button.releaseTimer != 0) {
 				SDL_RemoveTimer(button.releaseTimer);
@@ -892,24 +938,17 @@ namespace casioemu {
 
 		uint8_t current_keyboard_in_emu = 0;
 		uint8_t current_keyboard_out_emu = 0;
-		bool first_pressed_button_found = false;
+		bool any_pressed_button = false;
 
 		for (const auto& button : buttons) {
 			if (button.type == Button::BT_BUTTON && button.pressed) {
-				current_keyboard_in_emu |= button.ki_bit; // OR all pressed KI bits together
-
-				if (!first_pressed_button_found) {
-					// For KO, the original emulator behavior was "Report an arbitrary pressed key."
-					// This implies only one KO line might be considered active for the emulated CPU.
-					// If multiple KO lines can truly be active and sensed by the CPU, this should be ORed.
-					// Sticking to one KO line active based on the first found pressed button:
-					current_keyboard_out_emu = button.ko_bit;
-					first_pressed_button_found = true;
-				}
+				current_keyboard_in_emu |= button.ki_bit;
+				current_keyboard_out_emu |= static_cast<uint8_t>(button.ko_bit);
+				any_pressed_button = true;
 			}
 		}
 
-		if (first_pressed_button_found) {
+		if (any_pressed_button) {
 			keyboard_in_emu = current_keyboard_in_emu;
 			keyboard_out_emu = current_keyboard_out_emu;
 			emu_ki_readcount = emu_ko_readcount = 0;

@@ -223,6 +223,7 @@ Theme.Tint=Bật lớp phủ màu
 Theme.SeedColor=Màu gốc
 Theme.MD=Trích xuất từ nền
 Theme.EnableDiscordRPC=Bật hiển thị Discord RPC
+Theme.EnableUpdateChecker=Bật kiểm tra cập nhật
 CodeViewer.Search=Tìm kiếm:
 CodeViewer.Hex=Hệ thập lục phân
 CodeViewer.Inst=Lệnh

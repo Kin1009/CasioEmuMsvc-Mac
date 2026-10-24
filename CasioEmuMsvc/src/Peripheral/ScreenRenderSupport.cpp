@@ -191,6 +191,7 @@ void PixelScreenTexture::Reset() {
 	texture = nullptr;
 	width = height = 0;
 	pixels.clear();
+	uploaded_pixels.clear();
 }
 void PixelScreenTexture::Render(SDL_Renderer* renderer, const SDL_Rect& dest, int requested_width, int requested_height,
 	const ColourInfo& ink_colour, const float* alpha) {
@@ -208,6 +209,7 @@ void PixelScreenTexture::Render(SDL_Renderer* renderer, const SDL_Rect& dest, in
 		width = requested_width;
 		height = requested_height;
 		pixels.resize(static_cast<size_t>(width) * height * 4);
+		uploaded_pixels.clear();
 	}
 	// The shared alpha buffer reserves its first 192-column row for status.
 	for (int y = 0; y < height; ++y)
@@ -219,9 +221,14 @@ void PixelScreenTexture::Render(SDL_Renderer* renderer, const SDL_Rect& dest, in
 			pixels[offset + 2] = colour.b;
 			pixels[offset + 3] = colour.a;
 		}
-	if (SDL_UpdateTexture(texture, nullptr, pixels.data(), width * 4) != 0) {
-		SDL_Log("[Screen][Warn] SDL_UpdateTexture failed for pixel screen: %s", SDL_GetError());
-		return;
+	// LCD pixels are often unchanged across many emulator frames. Avoid sending
+	// a redundant full-frame texture upload to SDL/Metal in that case.
+	if (pixels != uploaded_pixels) {
+		if (SDL_UpdateTexture(texture, nullptr, pixels.data(), width * 4) != 0) {
+			SDL_Log("[Screen][Warn] SDL_UpdateTexture failed for pixel screen: %s", SDL_GetError());
+			return;
+		}
+		uploaded_pixels = pixels;
 	}
 	if (SDL_RenderCopy(renderer, texture, nullptr, &dest) != 0)
 		SDL_Log("[Screen][Warn] SDL_RenderCopy failed for pixel screen: %s", SDL_GetError());

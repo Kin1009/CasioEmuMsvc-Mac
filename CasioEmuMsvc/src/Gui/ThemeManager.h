@@ -24,6 +24,7 @@
 	CFG_VAR(ImGuiStyle, igs_light, ImGuiStyle())\
 	CFG_VAR(ImGuiStyle, igs_dark, ImGuiStyle())\
 	CFG_STR(language, 30, "en_US")\
+	CFG_STR(hiddenTabs, 1024, "")\
 	CFG_VAR(float, scale, THEME_DEFAULT_SCALE)\
 	CFG_STR(injectionFilePath, 256, THEME_DEFAULT_INJECTION_FILE_PATH)\
 	CFG_VAR(bool, lowPerformanceMode, false)\
