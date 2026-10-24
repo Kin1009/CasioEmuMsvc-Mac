@@ -787,3 +787,34 @@ void ThemeManager::SetSeedColor(const ImVec4& color) {
 		SaveSettings();
 	}
 }
+
+void ThemeManager::ApplyMidnightBlue() {
+	m_settings.isDarkMode = true;
+	m_settings.seedColor = ImVec4(0.15f, 0.25f, 0.45f, 1.0f);
+	ApplyDefaultTheme();
+	// Shift blues a little deeper for the preset feel
+	ImGuiStyle& s = ImGui::GetStyle();
+	s.Colors[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.07f, 0.14f, 1.0f);
+	s.Colors[ImGuiCol_FrameBg] = ImVec4(0.08f, 0.12f, 0.22f, 1.0f);
+	s.Colors[ImGuiCol_Button] = ImVec4(0.10f, 0.15f, 0.30f, 1.0f);
+}
+
+void ThemeManager::ApplySolarized() {
+	m_settings.isDarkMode = true;
+	m_settings.seedColor = ImVec4(0.55f, 0.55f, 0.35f, 1.0f);
+	ApplyDefaultTheme();
+	ImGuiStyle& s = ImGui::GetStyle();
+	s.Colors[ImGuiCol_WindowBg] = ImVec4(0.12f, 0.12f, 0.10f, 1.0f);
+	s.Colors[ImGuiCol_FrameBg] = ImVec4(0.18f, 0.18f, 0.14f, 1.0f);
+	s.Colors[ImGuiCol_Text] = ImVec4(0.80f, 0.80f, 0.60f, 1.0f);
+}
+
+void ThemeManager::ApplyMonoGreen() {
+	m_settings.isDarkMode = true;
+	m_settings.seedColor = ImVec4(0.20f, 0.55f, 0.20f, 1.0f);
+	ApplyDefaultTheme();
+	ImGuiStyle& s = ImGui::GetStyle();
+	s.Colors[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.12f, 0.05f, 1.0f);
+	s.Colors[ImGuiCol_FrameBg] = ImVec4(0.08f, 0.20f, 0.08f, 1.0f);
+	s.Colors[ImGuiCol_Button] = ImVec4(0.12f, 0.30f, 0.12f, 1.0f);
+}

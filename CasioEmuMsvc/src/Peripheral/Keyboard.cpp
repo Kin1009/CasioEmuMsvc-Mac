@@ -618,10 +618,14 @@ namespace casioemu {
 	}
 	// Space is the conventional host binding for the calculator's EXE key.
 	// Treat both Enter keys as aliases when a model does not define them itself.
+	// Explicit alias tracking: only apply when SDLK_SPACE is explicitly mapped.
+	bool return_alias_applied = false;
 	if (keyboard_map.find(SDLK_RETURN) == keyboard_map.end()) {
 		auto exe_key = keyboard_map.find(SDLK_SPACE);
-		if (exe_key != keyboard_map.end())
+		if (exe_key != keyboard_map.end()) {
 			keyboard_map[SDLK_RETURN] = exe_key->second;
+			return_alias_applied = true; // tracked explicit alias
+		}
 	}
 	if (keyboard_map.find(SDLK_KP_ENTER) == keyboard_map.end()) {
 		auto exe_key = keyboard_map.find(SDLK_SPACE);
@@ -796,8 +800,8 @@ void Keyboard::Reset() {
 				else if (!AnyFingerPressing()) {
 					// If no fingers are pressing anything, and a mouse up occurs,
 					// it might be a general release action.
-					// This is debatable. For now, to minimize impact, only ReleaseAll if no fingers are active.
-					// ReleaseAll(); // Original behavior - potentially problematic with multi-touch
+					// Only ReleaseAll when finger count is zero.
+					ReleaseAll();
 				}
 			}
 			// Right mouse up does nothing to button.pressed state typically

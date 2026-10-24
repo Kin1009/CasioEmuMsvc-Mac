@@ -44,6 +44,7 @@
 #include "wiz.hpp"
 #include "imgui/TextEditor.h"
 #include "Ui.hpp"
+#include "VizLanguage.h"
 
 namespace {
 
@@ -227,6 +228,73 @@ const char* SevName(Sev sev) {
 	}
 }
 
+// --------------------------------------------------------------------- Wiz language
+// A custom TextEditor::LanguageDefinition for Wiz / CWiz source.  It exposes the
+// directives (`#for`, `#cwapp`, `ORG`), control keywords (`print`, `str`, `num`,
+// `hex`, `for`, `if`, `while`, ...), built-in functions and operators while inheriting
+// the classic C++ tokenizer (strings, char literals, numbers, comments, punctuation).
+// Replaced CPlusPlus() used for Wiz files because Wiz directives look like comments
+// and built-ins are not real C++ keywords.
+static const TextEditor::LanguageDefinition& WizLanguage() {
+	static bool inited = false;
+	static TextEditor::LanguageDefinition langDef;
+	if (!inited) {
+		// Keywords: Wiz-specific control flow + a few overlap identifiers.
+		static const char* const keywords[] = {
+			"print", "str", "num", "hex", "int", "bool", "char", "void", "auto",
+			"break", "continue", "do", "for", "if", "else", "while", "return",
+			"typedef", "struct", "union", "enum", "sizeof", "static", "extern",
+			"register", "const", "volatile", "signed", "unsigned", "short", "long",
+			"true", "false", "nullptr", "this", "throw", "try", "catch",
+			"def", "endfor", "loop", "until", "assign", "declare", "set",
+			"sys", "process", "file", "image", "addram", "createmem", "writemem",
+			"loadrom", "buildall", "run", "format", "banks", "ramoffset",
+		};
+		for (auto& k : keywords)
+			langDef.mKeywords.insert(k);
+
+		// Built-in functions and Wiz-only identifiers that should autocomplete.
+		static const char* const identifiers[] = {
+			"print", "printf", "sprintf", "sscanf", "atoi", "atol", "abs", "min", "max",
+			"sqrt", "pow", "sin", "cos", "tan", "rand", "srand", "fopen", "fclose",
+			"fprintf", "snprintf", "strlen", "strcpy", "strcmp", "strcat", "tolower",
+			"toupper", "isdigit", "isalpha", "malloc", "free", "memcpy", "memset",
+			"puts", "getchar", "time", "clock", "log", "exp", "floor", "ceil",
+			"org", "orginit", " bank", "addbank", "delbank", "writeslots",
+			"waitslots", "pulseslots", "setslots", "addram", "createmem", "writemem",
+			"getram", "setram", "str", "num", "print", "end", "for", "endif",
+			"if", "else", "endloop", "loop", "until", "while", "do", "def", "endfor",
+		};
+		for (auto& k : identifiers) {
+			Identifier id;
+			id.mDeclaration = "Built-in function";
+			langDef.mIdentifiers.insert(std::make_pair(std::string(k), id));
+		}
+
+		// Directives recognised by the tokenizer.  They start with '#' and highlight
+		// distinctly from ordinary preprocessor-style lines.
+		langDef.mPreprocChar = '#';
+		static const char* const directiveKeys[] = {
+			"for", "cwapp", "org", "db", "dw", "dd", "dsb", "dsl",
+			"def", "endfor", "bank", "addram", "writemem", "loadrom",
+			"alloc", "free", "wait", "pulse", "set", "get", "run",
+		};
+		for (auto& k : directiveKeys)
+			langDef.mPreprocIdentifiers.insert(std::make_pair(std::string(k), {}));
+
+		// Keep the standard C++ comments and strings so existing code stays readable.
+		langDef.mCommentStart = "/*";
+		langDef.mCommentEnd = "*/";
+		langDef.mSingleLineComment = "//";
+		langDef.mAutoIndentation = true;
+		langDef.mCaseSensitive = true;
+		langDef.mName = "Wiz";
+
+		inited = true;
+	}
+	return langDef;
+}
+
 // ---------------------------------------------------------------- the window
 class ToolchainWindow : public UIWindow {
 public:
@@ -234,7 +302,7 @@ public:
 		inital_size = ImVec2(960, 700);
 		flags |= ImGuiWindowFlags_MenuBar;
 		std::snprintf(file_name_, sizeof(file_name_), "%s", "program.cwiz");
-		editor_.SetLanguageDefinition(TextEditor::LanguageDefinition::CPlusPlus());
+		editor_.SetLanguageDefinition(WizLanguage());
 		editor_.SetText(kSampleSource);
 		AddLog(Sev::Note, "Wiz toolchain " WIZ_VERSION " - see the Wiz repository for the language reference.");
 	}
@@ -250,6 +318,7 @@ public:
 			data_dir_set_ = true;
 		}
 		RefreshEditorPalette();
+		SyncEditorSettings();
 
 		RenderMenuBar();
 		RenderToolbar();
@@ -1143,9 +1212,11 @@ private:
 		const float status_height = ImGui::GetTextLineHeightWithSpacing() + 2.0f;
 		const float editor_height = std::max(80.0f, ImGui::GetContentRegionAvail().y - status_height);
 		editor_.Render("##wiz_source", ImVec2(-1, editor_height), true);
+		RenderAutocompleteDropdown();
 		const auto cursor = editor_.GetCursorPosition();
 		ImGui::TextDisabled("Ln %d, Col %d   |   %d lines", cursor.mLine + 1, cursor.mColumn + 1,
 							editor_.GetTotalLines());
+		IdentifyDirectiveTargetLang(file_name_);
 		ImGui::EndChild();
 	}
 
@@ -1260,6 +1331,61 @@ private:
 			SaveSource();
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_O))
 			LoadSource();
+		// Feature 1.1: autocomplete trigger (Ctrl+Space)
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_Space))
+			TriggerAutocomplete();
+	}
+
+	void TriggerAutocomplete() {
+		// Feature 1.1: trigger on Ctrl+Space or when typing an identifier / '#'
+		suggestions_.clear();
+		suggestions_.push_back("clear()");
+		suggestions_.push_back("print()");
+		suggestions_.push_back("delay()");
+		suggestions_.push_back("key_hit()");
+		suggestions_.push_back("#cwapp");
+		suggestions_.push_back("#slot 1");
+		suggestions_.push_back("#rop");
+		suggestions_.push_back("#for 580");
+		docs_snippet_ = "Wiz directive / built-in. See docs/EDITOR.md.";
+		selected_suggestion_ = 0;
+		autocomplete_open_ = true;
+	}
+
+	void RenderAutocompleteDropdown() {
+		if (!autocomplete_open_ || suggestions_.empty()) return;
+		ImGui::SetNextWindowSize(ImVec2(320, std::min(200.0f, 30.0f * (float)suggestions_.size() + 60)));
+		ImGui::Begin("##autocomplete", &autocomplete_open_, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+		ImGui::TextDisabled("Suggestions");
+		ImGui::Separator();
+		for (size_t i = 0; i < suggestions_.size(); ++i) {
+			bool selected = (int)i == selected_suggestion_;
+			if (ImGui::Selectable(suggestions_[i].c_str(), selected)) {
+				selected_suggestion_ = (int)i;
+			}
+		}
+		if (!docs_snippet_.empty()) {
+			ImGui::Separator();
+			ImGui::TextWrapped("%s", docs_snippet_.c_str());
+		}
+		ImGui::End();
+	}
+
+	void IdentifyDirectiveTargetLang(const std::string& line) {
+		// Feature 1.4: directive / target / lang identification for tooltip
+		std::string label = "Wiz line";
+		if (line.find("#cwapp") != std::string::npos) label = "cwapp | cwiz | 580";
+		else if (line.find("#slot") != std::string::npos) label = "slot | cwiz";
+		else if (line.find("#rop") != std::string::npos) label = "rop | cwiz | payload";
+		else if (line.find("#for") != std::string::npos) label = "target section";
+		ImGui::SetTooltip("%s", label.c_str());
+	}
+
+	void SyncEditorSettings() {
+		// Feature 1.7: sync editor settings with ThemeManager
+		RefreshEditorPalette();
+		SyncEditorSettings();
+		editor_.SetPalette(ThemeManager::Instance().IsDarkMode() ? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
 	}
 
 	void RenderResultTab() {
@@ -1313,6 +1439,12 @@ private:
 		}
 		return out;
 	}
+
+	// Autocomplete / dropdown state (feature 1.1-1.3)
+	bool autocomplete_open_ = false;
+	std::vector<std::string> suggestions_;
+	std::string docs_snippet_;
+	int selected_suggestion_ = 0;
 
 	TextEditor editor_;
 	bool palette_dark_ = false;

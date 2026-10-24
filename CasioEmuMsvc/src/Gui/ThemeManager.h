@@ -267,6 +267,11 @@ public:
 	/// 应用默认主题（原 SetupDefaultTheme）
 	void ApplyDefaultTheme();
 
+	// —— Theme presets (seedColor + style only; binary format unchanged) ——
+	void ApplyMidnightBlue();
+	void ApplySolarized();
+	void ApplyMonoGreen();
+
 	// —— Auto-Tint (MD3 Monet) ——
 	void ExtractAndApplyAutoTint(struct SDL_Texture* bgTexture, struct SDL_Renderer* renderer);
 	void SetSeedColor(const ImVec4& color);
