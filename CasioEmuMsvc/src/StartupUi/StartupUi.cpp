@@ -292,8 +292,7 @@ public:
 		}
 
 		if (!init_failed) {
-			// VS Code-style welcome / start screen
-			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true);
+			ImGui::BeginChild("##Welcome", ImVec2(-1, 100), true, ImGuiWindowFlags_NoScrollbars | ImGuiWindowFlags_NoCollapse);
 			ImGui::Text("CasioEmuMsvc");
 			ImGui::SameLine();
 			if (ImGui::Button("Recent")) {}
