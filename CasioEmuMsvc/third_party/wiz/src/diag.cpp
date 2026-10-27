@@ -72,13 +72,14 @@ static std::string loc_string(const std::string& file, int line, int col) {
 }
 
 void Diag::error(const std::string& msg, const std::string& file, int line, int col,
-                 const std::string& src) {
+                 const std::string& src, const std::string& code) {
     errors++;
     const bool tty = stderr_is_tty();
     std::string loc = loc_string(file, line, col);
     std::string head = loc.empty() ? bold(tool, tty) : bold(loc, tty);
-    std::fprintf(stderr, "%s: %s %s\n", head.c_str(), paint("error:", style::ERROR, tty).c_str(),
-                 msg.c_str());
+    std::string suffix = code.empty() ? "" : " [" + code + "]";
+    std::fprintf(stderr, "%s: %s %s%s\n", head.c_str(), paint("error:", style::ERROR, tty).c_str(),
+                 msg.c_str(), suffix.c_str());
     if (!src.empty()) {
         std::string text = rstrip(src, "\n");
         int width = line >= 1 ? (int)std::to_string(line).size() : 1;
@@ -122,6 +123,12 @@ void Diag::note(const std::string& msg, const std::string& file, int line, int c
     std::fprintf(stderr, "%s: %s %s\n", head.c_str(), paint("note:", style::NOTE, tty).c_str(),
                  msg.c_str());
     (void)src;
+}
+
+void Diag::help(const std::string& msg) {
+    if (msg.empty()) return;
+    const bool tty = stderr_is_tty();
+    std::fprintf(stderr, "   %s %s\n", paint("help:", style::HINT, tty).c_str(), msg.c_str());
 }
 
 void Diag::fatal(const std::string& msg, const std::string& file, int line, int col) {

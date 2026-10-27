@@ -11,6 +11,7 @@
 #include <set>
 
 #include "font6x8.hpp"
+#include "font_cw.hpp"
 #include "wiz.hpp"  // key_consts()
 
 namespace wiz {
@@ -24,8 +25,10 @@ static long long wrap16(long long v) {
 
 // =================================================================== lexer
 static const std::set<std::string> CW_KEYWORDS = {
-    "int", "char", "void", "const", "rom", "rom8", "if", "else", "while", "do",
-    "for", "return", "break", "continue", "true", "false"};
+    "int", "char", "void", "bool", "const", "static", "volatile", "register",
+    "extern", "inline", "signed", "unsigned", "short", "long", "rom", "rom8",
+    "if", "else", "while", "do", "for", "return", "break", "continue", "true",
+    "false", "switch", "case", "default", "goto", "sizeof"};
 
 // multi-character operators, longest first
 static const std::vector<std::string> OP_TABLE = {
@@ -83,7 +86,9 @@ static std::vector<uint32_t> decode_escapes(const std::string& text, int tok_lin
             continue;
         }
         i++;
-        if (i >= n) throw CwizError("unterminated escape sequence", tok_line);
+        if (i >= n)
+            throw CwizError("unterminated escape sequence", tok_line, 0,
+                            "add the escaped character after '\\'", "lex.unterminated-escape");
         char e = text[i];
         i++;
         switch (e) {
@@ -102,12 +107,15 @@ static std::vector<uint32_t> decode_escapes(const std::string& text, int tok_lin
                 std::string hexs;
                 while (i < n && is_hex(text[i])) { hexs += text[i]; i++; }
                 if (hexs.empty())
-                    throw CwizError("\\x needs at least one hex digit", tok_line);
+                    throw CwizError("\\x needs at least one hex digit", tok_line, 0,
+                                    "write two hex digits, for example \\x41", "lex.bad-escape");
                 out.push_back((uint32_t)(std::strtoul(hexs.c_str(), nullptr, 16) & 0xFF));
                 break;
             }
             default:
-                throw CwizError(fmt("unknown escape sequence \\%c", e), tok_line);
+                throw CwizError(fmt("unknown escape sequence \\%c", e), tok_line, 0,
+                                "valid escapes are \\n \\t \\r \\0 \\\\ \\' \\\" and \\xNN",
+                                "lex.bad-escape");
         }
     }
     return out;
@@ -134,7 +142,9 @@ static std::vector<Token> lex(const std::string& src) {
                 if (src[i] == '\n') { line++; col = 1; i++; }
                 else adv();
             }
-            if (i >= n) throw CwizError("unterminated block comment", line, col);
+            if (i >= n)
+                throw CwizError("unterminated block comment", line, col,
+                                "add '*/' to close the comment", "lex.unterminated-comment");
             adv(2);
             continue;
         }
@@ -146,13 +156,18 @@ static std::vector<Token> lex(const std::string& src) {
                 text += src[i]; adv();
                 while (i < n && is_hex(src[i])) { text += src[i]; adv(); }
                 if (text == "0x" || text == "0X")
-                    throw CwizError("0x needs at least one hex digit", sl, sc);
+                    throw CwizError("0x needs at least one hex digit", sl, sc,
+                                    "write a hex value, for example 0x1F", "lex.bad-number");
                 Token t; t.kind = "num";
                 t.num = (long long)std::strtoull(text.c_str(), nullptr, 16);
                 t.line = sl; t.col = sc;
                 push(t);
             } else {
                 while (i < n && is_digit(src[i])) { text += src[i]; adv(); }
+                if (i + 1 < n && src[i] == '.' && is_digit(src[i + 1]))
+                    throw CwizError("floating-point literals are not supported", sl, sc,
+                                    "values are 16-bit integers; use fixed point such as 15/10",
+                                    "lex.float");
                 Token t; t.kind = "num";
                 t.num = (long long)std::strtoll(text.c_str(), nullptr, 10);
                 t.line = sl; t.col = sc;
@@ -166,7 +181,9 @@ static std::vector<Token> lex(const std::string& src) {
             std::string body;
             while (i < n && src[i] != '"') {
                 if (src[i] == '\n')
-                    throw CwizError("unterminated string literal", sl, sc);
+                    throw CwizError("unterminated string literal", sl, sc,
+                                    "add a closing '\"' before the end of the line",
+                                    "lex.unterminated-string");
                 if (src[i] == '\\') {
                     body += src[i]; adv();
                     if (i < n) { body += src[i]; adv(); }
@@ -175,7 +192,10 @@ static std::vector<Token> lex(const std::string& src) {
                 body += src[i];
                 adv();
             }
-            if (i >= n) throw CwizError("unterminated string literal", sl, sc);
+            if (i >= n)
+                throw CwizError("unterminated string literal", sl, sc,
+                                "add a closing '\"' at the end of the string",
+                                "lex.unterminated-string");
             adv();
             Token t; t.kind = "str"; t.cps = decode_escapes(body, sl); t.line = sl; t.col = sc;
             push(t);
@@ -194,11 +214,15 @@ static std::vector<Token> lex(const std::string& src) {
                 body += src[i];
                 adv();
             }
-            if (i >= n) throw CwizError("unterminated character literal", sl, sc);
+            if (i >= n)
+                throw CwizError("unterminated character literal", sl, sc,
+                                "add a closing single quote after the character",
+                                "lex.unterminated-char");
             adv();
             std::vector<uint32_t> chars = decode_escapes(body, sl);
             if (chars.size() != 1)
-                throw CwizError("character literal must hold exactly one character", sl, sc);
+                throw CwizError("character literal must hold exactly one character", sl, sc,
+                                "use a string literal (\"...\") for text", "lex.bad-char");
             Token t; t.kind = "char"; t.num = (long long)(chars[0] & 0xFFFF); t.line = sl; t.col = sc;
             push(t);
             continue;
@@ -214,6 +238,10 @@ static std::vector<Token> lex(const std::string& src) {
             push(t);
             continue;
         }
+        if (c == '.' && i + 1 < n && is_digit(src[i + 1]))
+            throw CwizError("floating-point literals are not supported", line, col,
+                            "values are 16-bit integers; use fixed point such as 15/10",
+                            "lex.float");
         bool matched = false;
         for (const auto& op : OP_TABLE) {
             if (src.compare(i, op.size(), op) == 0) {
@@ -225,7 +253,16 @@ static std::vector<Token> lex(const std::string& src) {
             }
         }
         if (matched) continue;
-        throw CwizError(fmt("unexpected character '%c'", c), line, col);
+        {
+            std::string hint;
+            unsigned char uc = (unsigned char)c;
+            if (uc >= 0x80)
+                hint = "source files must be UTF-8/ASCII; non-ASCII characters are not identifiers";
+            else if (c == '`')
+                hint = "use a double quote (\") for strings";
+            throw CwizError(fmt("unexpected character '%c'", c), line, col, hint,
+                            "lex.unexpected-character");
+        }
     }
     Token t; t.kind = "eof"; t.line = line; t.col = col;
     toks.push_back(t);
@@ -235,7 +272,7 @@ static std::vector<Token> lex(const std::string& src) {
 // =================================================================== AST
 enum class NK {
     Num, Str, Ident, Index, Call, Unary, IncDec, Bin, Cond, Assign,
-    Block, DeclStmt, If, While, DoWhile, For, Return, Break, Continue, ExprStmt,
+    Block, DeclStmt, DeclGroup, If, While, DoWhile, For, Return, Break, Continue, ExprStmt,
     ConstDecl, VarDecl, ArrayDecl, Param, FuncDecl, Program
 };
 
@@ -341,7 +378,12 @@ static std::set<std::string> referenced_names(const NodeP& n) {
 }
 
 // =================================================================== parser
-static const std::set<std::string> TYPES = {"int", "char", "void"};
+static const std::set<std::string> TYPES = {"int", "char", "void", "bool"};
+// Storage classes / width words are accepted and ignored: every value is a
+// 16-bit cell in this toolchain, so `unsigned int` and `int` are the same.
+static const std::set<std::string> DECL_QUALIFIERS = {
+    "const", "static", "volatile", "register", "extern", "inline", "signed",
+    "unsigned", "short", "long"};
 static const std::set<std::string> ASSIGN_OPS = {"=",  "+=",  "-=",  "*=",  "/=",  "%=",
                                                  "&=", "|=",  "^=",  "<<=", ">>="};
 
@@ -391,6 +433,11 @@ private:
     bool at_kw(const std::set<std::string>& kws) const {
         return cur().kind == "kw" && kws.count(cur().sval);
     }
+    bool at_decl_start() const {
+        if (cur().kind != "kw") return false;
+        return TYPES.count(cur().sval) || DECL_QUALIFIERS.count(cur().sval) ||
+               cur().sval == "rom" || cur().sval == "rom8";
+    }
     const Token& next() { return t[p++]; }
 
     static std::string show(const Token& tk) {
@@ -402,31 +449,57 @@ private:
     void expect_op(const std::string& op) {
         if (!at_op1(op)) {
             const Token& tk = cur();
+            std::string hint;
+            if (op == ";") hint = "add ';' at the end of the statement";
+            else if (op == ")") hint = "add a closing ')'";
+            else if (op == "}") hint = "add a closing '}' (or check the braces above)";
+            else if (op == "{") hint = "add '{' to start the block";
+            else if (op == "(") hint = "add '(' after the keyword";
+            else if (op == "]") hint = "add a closing ']'";
             throw CwizError(fmt("expected '%s' before '%s'", op.c_str(), show(tk).c_str()),
-                            tk.line, tk.col);
+                            tk.line, tk.col, hint, "syntax.expected-token");
         }
         next();
     }
     Token expect_ident() {
         if (cur().kind != "ident") {
             const Token& tk = cur();
-            throw CwizError("expected an identifier before " + show(tk), tk.line, tk.col);
+            std::string hint;
+            if (tk.kind == "kw")
+                hint = "'" + tk.sval + "' is a keyword; choose another name";
+            else
+                hint = "a name may contain letters, digits and '_' and cannot start with a digit";
+            throw CwizError("expected an identifier before " + show(tk), tk.line, tk.col, hint,
+                            "syntax.expected-identifier");
         }
         return next();
     }
 
-    std::string type_name() {
+    // Skip storage-class / width keywords and return the base type.
+    std::string base_type_name() {
+        while (at_kw(DECL_QUALIFIERS)) next();
         const Token& tk = cur();
         if (tk.kind == "kw" && TYPES.count(tk.sval)) {
             std::string v = tk.sval;
             next();
-            while (at_op1("*")) {  // int *p / char **q
-                next();
-                v += "*";
-            }
             return v;
         }
-        throw CwizError("expected a type before " + show(tk), tk.line, tk.col);
+        std::string hint;
+        if (tk.kind == "ident") {
+            std::vector<std::string> candidates(TYPES.begin(), TYPES.end());
+            hint = did_you_mean(tk.sval, candidates);
+        }
+        throw CwizError("expected a type before " + show(tk), tk.line, tk.col, hint,
+                        "syntax.expected-type");
+    }
+
+    std::string type_name() {
+        std::string v = base_type_name();
+        while (at_op1("*")) {  // int *p / char **q
+            next();
+            v += "*";
+        }
+        return v;
     }
 
     NodeP decl(bool global_scope) {
@@ -441,21 +514,35 @@ private:
                 throw CwizError(tk.sval + " tables are only allowed at file scope", tk.line, tk.col);
             return rom_decl();
         }
-        if (at_kw(TYPES)) return type_decl(global_scope);
-        throw CwizError("expected a declaration, found " + show(tk), tk.line, tk.col);
+        if (at_decl_start()) return type_decl(global_scope);
+        std::string hint;
+        if (tk.kind == "ident") {
+            hint = "a declaration starts with a type, for example 'int " + tk.sval + ";'";
+        }
+        throw CwizError("expected a declaration, found " + show(tk), tk.line, tk.col, hint,
+                        "syntax.expected-declaration");
     }
 
     NodeP const_decl() {
         Token kw = next();
-        if (at_kw(TYPES)) next();
-        Token name = expect_ident();
-        expect_op("=");
-        NodeP value = expr();
+        std::string base = "int";
+        if (at_decl_start()) base = base_type_name();
+        NodeP group = mk(NK::DeclGroup, kw.line, kw.col);
+        while (true) {
+            while (at_op1("*")) next();
+            Token name = expect_ident();
+            expect_op("=");
+            NodeP value = expr();
+            NodeP n = mk(NK::ConstDecl, name.line, name.col);
+            n->sval = name.sval;
+            n->type = base;
+            n->a = value;
+            group->list.push_back(n);
+            if (at_op1(",")) { next(); continue; }
+            break;
+        }
         expect_op(";");
-        NodeP n = mk(NK::ConstDecl, kw.line, kw.col);
-        n->sval = name.sval;
-        n->a = value;
-        return n;
+        return group->list.size() == 1 ? group->list[0] : group;
     }
 
     NodeP rom_decl() {
@@ -463,33 +550,42 @@ private:
         std::string kind = kind_tok.sval;
         std::string elem = "int";
         if (at_kw(TYPES)) elem = next().sval;
-        Token name = expect_ident();
-        NodeP size_expr;
-        if (at_op1("[")) {
-            next();
-            if (!at_op1("]")) size_expr = expr();
-            expect_op("]");
-        }
-        expect_op("=");
-        NodeP n = mk(NK::ArrayDecl, kind_tok.line, kind_tok.col);
-        n->sval = name.sval;
-        n->kind = kind;
-        n->type = elem;
-        n->size_expr = size_expr;
-        if (kind == "rom8" && at_kind("str")) {
-            n->cps = next().cps;
-            n->init_is_str = true;
-        } else {
-            n->list = init_list();
+        NodeP group = mk(NK::DeclGroup, kind_tok.line, kind_tok.col);
+        while (true) {
+            Token name = expect_ident();
+            NodeP size_expr;
+            if (at_op1("[")) {
+                next();
+                if (!at_op1("]")) size_expr = expr();
+                expect_op("]");
+            }
+            NodeP n = mk(NK::ArrayDecl, name.line, name.col);
+            n->sval = name.sval;
+            n->kind = kind;
+            n->type = elem;
+            n->size_expr = size_expr;
+            if (at_op1("=")) {
+                next();
+                if (kind == "rom8" && at_kind("str")) {
+                    n->cps = next().cps;
+                    n->init_is_str = true;
+                } else {
+                    n->list = init_list();
+                }
+            }
+            group->list.push_back(n);
+            if (at_op1(",")) { next(); continue; }
+            break;
         }
         expect_op(";");
-        return n;
+        return group->list.size() == 1 ? group->list[0] : group;
     }
 
     std::vector<NodeP> init_list() {
         if (!at_op1("{")) {
             const Token& tk = cur();
-            throw CwizError("expected '{' to start an initializer", tk.line, tk.col);
+            throw CwizError("expected '{' to start an initializer", tk.line, tk.col,
+                            "array initializers look like '{1, 2, 3}'", "syntax.expected-token");
         }
         next();
         std::vector<NodeP> items;
@@ -510,55 +606,78 @@ private:
 
     NodeP type_decl(bool global_scope) {
         Token start = cur();
-        std::string ty = type_name();
-        Token name = expect_ident();
-        if (at_op1("(")) {
-            std::vector<NodeP> params = param_list();
-            NodeP body = block();
-            if (!global_scope)
-                throw CwizError("functions can only be defined at file scope", start.line, start.col);
-            NodeP n = mk(NK::FuncDecl, start.line, start.col);
-            n->sval = name.sval;
-            n->list = params;
-            n->b = body;
-            n->type = ty;
-            return n;
-        }
-        if (at_op1("[")) {
-            if (!global_scope)
-                throw CwizError("arrays can only be declared at file scope", start.line, start.col);
-            next();
-            NodeP size_expr;
-            if (!at_op1("]")) size_expr = expr();
-            expect_op("]");
-            NodeP n = mk(NK::ArrayDecl, start.line, start.col);
-            n->sval = name.sval;
-            n->kind = "ram";
-            n->type = ty;
-            n->size_expr = size_expr;
-            if (at_op1("=")) {
-                next();
-                if (ty == "char" && at_kind("str")) {  // char buf[N] = "..."
-                    n->cps = next().cps;
-                    n->init_is_str = true;
-                } else {
-                    n->list = init_list();
-                }
+        std::string base = base_type_name();
+        NodeP group = mk(NK::DeclGroup, start.line, start.col);
+
+        while (true) {
+            int pointers = 0;
+            while (at_op1("*")) { next(); ++pointers; }
+            Token name = expect_ident();
+            std::string ty = base + std::string((size_t)pointers, '*');
+
+            if (at_op1("(")) {
+                if (!group->list.empty())
+                    throw CwizError("a function cannot appear in a comma-separated declaration",
+                                    name.line, name.col,
+                                    "declare the function on its own line",
+                                    "syntax.function-in-declaration");
+                std::vector<NodeP> params = param_list();
+                NodeP body = block();
+                if (!global_scope)
+                    throw CwizError("functions can only be defined at file scope", start.line,
+                                    start.col, "move the function out of the enclosing block",
+                                    "sema.function-scope");
+                NodeP n = mk(NK::FuncDecl, start.line, start.col);
+                n->sval = name.sval;
+                n->list = params;
+                n->b = body;
+                n->type = ty;
+                return n;
             }
-            expect_op(";");
-            return n;
+
+            if (ty == "void")
+                throw CwizError("variable '" + name.sval + "' cannot have type void",
+                                name.line, name.col,
+                                "use int, char or bool; void is only for a function's return type",
+                                "sema.void-variable");
+
+            if (at_op1("[")) {
+                next();
+                NodeP size_expr;
+                if (!at_op1("]")) size_expr = expr();
+                expect_op("]");
+                NodeP n = mk(NK::ArrayDecl, name.line, name.col);
+                n->sval = name.sval;
+                n->kind = "ram";
+                n->type = ty;
+                n->size_expr = size_expr;
+                if (at_op1("=")) {
+                    next();
+                    if (ty == "char" && at_kind("str")) {  // char buf[N] = "..."
+                        n->cps = next().cps;
+                        n->init_is_str = true;
+                    } else {
+                        n->list = init_list();
+                    }
+                }
+                group->list.push_back(n);
+            } else {
+                NodeP n = mk(NK::VarDecl, name.line, name.col);
+                n->sval = name.sval;
+                n->type = ty;
+                if (at_op1("=")) {
+                    next();
+                    n->a = expr();
+                }
+                group->list.push_back(n);
+            }
+
+            if (at_op1(",")) { next(); continue; }
+            break;
         }
-        NodeP init;
-        if (at_op1("=")) {
-            next();
-            init = expr();
-        }
+
         expect_op(";");
-        NodeP n = mk(NK::VarDecl, start.line, start.col);
-        n->sval = name.sval;
-        n->type = ty;
-        n->a = init;
-        return n;
+        return group->list.size() == 1 ? group->list[0] : group;
     }
 
     std::vector<NodeP> param_list() {
@@ -594,7 +713,9 @@ private:
         expect_op("{");
         NodeP n = mk(NK::Block, lb.line, lb.col);
         while (!at_op1("}")) {
-            if (at_kind("eof")) throw CwizError("unterminated block", lb.line, lb.col);
+            if (at_kind("eof"))
+                throw CwizError("unterminated block", lb.line, lb.col,
+                                "add '}' to close the block opened here", "syntax.unterminated-block");
             n->list.push_back(stmt());
         }
         expect_op("}");
@@ -604,6 +725,20 @@ private:
     NodeP stmt() {
         Token tk = cur();
         if (at_op1("{")) return block();
+        if (at_kw1("switch"))
+            throw CwizError("switch is not supported", tk.line, tk.col,
+                            "use if/else chains; they compile to the same branches",
+                            "syntax.unsupported-switch");
+        if (at_kw1("case") || at_kw1("default"))
+            throw CwizError("case/default only make sense inside a switch", tk.line, tk.col,
+                            "use if/else instead of switch", "syntax.unsupported-switch");
+        if (at_kw1("goto"))
+            throw CwizError("goto is not supported", tk.line, tk.col,
+                            "use while/for with break/continue", "syntax.unsupported-goto");
+        if (at_kw1("sizeof"))
+            throw CwizError("sizeof is not supported", tk.line, tk.col,
+                            "every int is 2 bytes and every char is 1 byte",
+                            "syntax.unsupported-sizeof");
         if (at_kw1("if")) return if_stmt();
         if (at_kw1("while")) return while_stmt();
         if (at_kw1("do")) return do_stmt();
@@ -619,7 +754,7 @@ private:
         if (at_kw1("continue")) {
             next(); expect_op(";"); return mk(NK::Continue, tk.line, tk.col);
         }
-        if (at_kw(TYPES) && !at_kw1("void")) return local_decl();
+        if (at_decl_start() && !at_kw1("void")) return local_decl();
         NodeP e = expr();
         expect_op(";");
         NodeP n = mk(NK::ExprStmt, tk.line, tk.col);
@@ -629,18 +764,66 @@ private:
 
     NodeP local_decl() {
         Token start = cur();
-        std::string ty = type_name();
-        Token name = expect_ident();
-        NodeP vd = mk(NK::VarDecl, name.line, name.col);
-        vd->sval = name.sval;
-        vd->type = ty;
-        if (at_op1("=")) {
-            next();
-            vd->a = expr();
+        if (at_kw1("const"))
+            throw CwizError("local constants are not supported", start.line, start.col,
+                            "declare the constant at file scope (before the functions)",
+                            "sema.local-const");
+        std::string base = base_type_name();
+        NodeP group = mk(NK::DeclGroup, start.line, start.col);
+
+        while (true) {
+            int pointers = 0;
+            while (at_op1("*")) { next(); ++pointers; }
+            Token name = expect_ident();
+            std::string ty = base + std::string((size_t)pointers, '*');
+            if (at_op1("("))
+                throw CwizError("functions can only be defined at file scope", name.line,
+                                name.col, "move the function out of the enclosing block",
+                                "sema.function-scope");
+            if (ty == "void")
+                throw CwizError("variable '" + name.sval + "' cannot have type void",
+                                name.line, name.col,
+                                "use int, char or bool; void is only for a function's return type",
+                                "sema.void-variable");
+
+            if (at_op1("[")) {
+                next();
+                NodeP size_expr;
+                if (!at_op1("]")) size_expr = expr();
+                expect_op("]");
+                NodeP n = mk(NK::ArrayDecl, name.line, name.col);
+                n->sval = name.sval;
+                n->kind = "ram";
+                n->type = ty;
+                n->size_expr = size_expr;
+                if (at_op1("=")) {
+                    next();
+                    if (ty == "char" && at_kind("str")) {
+                        n->cps = next().cps;
+                        n->init_is_str = true;
+                    } else {
+                        n->list = init_list();
+                    }
+                }
+                group->list.push_back(n);
+            } else {
+                NodeP vd = mk(NK::VarDecl, name.line, name.col);
+                vd->sval = name.sval;
+                vd->type = ty;
+                if (at_op1("=")) {
+                    next();
+                    vd->a = expr();
+                }
+                group->list.push_back(vd);
+            }
+
+            if (at_op1(",")) { next(); continue; }
+            break;
         }
+
         expect_op(";");
         NodeP n = mk(NK::DeclStmt, start.line, start.col);
-        n->a = vd;
+        n->list = group->list;
         return n;
     }
 
@@ -674,7 +857,9 @@ private:
     NodeP do_stmt() {
         Token tk = next();
         NodeP body = stmt();
-        if (!at_kw1("while")) throw CwizError("expected 'while' after do-block", tk.line, tk.col);
+        if (!at_kw1("while"))
+            throw CwizError("expected 'while' after do-block", tk.line, tk.col,
+                            "write 'do { ... } while (condition);'", "syntax.expected-while");
         next();
         expect_op("(");
         NodeP cond = expr();
@@ -691,7 +876,7 @@ private:
         expect_op("(");
         NodeP init;
         if (!at_op1(";")) {
-            if (at_kw(TYPES) && !at_kw1("void")) {
+            if (at_decl_start() && !at_kw1("void")) {
                 init = local_decl();  // consumes its own ';'
             } else {
                 init = mk(NK::ExprStmt, cur().line, cur().col);
@@ -726,7 +911,9 @@ private:
             NodeP right = assignment();
             if (left->k != NK::Ident && left->k != NK::Index &&
                 !(left->k == NK::Unary && left->sval == "*"))
-                throw CwizError("cannot assign to this expression", op.line, op.col);
+                throw CwizError("cannot assign to this expression", op.line, op.col,
+                                "the left side must be a variable, array element or *pointer",
+                                "syntax.not-assignable");
             NodeP n = mk(NK::Assign, op.line, op.col);
             n->sval = op.sval;
             n->a = left;
@@ -913,7 +1100,9 @@ private:
                 e = n;
             } else if (at_op1("(")) {
                 if (e->k != NK::Ident)
-                    throw CwizError("call target must be a function name", cur().line, cur().col);
+                    throw CwizError("call target must be a function name", cur().line, cur().col,
+                                    "only a named function can be called directly",
+                                    "syntax.call-target");
                 next();
                 std::vector<NodeP> args;
                 if (!at_op1(")")) {
@@ -970,7 +1159,17 @@ private:
             expect_op(")");
             return e;
         }
-        throw CwizError("unexpected " + show(tk), tk.line, tk.col);
+        {
+            std::string hint;
+            if (tk.kind == "op" && tk.sval == ";")
+                hint = "an expression is missing before ';'";
+            else if (tk.kind == "op" && tk.sval == "=")
+                hint = "declarations look like 'int x = value;'";
+            else if (tk.kind == "kw" && tk.sval == "case")
+                hint = "switch/case is not supported; use if/else";
+            throw CwizError("unexpected " + show(tk), tk.line, tk.col, hint,
+                            "syntax.unexpected-token");
+        }
     }
 };
 
@@ -979,6 +1178,19 @@ static std::string font_table_source() {
     std::string body;
     for (int i = 0; i < FONT6X8_LEN; i++) body += fmt("\\x%02x", FONT6X8[i]);
     return fmt("rom8 char _font[760] = \"%s\";", body.c_str());
+}
+
+// The CW Display table is a normal prelude declaration so select_prelude() only
+// emits its 2.4 KB when a _cw function actually uses it.
+static std::string cw_font_table_source() {
+    std::string s = fmt("rom _cw_font[%d] = {", FONT_CW_ROWS);
+    for (int i = 0; i < FONT_CW_ROWS; i++) {
+        if (i) s += ",";
+        if (i % 16 == 0) s += "\n";
+        s += fmt("0x%X", FONT_CW[i]);
+    }
+    s += "\n};";
+    return s;
 }
 
 static const char* PRELUDE_SRC = R"CWIZ(
@@ -1108,6 +1320,50 @@ int num(int x, int y, int n) {
     }
     return x;
 }
+
+// ---- ClassWiz CW Display (native 11x13, no scaling) ----
+void glyph_cw(int x, int y, int c) {
+    if (c < 32 || c > 126) { c = 63; }
+    int base = (c - 32) * 13;
+    int r = 0;
+    while (r < 13) {
+        int bits = _cw_font[base + r];
+        int k = 0;
+        while (k < 11) {
+            pixel(x + k, y + r, (bits & 1024) != 0);
+            bits = bits + bits;
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+}
+int text_cw(int x, int y, int s) {
+    int c = _rpeek(s);
+    while (c != 0) {
+        glyph_cw(x, y, c);
+        x = x + 11;
+        s = s + 1;
+        c = _rpeek(s);
+    }
+    return x;
+}
+int num_cw(int x, int y, int n) {
+    if (n == -32768) { return text_cw(x, y, "-32768"); }
+    if (n < 0) { glyph_cw(x, y, 45); x = x + 11; n = 0 - n; }
+    int d = 10000;
+    int shown = 0;
+    while (d > 0) {
+        int q = n / d;
+        n = n - q * d;
+        if (q > 0 || shown || d == 1) {
+            glyph_cw(x, y, 48 + q);
+            x = x + 11;
+            shown = 1;
+        }
+        d = d / 10;
+    }
+    return x;
+}
 void sprite(int x, int y, int w, int h, int d) {
     int bw = (w + 7) >> 3;
     int r = 0;
@@ -1121,6 +1377,18 @@ void sprite(int x, int y, int w, int h, int d) {
         r = r + 1;
     }
 }
+int memoryRead(int addr, int len) {
+    if (len == 1) { return peek(addr); }
+    if (len == 2) { return peek(addr) + (peek(addr + 1) << 8); }
+    return 0;
+}
+void memoryWrite(int addr, int len, int data) {
+    if (len == 1) { poke(addr, data); }
+    if (len == 2) { poke(addr, data); poke(addr + 1, data >> 8); }
+}
+void setStatus(int addr, int status) {
+    memoryWrite(SB2 + addr - 0xF800, 1, status != LOW);
+}
 
 int wait_key() {
     while (key() != -1) { }
@@ -1131,7 +1399,9 @@ int wait_key() {
 }
 )CWIZ";
 
-static std::string prelude_source() { return font_table_source() + "\n" + PRELUDE_SRC; }
+static std::string prelude_source() {
+    return font_table_source() + "\n" + cw_font_table_source() + "\n" + PRELUDE_SRC;
+}
 
 static std::string decl_name(const NodeP& d) { return d->sval; }
 
@@ -1150,6 +1420,10 @@ static std::vector<NodeP> select_prelude(const NodeP& user_prog, const NodeP& pr
     if (used.count("print")) {
         used.insert("text");
         used.insert("num");
+    }
+    if (used.count("print_cw")) {
+        used.insert("text_cw");
+        used.insert("num_cw");
     }
     std::set<std::string> needed;
     std::vector<std::string> stack;
@@ -1172,10 +1446,11 @@ static std::vector<NodeP> select_prelude(const NodeP& user_prog, const NodeP& pr
 
 // =================================================================== sema
 static const std::map<std::string, std::pair<int, int>> CW_BUILTINS = {
-    {"pixel", {2, 3}},   {"clear", {0, 0}},    {"key", {0, 0}},     {"delay", {1, 1}},
+    {"pixel", {2, 3}},   {"clear", {0, 0}},    {"clearRender", {0, 0}},    {"key", {0, 0}},     {"delay", {1, 1}},
     {"peek", {1, 1}},    {"poke", {2, 2}},     {"_hspan", {4, 4}},  {"key_down", {1, 1}},
     {"key_hit", {1, 1}}, {"buffered", {1, 1}}, {"flip", {0, 0}},    {"_rpeek", {1, 1}},
-    {"exit", {0, 0}}};
+    {"wipe", {0, 0}},
+    {"exit", {0, 0}},     {"render", {0, 0}}, {"renderStatus", {0, 0}}};
 static const int PRINT_MIN = 3;
 
 struct Analyzed {
@@ -1205,7 +1480,12 @@ public:
         // Global initialisers are lowered at the very end (their addresses are
         // assigned by the code generator), but they still need type checking.
         for (Sym* sym : an.globals)
-            if (sym->init_kind == 1 && sym->init_node) expr(sym->init_node);
+            if (sym->init_kind == 1 && sym->init_node) {
+                if (expr(sym->init_node) == "void")
+                    err("cannot initialize '" + sym->name + "' with a void expression",
+                        sym->init_node, "call a function that returns a value",
+                        "sema.void-expression");
+            }
         for (auto& name : an.func_order) function_body(an.funcs[name]);
         mark_recursion();
         return std::move(an);
@@ -1238,14 +1518,32 @@ private:
         return nullptr;
     }
 
-    [[noreturn]] void err(const std::string& msg, const NodeP& node) {
-        throw CwizError(msg, node ? node->line : 0, node ? node->col : 0);
+    [[noreturn]] void err(const std::string& msg, const NodeP& node,
+                          const std::string& hint = "", const std::string& code = "") {
+        throw CwizError(msg, node ? node->line : 0, node ? node->col : 0, hint, code);
+    }
+
+    // Names a "did you mean" hint can suggest.
+    std::vector<std::string> name_candidates() const {
+        std::vector<std::string> names;
+        for (const auto& kv : locals) names.push_back(kv.first);
+        for (const auto& kv : globals) names.push_back(kv.first);
+        for (const auto& kv : arrays) names.push_back(kv.first);
+        for (const auto& kv : tables) names.push_back(kv.first);
+        for (const auto& kv : consts)
+            if (kv.first.rfind("K_", 0) != 0 && kv.first != "_ROWS") names.push_back(kv.first);
+        for (const auto& kv : an.funcs) names.push_back(kv.first);
+        for (const auto& kv : CW_BUILTINS) names.push_back(kv.first);
+        names.push_back("print");
+        names.push_back("print_cw");
+        return names;
     }
 
     void declare_global_name(const std::string& name, const NodeP& node) {
         if (find_in(globals, name) || find_in(arrays, name) || find_in(tables, name) ||
             an.funcs.count(name) || consts.count(name))
-            err(fmt("redefinition of '%s'", name.c_str()), node);
+            err(fmt("redefinition of '%s'", name.c_str()), node,
+                "rename one of the declarations, or remove this one", "sema.redefinition");
     }
 
     Sym* resolve(const std::string& name) {
@@ -1277,9 +1575,12 @@ private:
         if (node->k == NK::Ident) {
             auto it = consts.find(node->sval);
             if (it != consts.end()) return wrap16(it->second);
-            err(fmt("'%s' is not a compile-time constant", node->sval.c_str()), node);
+            err(fmt("'%s' is not a compile-time constant", node->sval.c_str()), node,
+                "only literals and other const values can be used here", "sema.constant");
         }
-        err("initializer is not a constant expression", node);
+        err("initializer is not a constant expression", node,
+            "use a literal or a 'const' value; runtime expressions are not allowed here",
+            "sema.constant");
     }
 
     long long fold(const std::string& op, long long a, long long b) {
@@ -1297,11 +1598,17 @@ private:
         }
         if (op == "<<") return (b >= 0 && b <= 15) ? wrap16(a << (b & 15)) : 0;
         if (op == ">>") return (b >= 0 && b <= 15) ? wrap16(a >> (b & 15)) : 0;
-        err(fmt("operator '%s' is not allowed in a constant expression", op.c_str()), nullptr);
+        err(fmt("operator '%s' is not allowed in a constant expression", op.c_str()), nullptr,
+            "constant expressions support + - * / % & | ^ << >> and comparisons",
+            "sema.constant");
     }
 
     // -- pass 1: globals ----------------------------------------------
     void global_decl(const NodeP& d) {
+        if (d->k == NK::DeclGroup) {
+            for (const NodeP& item : d->list) global_decl(item);
+            return;
+        }
         if (d->k == NK::ConstDecl) {
             long long val = const_eval(d->a);
             if (consts.count(d->sval) && d->sval.rfind("K_", 0) != 0)
@@ -1325,14 +1632,26 @@ private:
             if (d->size_expr) {
                 size = const_eval(d->size_expr);
                 have_size = true;
-                if (size <= 0) err(fmt("array '%s' needs a positive size", d->sval.c_str()), d);
+                if (size <= 0)
+                    err(fmt("array '%s' needs a positive size", d->sval.c_str()), d,
+                        "use a size of 1 or more, for example 'int a[4];'", "sema.array-size");
             }
             int elem_bytes = (d->kind == "rom8" || d->type == "char") ? 1 : 2;
             if (!have_size) {
                 if (d->init_is_str) size = (long long)d->cps.size();
-                else if (!d->list.empty() || d->k == NK::ArrayDecl) size = (long long)d->list.size();
-                else err(fmt("array '%s' needs a size", d->sval.c_str()), d);
+                else if (!d->list.empty()) size = (long long)d->list.size();
+                else
+                    err(fmt("array '%s' needs a size or an initializer", d->sval.c_str()), d);
             }
+            if (have_size && d->init_is_str && (long long)d->cps.size() > size)
+                err(fmt("initializer for '%s' has %d characters but the array size is %lld",
+                        d->sval.c_str(), (int)d->cps.size(), size),
+                    d);
+            if (have_size && !d->init_is_str && !d->list.empty() &&
+                (long long)d->list.size() > size)
+                err(fmt("too many initializers for '%s' (%d values, size %lld)",
+                        d->sval.c_str(), (int)d->list.size(), size),
+                    d);
             Sym* sym = new_sym(d->kind, d->sval);
             sym->size = (int)size;
             sym->elem_bytes = elem_bytes;
@@ -1354,7 +1673,10 @@ private:
             return;
         }
         if (d->k == NK::FuncDecl) {
-            if (an.funcs.count(d->sval)) err(fmt("redefinition of function '%s'", d->sval.c_str()), d);
+            if (an.funcs.count(d->sval))
+                err(fmt("redefinition of function '%s'", d->sval.c_str()), d,
+                    "a function name may only be defined once; rename one of them",
+                    "sema.redefinition");
             an.func_store.push_back(std::make_unique<Func>());
             Func* f = an.func_store.back().get();
             f->name = d->sval;
@@ -1365,7 +1687,10 @@ private:
             std::set<std::string> seen;
             bool default_seen = false;
             for (auto& p : d->list) {
-                if (seen.count(p->sval)) err(fmt("duplicate parameter '%s'", p->sval.c_str()), p);
+                if (seen.count(p->sval))
+                    err(fmt("duplicate parameter '%s'", p->sval.c_str()), p,
+                        "parameter names must be unique inside a function",
+                        "sema.duplicate-parameter");
                 seen.insert(p->sval);
                 if (p->a) {
                     p->default_val = const_eval(p->a);
@@ -1375,7 +1700,8 @@ private:
                     if (default_seen)
                         err(fmt("parameter '%s' without a default follows one with a default",
                                 p->sval.c_str()),
-                            p);
+                            p, "move parameters with defaults to the end of the list",
+                            "sema.default-order");
                     p->has_default_val = false;
                 }
             }
@@ -1412,7 +1738,10 @@ private:
     }
 
     Sym* declare_local(const std::string& name, const NodeP& node) {
-        if (find_in(locals, name)) err(fmt("redefinition of '%s'", name.c_str()), node);
+        if (find_in(locals, name))
+            err(fmt("redefinition of '%s'", name.c_str()), node,
+                "this name already exists in the function; choose another name",
+                "sema.redefinition");
         Sym* sym = new_sym("var", name);
         sym->vtype = node->type.empty() ? "int" : node->type;
         sym->scope = "local";
@@ -1423,27 +1752,96 @@ private:
         return sym;
     }
 
+    // Local arrays are allocated in the function's static frame.  An omitted
+    // size is inferred from `{...}` or a string initializer.
+    Sym* declare_local_array(const NodeP& node) {
+        if (find_in(locals, node->sval))
+            err(fmt("redefinition of '%s'", node->sval.c_str()), node,
+                "this name already exists in the function; choose another name",
+                "sema.redefinition");
+        bool have_size = false;
+        long long size = 0;
+        if (node->size_expr) {
+            size = const_eval(node->size_expr);
+            have_size = true;
+            if (size <= 0) err(fmt("array '%s' needs a positive size", node->sval.c_str()), node);
+        }
+        int elem_bytes = (node->type == "char") ? 1 : 2;
+        if (!have_size) {
+            if (node->init_is_str) size = (long long)node->cps.size();
+            else if (!node->list.empty()) size = (long long)node->list.size();
+            else
+                err(fmt("array '%s' needs a size or an initializer", node->sval.c_str()), node);
+        }
+        if (have_size && node->init_is_str && (long long)node->cps.size() > size)
+            err(fmt("initializer for '%s' has %d characters but the array size is %lld",
+                    node->sval.c_str(), (int)node->cps.size(), size),
+                node);
+        if (have_size && !node->init_is_str && !node->list.empty() &&
+            (long long)node->list.size() > size)
+            err(fmt("too many initializers for '%s' (%d values, size %lld)",
+                    node->sval.c_str(), (int)node->list.size(), size),
+                node);
+        Sym* sym = new_sym("array", node->sval);
+        sym->vtype = node->type.empty() ? "int" : node->type;
+        sym->size = (int)size;
+        sym->elem_bytes = elem_bytes;
+        sym->scope = "local";
+        sym->qname = fn->name + "." + node->sval;
+        sym->func = fn;
+        locals.push_back({node->sval, sym});
+        fn->locals.push_back(sym);
+        return sym;
+    }
+
     void stmt(const NodeP& s) {
         switch (s->k) {
             case NK::Block:
                 for (auto& st : s->list) stmt(st);
                 return;
+            case NK::DeclGroup:
+                for (const NodeP& item : s->list) {
+                    if (item->k == NK::DeclGroup) stmt(item);
+                    else {
+                        NodeP one = mk(NK::DeclStmt, item->line, item->col);
+                        one->list.push_back(item);
+                        stmt(one);
+                    }
+                }
+                return;
             case NK::DeclStmt: {
-                const NodeP& vd = s->a;
-                declare_local(vd->sval, vd);
-                if (vd->a) expr(vd->a);
+                for (const NodeP& vd : s->list) {
+                    if (vd->k == NK::ArrayDecl) {
+                        vd->sym = declare_local_array(vd);
+                        for (const NodeP& e : vd->list) expr(e);
+                    } else {
+                        vd->sym = declare_local(vd->sval, vd);
+                        if (vd->a && expr(vd->a) == "void")
+                            err("cannot initialize a variable with a void expression", vd,
+                                "call a function that returns a value", "sema.void-expression");
+                    }
+                }
+                // Backwards-compatible single-declarator form.
+                if (s->a) {
+                    s->a->sym = declare_local(s->a->sval, s->a);
+                    if (s->a->a) expr(s->a->a);
+                }
                 return;
             }
             case NK::ExprStmt:
                 expr(s->a);
                 return;
             case NK::If:
-                expr(s->a);
+                if (expr(s->a) == "void")
+                    err("if condition has type void", s,
+                        "use a value-returning expression", "sema.void-expression");
                 stmt(s->b);
                 if (s->c) stmt(s->c);
                 return;
             case NK::While:
-                expr(s->a);
+                if (expr(s->a) == "void")
+                    err("while condition has type void", s,
+                        "use a value-returning expression", "sema.void-expression");
                 loop_depth++;
                 stmt(s->b);
                 loop_depth--;
@@ -1463,14 +1861,30 @@ private:
                 loop_depth--;
                 return;
             case NK::Return:
-                if (s->a) expr(s->a);
+                if (s->a) {
+                    std::string t = expr(s->a);
+                    if (t == "void")
+                        err("cannot return a void expression from a function", s,
+                            "remove the call, or call a function that returns a value",
+                            "sema.void-expression");
+                    if (fn && fn->ret == "void")
+                        err(fmt("function '%s' is void and cannot return a value",
+                                fn->name.c_str()),
+                            s, "write 'return;', or declare the function with a return type",
+                            "sema.void-return");
+                } else if (fn && fn->ret != "void") {
+                    err(fmt("function '%s' must return a value", fn->name.c_str()), s,
+                        "return a value, or declare the function as void",
+                        "sema.missing-return-value");
+                }
                 return;
             case NK::Break:
             case NK::Continue:
                 if (loop_depth == 0)
                     err(fmt("'%s' outside a loop",
                             s->k == NK::Break ? "break" : "continue"),
-                        s);
+                        s, "move it inside while/do/for, or remove it",
+                        "sema.break-outside-loop");
                 return;
             default:
                 err("unsupported statement", s);
@@ -1486,7 +1900,14 @@ private:
                 return e->etype = "char*";  // a string literal is a ROM char pointer
             case NK::Ident: {
                 Sym* sym = resolve(e->sval);
-                if (!sym) err(fmt("'%s' is not defined", e->sval.c_str()), e);
+                if (!sym) {
+                    if (an.funcs.count(e->sval))
+                        err(fmt("'%s' is a function, not a variable", e->sval.c_str()), e,
+                            "call it with '" + e->sval + "()'", "sema.function-as-value");
+                    err(fmt("'%s' is not defined", e->sval.c_str()), e,
+                        did_you_mean(e->sval, name_candidates()),
+                        "sema.undefined-identifier");
+                }
                 e->sym = sym;
                 if (sym->kind == "const") return e->etype = (is_ptr_type(sym->vtype) ? sym->vtype : "int");
                 if (sym->kind == "array" || sym->kind == "rom" || sym->kind == "rom8")
@@ -1504,16 +1925,24 @@ private:
                 if (e->sval == "&") return e->etype = ptr_to(lvalue(e->a, false));
                 if (e->sval == "*") {
                     std::string t = expr(e->a);
-                    if (!is_ptr_type(t)) err("cannot dereference a non-pointer value", e);
+                    if (!is_ptr_type(t))
+                        err("cannot dereference a non-pointer value", e,
+                            "only int*/char* values can be dereferenced; use '&x' to take an address",
+                            "sema.not-pointer");
                     return e->etype = ptr_base(t);
                 }
-                expr(e->a);
+                if (expr(e->a) == "void")
+                    err("unary operator cannot be applied to a void expression", e,
+                        "call a function that returns a value", "sema.void-expression");
                 return e->etype = "int";
             case NK::IncDec:
                 return e->etype = lvalue(e->a, true);
             case NK::Bin: {
                 std::string ta = expr(e->a);
                 std::string tb = expr(e->b);
+                if (ta == "void" || tb == "void")
+                    err("operator '" + e->sval + "' cannot be applied to a void expression", e,
+                        "call a function that returns a value", "sema.void-expression");
                 const std::string& op = e->sval;
                 if (op == "+" || op == "-") {
                     bool pa = is_ptr_type(ta), pb = is_ptr_type(tb);
@@ -1524,19 +1953,21 @@ private:
                 return e->etype = "int";
             }
             case NK::Cond: {
-                expr(e->a);
+                if (expr(e->a) == "void")
+                    err("conditional expression has a void condition", e,
+                        "use a value-returning expression", "sema.void-expression");
                 std::string t = expr(e->b);
-                expr(e->c);
+                std::string u = expr(e->c);
+                if (t == "void" || u == "void")
+                    err("conditional expression has a void branch", e,
+                        "both branches must produce a value", "sema.void-expression");
                 return e->etype = t;
             }
             case NK::Assign: {
-                if (e->sval == "=") {
-                    std::string t = lvalue(e->a, true);
-                    expr(e->b);
-                    return e->etype = t;
-                }
                 std::string t = lvalue(e->a, true);
-                expr(e->b);
+                if (expr(e->b) == "void")
+                    err("cannot assign a void expression", e,
+                        "call a function that returns a value", "sema.void-expression");
                 return e->etype = t;
             }
             default:
@@ -1549,7 +1980,14 @@ private:
     std::string index_base(const NodeP& e) {
         if (e->a->k == NK::Ident) {
             Sym* sym = resolve(e->a->sval);
-            if (!sym) err(fmt("'%s' is not defined", e->a->sval.c_str()), e);
+            if (!sym) {
+                if (an.funcs.count(e->a->sval))
+                    err(fmt("'%s' is a function, not an array", e->a->sval.c_str()), e,
+                        "call it with '" + e->a->sval + "()'", "sema.function-as-value");
+                err(fmt("'%s' is not defined", e->a->sval.c_str()), e,
+                    did_you_mean(e->a->sval, name_candidates()),
+                    "sema.undefined-identifier");
+            }
             if (sym->kind == "array" || sym->kind == "rom" || sym->kind == "rom8") {
                 e->sym = sym;
                 return elem_type(sym->elem_bytes);
@@ -1557,12 +1995,15 @@ private:
             e->sym = sym;
             std::string t = expr(e->a);
             if (!is_ptr_type(t))
-                err(fmt("'%s' is not an array or pointer", e->a->sval.c_str()), e);
+                err(fmt("'%s' is not an array or pointer", e->a->sval.c_str()), e,
+                    "index only arrays, pointers and ROM tables", "sema.not-indexable");
             e->via_ptr = true;
             return ptr_base(t);
         }
         std::string t = expr(e->a);
-        if (!is_ptr_type(t)) err("can only index an array or pointer", e);
+        if (!is_ptr_type(t))
+            err("can only index an array or pointer", e,
+                "index only arrays, pointers and ROM tables", "sema.not-indexable");
         e->via_ptr = true;
         return ptr_base(t);
     }
@@ -1570,17 +2011,32 @@ private:
     std::string lvalue(const NodeP& e, bool writing) {
         if (e->k == NK::Ident) {
             Sym* sym = resolve(e->sval);
-            if (!sym) err(fmt("'%s' is not defined", e->sval.c_str()), e);
+            if (!sym) {
+                if (an.funcs.count(e->sval))
+                    err(fmt("'%s' is a function, not a variable", e->sval.c_str()), e,
+                        "call it with '" + e->sval + "()'", "sema.function-as-value");
+                err(fmt("'%s' is not defined", e->sval.c_str()), e,
+                    did_you_mean(e->sval, name_candidates()),
+                    "sema.undefined-identifier");
+            }
             if (sym->kind == "const") {
-                if (writing) err(fmt("cannot assign to constant '%s'", e->sval.c_str()), e);
-                err(fmt("cannot take the address of constant '%s'", e->sval.c_str()), e);
+                if (writing)
+                    err(fmt("cannot assign to constant '%s'", e->sval.c_str()), e,
+                        "constants are read-only; use a variable if the value changes",
+                        "sema.const-assign");
+                err(fmt("cannot take the address of constant '%s'", e->sval.c_str()), e,
+                    "copy the value into a variable first", "sema.const-address");
             }
             if (sym->kind == "array" || sym->kind == "rom" || sym->kind == "rom8") {
-                if (writing) err(fmt("cannot assign to '%s' (it is an array/table)", e->sval.c_str()), e);
+                if (writing)
+                    err(fmt("cannot assign to '%s' (it is an array/table)", e->sval.c_str()), e,
+                        "assign to an element instead, for example '" + e->sval + "[0] = value;'",
+                        "sema.array-assign");
                 if (sym->kind != "array")
                     err(fmt("cannot take the address of ROM table '%s' (ROM is read with peek/_rpeek)",
                             e->sval.c_str()),
-                        e);
+                        e, "read a ROM table with index syntax or peek()/rpeek()",
+                        "sema.rom-address");
                 e->sym = sym;
                 return e->etype = ptr_to(elem_type(sym->elem_bytes));
             }
@@ -1590,30 +2046,38 @@ private:
         if (e->k == NK::Index) {
             std::string base = index_base(e);
             if (!e->via_ptr && e->sym && e->sym->kind != "array") {
-                if (writing) err(fmt("cannot write to read-only table '%s'", e->a->sval.c_str()), e);
+                if (writing)
+                    err(fmt("cannot write to read-only table '%s'", e->a->sval.c_str()), e,
+                        "ROM tables are read-only; copy the value into a RAM array or variable",
+                        "sema.rom-write");
                 err(fmt("cannot take the address of ROM table '%s' (ROM is read with peek/_rpeek)",
                         e->a->sval.c_str()),
-                    e);
+                    e, "read a ROM table with index syntax or peek()/rpeek()",
+                    "sema.rom-address");
             }
             expr(e->b);
             return e->etype = base;
         }
         if (e->k == NK::Unary && e->sval == "*") {
             std::string t = expr(e->a);
-            if (!is_ptr_type(t)) err("cannot dereference a non-pointer value", e);
+            if (!is_ptr_type(t))
+                err("cannot dereference a non-pointer value", e,
+                    "only int*/char* values can be dereferenced; use '&x' to take an address",
+                    "sema.not-pointer");
             return e->etype = ptr_base(t);
         }
-        err("cannot assign to this expression", e);
+        err("cannot assign to this expression", e,
+            "the left side must be a variable, array element or *pointer", "sema.not-assignable");
         return "";
     }
 
     std::string call(const NodeP& c) {
         const std::string& name = c->sval;
-        if (name == "print") {
+        if (name == "print" || name == "print_cw") {
             if ((int)c->list.size() < PRINT_MIN)
-                err("print(x, y, value, ...) needs at least 3 arguments", c);
+                err(name + "(x, y, value, ...) needs at least 3 arguments", c);
             for (auto& a : c->list) expr(a);
-            c->kind = "print";
+            c->kind = name;
             return "void";
         }
         auto bit = CW_BUILTINS.find(name);
@@ -1621,13 +2085,25 @@ private:
             int lo = bit->second.first, hi = bit->second.second;
             int n = (int)c->list.size();
             if (!(lo <= n && n <= hi)) {
+                std::string expected = (lo == hi)
+                    ? fmt("%d", lo)
+                    : fmt("%d-%d", lo, hi);
                 if (lo == hi)
-                    err(fmt("%s() takes %d argument%s", name.c_str(), lo, lo == 1 ? "" : "s"), c);
-                err(fmt("%s() takes %d-%d arguments", name.c_str(), lo, hi), c);
+                    err(fmt("%s() takes %d argument%s, got %d", name.c_str(), lo,
+                            lo == 1 ? "" : "s", n),
+                        c, "pass exactly " + expected + " argument(s)", "sema.argument-count");
+                err(fmt("%s() takes %d-%d arguments, got %d", name.c_str(), lo, hi, n), c,
+                    "pass " + expected + " argument(s)", "sema.argument-count");
             }
             if (name == "exit" && target.rom_seg == 0)
-                err("exit() exists only for the cwapp target", c);
-            for (auto& a : c->list) expr(a);
+                err("exit() exists only for the cwapp target", c,
+                    "use it only in a #cwapp program", "sema.builtin-target");
+            for (auto& a : c->list) {
+                if (expr(a) == "void")
+                    err("a void function cannot be used as a call argument", a,
+                        "remove the call, or call a function that returns a value",
+                        "sema.void-expression");
+            }
             c->kind = "builtin";
             c->builtin = name;
             return "int";
@@ -1642,17 +2118,25 @@ private:
             int n = (int)c->list.size();
             if (!(required <= n && n <= total)) {
                 if (required == total)
-                    err(fmt("%s() takes %d argument%s", name.c_str(), total,
-                            total == 1 ? "" : "s"),
-                        c);
-                err(fmt("%s() takes %d-%d arguments", name.c_str(), required, total), c);
+                    err(fmt("%s() takes %d argument%s, got %d", name.c_str(), total,
+                            total == 1 ? "" : "s", n),
+                        c, fmt("pass exactly %d argument(s)", total), "sema.argument-count");
+                err(fmt("%s() takes %d-%d arguments, got %d", name.c_str(), required, total, n),
+                    c, fmt("pass %d-%d argument(s)", required, total),
+                    "sema.argument-count");
             }
-            for (auto& a : c->list) expr(a);
+            for (auto& a : c->list) {
+                if (expr(a) == "void")
+                    err("a void function cannot be used as a call argument", a,
+                        "remove the call, or call a function that returns a value",
+                        "sema.void-expression");
+            }
             c->kind = "func";
             c->func = f;
             return f->ret.empty() ? "int" : f->ret;
         }
-        err(fmt("'%s' is not a function", name.c_str()), c);
+        err(fmt("'%s' is not a function", name.c_str()), c,
+            did_you_mean(name, name_candidates()), "sema.unknown-function");
         return "";
     }
 
@@ -1669,7 +2153,8 @@ static const std::map<std::string, std::string> CW_INV_JUMP = {
     {"==", "JNE"}, {"!=", "JEQ"}, {"<", "JGES"}, {">", "JLES"}, {"<=", "JGTS"}, {">=", "JLTS"}};
 static const std::map<std::string, std::string> CW_TRUE_JUMP = {
     {"==", "JEQ"}, {"!=", "JNE"}, {"<", "JLTS"}, {">", "JGTS"}, {"<=", "JLES"}, {">=", "JGES"}};
-static const std::map<std::string, std::string> CW_BUILTIN_LABEL = {{"_rpeek", "__rpeek"}};
+static const std::map<std::string, std::string> CW_BUILTIN_LABEL = {
+    {"_rpeek", "__rpeek"}, {"render", "__render"}, {"renderStatus", "__renderStatus"}};
 
 class Codegen {
 public:
@@ -1677,7 +2162,10 @@ public:
 
     std::string generate() {
         label("__wiz_entry");
-        emit("BL __rt_init");
+        // The firmware target has no linked CWiz runtime. Its startup code is
+        // recovered/defined by the firmware source itself; do not emit a call
+        // to the runtime's __rt_init entry point.
+        if (target.name != "fwnx") emit("BL __rt_init");
         emit("BL __init");
         if (an.has_main) emit("BL f_main");
         label("__wiz_halt");
@@ -1724,16 +2212,34 @@ private:
         for (Sym* sym : an.globals) alloc(sym, 2, "global '" + sym->name + "'");
         for (Sym* sym : an.arrays) alloc(sym, sym->elem_bytes * sym->size, "array '" + sym->name + "'");
         for (auto& name : an.func_order)
-            for (Sym* sym : an.funcs[name]->locals)
-                alloc(sym, 2, "local '" + sym->qname + "'");
+            for (Sym* sym : an.funcs[name]->locals) {
+                const int bytes = sym->kind == "array" ? sym->elem_bytes * sym->size : 2;
+                alloc(sym, bytes, "local '" + sym->qname + "'");
+            }
         for (Sym* sym : an.globals)
             if (sym->init_kind == 1) global_inits.push_back({sym, sym->init_node});
     }
 
     int alloc(Sym* sym, int size_bytes, const std::string& what) {
+        if (size_bytes < 0) throw CwizError("invalid RAM allocation size for " + what);
         int a = next_addr;
-        next_addr += size_bytes;
-        if (next_addr > target.var_limit) throw CwizError("out of RAM for " + what);
+        bool moved;
+        do {
+            moved = false;
+            for (const auto& [reserved_start, reserved_end] : target.reserved_ram) {
+                const int allocation_end = a + size_bytes - 1;
+                if (size_bytes > 0 && a <= reserved_end && allocation_end >= reserved_start) {
+                    a = reserved_end + 1;
+                    moved = true;
+                    break;
+                }
+            }
+        } while (moved);
+        next_addr = a + size_bytes;
+        if (next_addr > target.var_limit)
+            throw CwizError("out of RAM for " + what, 0, 0,
+                            "use smaller arrays, fewer globals, or move constant data into rom/rom8",
+                            "memory.out-of-ram");
         if (sym) sym->addr = a;
         return a;
     }
@@ -1779,7 +2285,9 @@ private:
             auto it = an.consts.find(node->sval);
             if (it != an.consts.end()) return wrap16(it->second);
         }
-        throw CwizError("initializer is not a constant expression", node->line, node->col);
+        throw CwizError("initializer is not a constant expression", node->line, node->col,
+                        "use literals and const values; runtime expressions cannot initialise ROM/arrays",
+                        "sema.constant");
     }
     long long fold2(const std::string& op, long long a, long long b) {
         if (op == "+") return wrap16(a + b);
@@ -2127,7 +2635,8 @@ private:
 
     // -- calls --------------------------------------------------------
     void ex_call(const NodeP& c) {
-        if (c->kind == "print") { ex_print(c); return; }
+        if (c->kind == "print") { ex_print(c, "text", "num"); return; }
+        if (c->kind == "print_cw") { ex_print(c, "text_cw", "num_cw"); return; }
         if (c->kind == "builtin") { ex_builtin(c); return; }
         emit_call(c->func, c->list);
     }
@@ -2198,7 +2707,7 @@ private:
         }
     }
 
-    void ex_print(const NodeP& c) {
+    void ex_print(const NodeP& c, const char* text_fn, const char* num_fn) {
         NodeP x = c->list[0], y = c->list[1];
         int px = temp_addr("print.x"), py = temp_addr("print.y");
         ex(x);
@@ -2207,7 +2716,7 @@ private:
         emit(fmt("ST ER0, %d", py));
         for (size_t i = 2; i < c->list.size(); i++) {
             NodeP v = c->list[i];
-            Func* f = an.funcs[is_text(v) ? "text" : "num"];
+            Func* f = an.funcs[is_text(v) ? text_fn : num_fn];
             std::vector<NodeP> args = {tmp_ident(px, v), tmp_ident(py, v), v};
             emit_call(f, args);
             emit(fmt("ST ER0, %d", px));
@@ -2337,7 +2846,15 @@ private:
                 for (auto& st : s->list) stmt(st);
                 return;
             case NK::DeclStmt:
-                if (s->a->a) {
+                for (const NodeP& vd : s->list) {
+                    if (vd->k == NK::ArrayDecl) {
+                        if (vd->sym) emit_local_array_init(vd, vd->sym);
+                    } else if (vd->a) {
+                        ex(vd->a);
+                        emit(fmt("ST ER0, %d", addr_of_local(vd->sval)));
+                    }
+                }
+                if (s->a && s->a->a) {
                     ex(s->a->a);
                     emit(fmt("ST ER0, %d", addr_of_local(s->a->sval)));
                 }
@@ -2411,6 +2928,23 @@ private:
         for (Sym* sym : fn->locals)
             if (sym->name == name) return sym->addr;
         throw CwizError("internal: local '" + name + "' not allocated");
+    }
+
+    void emit_local_array_init(const NodeP& node, Sym* sym) {
+        std::vector<long long> vals;
+        if (node->init_is_str)
+            for (uint32_t ch : node->cps) vals.push_back((long long)(ch & 0xFF));
+        else
+            for (const NodeP& n : node->list) vals.push_back(ev(n));
+        if (vals.empty()) return;  // C leaves an uninitialized local array alone
+        vals.resize(std::max<size_t>(vals.size(), sym->size), 0);
+        vals.resize(sym->size);
+        const int el = sym->elem_bytes;
+        for (size_t i = 0; i < vals.size(); ++i) {
+            const_(0, vals[i]);
+            if (el == 1) emit(fmt("ST R0, %d", sym->addr + (int)i));
+            else emit(fmt("ST ER0, %d", sym->addr + el * (int)i));
+        }
     }
 
     void emit_array_init(Sym* sym) {

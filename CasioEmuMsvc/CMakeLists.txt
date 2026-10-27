@@ -380,6 +380,13 @@ endif()
 target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_INCLUDE_DIRS})
 target_include_directories(${TARGET_NAME} BEFORE PRIVATE "${ONLINE_GENERATED_DIR}")
 
+# Config.hpp defines ENABLE_SENTRY unless DISABLE_SENTRY is set.  Keep the
+# compile definition in sync with the CMake option so a standalone build with
+# -DCASIOEMU_ENABLE_SENTRY=OFF does not look for a header that was not added.
+if(NOT CASIOEMU_ENABLE_SENTRY)
+    target_compile_definitions(${TARGET_NAME} PRIVATE DISABLE_SENTRY)
+endif()
+
 # ------------------------------------------------------------------ Wiz toolchain
 # The Wiz / CWiz compiler, built in-process (see third_party/wiz). The Toolchain
 # and Calculator debugger windows use it to compile a program and load the image

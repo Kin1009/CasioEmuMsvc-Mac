@@ -57,6 +57,7 @@ char* n_ram_buffer = 0;
 casioemu::MMU* me_mmu = 0;
 SDL_Window* window = 0;
 SDL_Renderer* renderer = 0;
+bool calculator_panel_focused = false;
 
 std::vector<Label> g_labels;
 
@@ -185,6 +186,37 @@ static void SetupDefaultDockLayout(ImGuiID dockspace_id) {
 
 static void RenderDebuggerGuiWindows() {
 #ifndef __ANDROID__
+	// VS Code-style session tabs
+	if (ImGui::BeginTabBar("##SessionTabs", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_AutoSelectNewTabs)) {
+		for (auto win : windows) {
+			if (win && win->name && ImGui::BeginTabItem(win->name)) {
+				if (ImGui::Button("Close")) { win->open = false; }
+				ImGui::EndTabItem();
+			}
+		}
+		if (ImGui::TabItemButton("+ New", ImGuiTabItemFlags_Trailing)) {
+			// open start screen / new calc
+		}
+		ImGui::EndTabBar();
+	}
+#endif
+
+	// Left sidebar file explorer (simplified)
+	ImGui::Begin("##Sidebar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+	ImGui::TextDisabled("File Explorer");
+	ImGui::Separator();
+	if (std::filesystem::exists("examples")) {
+		for (auto& entry : std::filesystem::directory_iterator("examples")) {
+			if (entry.is_directory()) {
+				if (ImGui::Selectable(entry.path().filename().string().c_str())) {
+					// open folder
+				}
+			}
+		}
+	}
+	ImGui::End();
+
+#ifndef __ANDROID__
 	ImGuiID dockspace_id = RenderDockSpace(GetStatusBarHeight());
 	SetupDefaultDockLayout(dockspace_id);
 #endif
@@ -200,6 +232,15 @@ static void RenderDebuggerGuiWindows() {
 #ifndef __ANDROID__
 	RenderStatusBar();
 #endif
+
+	// Bottom output panel (chrome / status)
+	ImGui::SetNextWindowPos(ImVec2(ImGui::GetMainViewport()->Pos.x, ImGui::GetMainViewport()->Pos.y + ImGui::GetMainViewport()->Size.y - 120));
+	ImGui::SetNextWindowSize(ImVec2(ImGui::GetMainViewport()->Size.x, 120));
+	ImGui::Begin("##BottomOutput", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+	ImGui::TextDisabled("Output / Status");
+	ImGui::Separator();
+	ImGui::TextWrapped("Calculator output and messages.");
+	ImGui::End();
 
 	//	ImGui::Begin("Testing");
 	//	if (ImGui::Button("Crash"_lc)) {
@@ -286,6 +327,10 @@ void gui_loop() {
 	SDL_RenderPresent(renderer);
 #endif
 #endif
+
+	// Defer the focus reset so the value stays valid during this frame's SDL
+	// events until the next gui_loop iteration captures a fresh focus state.
+	calculator_panel_focused = false;
 }
 
 static CodeViewer* CreateDebuggerGuiWindows() {
@@ -460,6 +505,7 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 
 	io.WantCaptureKeyboard = true;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_NavNoCaptureKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
 	ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);

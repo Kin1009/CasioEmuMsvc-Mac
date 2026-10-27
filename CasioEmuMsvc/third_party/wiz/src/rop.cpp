@@ -28,7 +28,7 @@
 // addresses are patched in.
 //
 // RAC-compatible ROP startup is inserted when the source does not provide it:
-// setlr; setsfr. This is the exact hdcompiler preamble required before
+// setlr; setsfr.  This is the exact hdcompiler preamble required before
 // BL-based display routines on the 580.
 
 #include "rop.hpp"
@@ -618,6 +618,164 @@ std::vector<std::string> stdlib_candidates(const std::string& name) {
     return v;
 }
 
+// ---------------------------------------------------------------- chain words
+// Every gadget reference in a ROP chain is a four byte word:
+//
+//     [addr_lo, addr_hi, 0x30 | segment, variant]
+//
+// The nX-U16 code space is 20 bit: a four bit code segment (CSR) plus a 16 bit
+// program counter.  The community guide (section 2.3 and 2.4 of
+// docs/rop-notes/rop-580-guide.txt) spells the encoding out:
+//
+//     address = Z:YYXXH  =>  code = XX YY ?Z ??
+//
+// so the segment nibble Z goes into the third byte (0x3Z) and the fourth byte
+// selects the call variant; 0x30 is the usual one.  Examples:
+//
+//     pop xr0    @ 0x17B34 -> 34 7B 31 30
+//     pop qr0    @ 0x17BDA -> DA 7B 31 30
+//     printline  @ 0x23DC8 -> C8 3D 32 30
+//     smallprint @ 0x23DCC -> CC 3D 32 30
+//     brk        @ 0x33030 -> 30 30 33 30
+//
+// The variant byte is a property of the call site, not of the gadget: the same
+// "sp = er6,pop er8" gadget is called with 0x30 inside a payload and with 0x48
+// by the community launcher, which hands control over to the payload without
+// linking (0x30 = "call and link", 0x48 = "branch").
+constexpr uint8_t kChainVariantCall = 0x30;
+constexpr uint8_t kChainVariantBranch = 0x48;
+
+uint8_t chain_segment(uint32_t addr) {
+    return (uint8_t)(0x30 | ((addr >> 16) & 0x0F));
+}
+
+void emit_gadget(std::vector<uint8_t>& out, uint32_t addr, uint8_t variant = kChainVariantCall) {
+    out.push_back((uint8_t)(addr & 0xFF));
+    out.push_back((uint8_t)((addr >> 8) & 0xFF));
+    out.push_back(chain_segment(addr));
+    out.push_back(variant);
+}
+
+// What a gadget does.  This only drives the low level listing; the bytes of
+// the chain word come from the address (see emit_gadget).
+enum class GKind : uint8_t {
+    Call = 0,      // plain function call
+    Pop,           // register pop (pop er0, pop xr0, ...)
+    Flow,          // stack / flow control (sp = ..., pop pc)
+    SetlrPc,       // setlr + pc redirect
+};
+
+// Normalised gadget name: lower case, no whitespace.
+std::string gadget_key(const std::string& name) {
+    std::string k;
+    for (char c : name)
+        if (!std::isspace((unsigned char)c)) k += (char)std::tolower((unsigned char)c);
+    return k;
+}
+
+// Which kind of gadget is this?
+GKind gadget_kind(const std::string& name) {
+    const std::string k = gadget_key(name);
+    if (k.rfind("setlr_pc", 0) == 0) return GKind::SetlrPc;
+    if (k.rfind("pop", 0) == 0) {
+        // "pop pc" redirects the program counter, every other pop loads a
+        // register.
+        if (k.compare(3, 2, "pc") == 0) return GKind::Flow;
+        return GKind::Pop;
+    }
+    if (k.rfind("sp", 0) == 0) return GKind::Flow;
+    return GKind::Call;
+}
+
+// The register a "pop <reg>" gadget loads ("pop xr0" -> "xr0").
+std::string pop_register(const std::string& name) {
+    std::string k = gadget_key(name);
+    if (k.rfind("pop", 0) != 0) return name;
+    std::string rest = k.substr(3);
+    const size_t comma = rest.find(',');
+    if (comma != std::string::npos) rest = rest.substr(0, comma);
+    return rest;
+}
+
+// "ff8181" and "ff 81 81" both describe the same bytes.
+std::vector<uint8_t> parse_hex_bytes(const std::string& s) {
+    std::string h;
+    for (char c : s)
+        if (std::isxdigit((unsigned char)c)) h += c;
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i + 1 < h.size(); i += 2)
+        bytes.push_back((uint8_t)std::strtoul(h.substr(i, 2).c_str(), nullptr, 16));
+    return bytes;
+}
+
+// ---------------------------------------------------------------- listing
+// One row of the low level view of the chain.
+struct ChainRow {
+    size_t offset = 0;   // offset of the word inside the payload
+    uint32_t addr = 0;   // gadget address
+    GKind kind = GKind::Call;
+    std::string name;    // gadget name (or the register for a pop)
+};
+
+const char* kind_name(GKind c) {
+    switch (c) {
+        case GKind::Pop: return "pop";
+        case GKind::Flow: return "flow";
+        case GKind::SetlrPc: return "setlr";
+        case GKind::Call: break;
+    }
+    return "call";
+}
+
+std::string hex_bytes_compact(const uint8_t* p, size_t n) {
+    static const char* digits = "0123456789ABCDEF";
+    std::string s;
+    for (size_t i = 0; i < n; i++) {
+        if (i) s += ' ';
+        s += digits[p[i] >> 4];
+        s += digits[p[i] & 0x0F];
+    }
+    return s;
+}
+
+// Build the low level listing of a payload:
+//
+//   E9E0  09 FA 30 30   call     0x09FA8  setlr
+//   E9E8  34 7B 31 30   pop      0x17B34  xr0
+//   E9EC  01 30 0C EA             data    01 30 0C EA
+std::string build_listing(const std::vector<uint8_t>& bytes, const std::vector<ChainRow>& rows,
+                           uint32_t base) {
+    std::string s;
+    char addr[16];
+    size_t i = 0, r = 0;
+    while (i < bytes.size()) {
+        if (r < rows.size() && rows[r].offset == i) {
+            const ChainRow& g = rows[r];
+            std::snprintf(addr, sizeof addr, "%04X", base + (uint32_t)i);
+            std::string kind = kind_name(g.kind);
+            while (kind.size() < 9) kind += ' ';
+            char ga[16];
+            std::snprintf(ga, sizeof ga, "0x%05X", g.addr);
+            s += std::string(addr) + "  " + hex_bytes_compact(&bytes[i], 4) + "   " + kind + ga +
+                 "  " + g.name + "\n";
+            i += 4;
+            r++;
+            continue;
+        }
+        // Plain data (arguments, string pool, ...): up to four bytes per row.
+        size_t n = 4;
+        if (r < rows.size() && rows[r].offset > i) n = std::min(n, rows[r].offset - i);
+        n = std::min(n, bytes.size() - i);
+        std::snprintf(addr, sizeof addr, "%04X", base + (uint32_t)i);
+        std::string col = hex_bytes_compact(&bytes[i], n);
+        while (col.size() < 11) col += ' ';
+        s += std::string(addr) + "  " + col + "             data    " +
+             hex_bytes_compact(&bytes[i], n) + "\n";
+        i += n;
+    }
+    return s;
+}
+
 // ---------------------------------------------------------------- emitter
 struct Emitter {
     const Db& db;
@@ -628,8 +786,10 @@ struct Emitter {
     std::map<std::string, size_t> labels;
     std::vector<std::pair<size_t, std::string>> patches;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
+    std::vector<ChainRow> rows;      // the chain, for the low level listing
     uint32_t home = 0xE9E0;
     uint32_t data_home = 0xE9E0;
+    int pad_size = 256;
 
     explicit Emitter(const Db& d) : db(d) {}
 
@@ -663,12 +823,18 @@ struct Emitter {
             log += "  ; error [E100]: gadget/label " + name + " not found (aliases tried)\n";
             return;
         }
-        // RAC/hdcompiler emits the 30 30 call-class tag for every gadget
-        // call, including payloads that are later copied to D730/E330.
-        const uint32_t encoded = addr + 0x30300000u;
-        emit_le(encoded, 4);
-        if (lower(found) != lower(name)) log += "  ; call " + name + " -> " + found + "\n";
-        else log += "  ; call " + name + "\n";
+        // The chain word is built from the gadget address: the low two bytes
+        // are the program counter, the third byte carries the code segment
+        // (0x30 | segment) and the fourth byte the call variant (0x30).
+        const GKind kind = gadget_kind(found);
+        emit_gadget(out, addr);
+        // Remember the word for the low level listing.
+        ChainRow row;
+        row.offset = out.size() - 4;
+        row.addr = addr;
+        row.kind = kind;
+        row.name = (kind == GKind::Pop) ? pop_register(found) : found;
+        rows.push_back(row);
     }
     uint32_t eval(const ExprP& e, std::string& err) {
         switch (e->k) {
@@ -725,6 +891,112 @@ struct Emitter {
         patches.push_back({pos, lbl});
         call("sp=er6,pop er8");
     }
+    // Index of the string argument of a call, or -1.
+    static int text_arg_index(const std::vector<ExprP>& args) {
+        for (size_t i = 0; i < args.size(); i++)
+            if (args[i]->k == Expr::Str) return (int)i;
+        return -1;
+    }
+    bool encode_text(const std::string& s, std::vector<uint8_t>& enc) {
+        std::string err;
+        if (!charmap().encode(s, enc, err)) { log += "  ; error: " + err + "\n"; return false; }
+        enc.push_back(0);   // strings are NUL terminated
+        return true;
+    }
+    // print(pad, linepos, "text") / print("text", pad, linepos)
+    //   -> pop xr0 with [linepos, pad, addr_lo, addr_hi], then printline.
+    // print_small(font, linepos, "text") / print_small("text", font, linepos)
+    //   -> pop xr0 with [font, linepos, addr_lo, addr_hi], then smallprint.
+    void emit_print(const StmtP& s, bool small) {
+        const std::vector<ExprP>& args = s->args;
+        const int ti = text_arg_index(args);
+        if (ti < 0 || args.size() != 3) { emit_generic_call(s); return; }
+        std::vector<const ExprP*> rest;
+        for (size_t i = 0; i < args.size(); i++)
+            if ((int)i != ti) rest.push_back(&args[i]);
+        const uint32_t a = eval(*rest[0], log);   // pad (print) / font (print_small)
+        const uint32_t b = eval(*rest[1], log);   // line position
+        std::vector<uint8_t> enc;
+        if (!encode_text(args[ti]->s, enc)) return;
+        uint32_t addr = 0; std::string found;
+        if (!find_addr(small ? "smallprint" : "printline", addr, found) &&
+            !find_addr("line_print", addr, found)) {
+            log += "  ; error [E100]: gadget " + std::string(small ? "smallprint" : "printline") +
+                   " not found (aliases tried)\n";
+            return;
+        }
+        // printline wants ER0 = pad << 8 | linepos, smallprint and line_print
+        // want ER0 = linepos << 8 | font.
+        const bool swap = !small && found == "printline";
+        call("pop xr0");
+        if (swap) {
+            out.push_back((uint8_t)(b & 0xFF));   // linepos
+            out.push_back((uint8_t)(a & 0xFF));   // pad
+        } else {
+            out.push_back((uint8_t)(a & 0xFF));   // font
+            out.push_back((uint8_t)(b & 0xFF));   // linepos
+        }
+        size_t sp = out.size();
+        out.push_back(0); out.push_back(0);
+        str_pool.push_back({sp, enc});
+        log += "  ; " + std::string(small ? "print_small" : "print") + " \"" + args[ti]->s + "\" " +
+               (small ? "font=0x" : "pad=0x") + hex2(a) + " linepos=0x" + hex2(b) + " -> " + found + "\n";
+        call(found);
+    }
+    // line(x1, y1, x2, y2) -> pop xr0 with [x1, y1, x2, y2], then line_draw.
+    // rect(x, y, w, h) is an alias with the very same ABI.
+    void emit_line(const StmtP& s) {
+        if (s->args.size() != 4) { emit_generic_call(s); return; }
+        call("pop xr0");
+        for (size_t i = 0; i < 4; i++) {
+            const uint32_t v = eval(s->args[i], log);
+            if (v > 0xFF)
+                log += "  ; warning [W003]: line coordinate " + std::to_string(v) + " does not fit in one byte\n";
+            out.push_back((uint8_t)(v & 0xFF));
+        }
+        call("line_draw");
+    }
+    // bitmap(x, y, w, h, "ff8181") -> pop xr0 with [x, y, w, h], render_bitmap,
+    // pop er0 with the bitmap address, then render.ddd4.
+    void emit_bitmap(const StmtP& s) {
+        if (s->args.size() != 5 || s->args[4]->k != Expr::Str) { emit_generic_call(s); return; }
+        const std::vector<uint8_t> data = parse_hex_bytes(s->args[4]->s);
+        if (data.empty()) { log += "  ; error: bitmap data is empty\n"; return; }
+        call("pop xr0");
+        for (size_t i = 0; i < 4; i++) {
+            const uint32_t v = eval(s->args[i], log);
+            if (v > 0xFF)
+                log += "  ; warning [W003]: bitmap size " + std::to_string(v) + " does not fit in one byte\n";
+            out.push_back((uint8_t)(v & 0xFF));
+        }
+        call("render_bitmap");
+        call("pop er0");
+        size_t sp = out.size();
+        out.push_back(0); out.push_back(0);
+        str_pool.push_back({sp, data});
+        log += "  ; bitmap " + std::to_string(data.size()) + " bytes\n";
+        call("render");
+    }
+    // The generic form: the call, then one 16 bit word per argument.
+    void emit_generic_call(const StmtP& s) {
+        const std::string key = lower(s->name);
+        uint32_t a = 0; std::string f;
+        if (find_addr(key, a, f)) {
+            call(key);
+            for (auto& arg : s->args) {
+                if (arg->k == Expr::Str) {
+                    std::vector<uint8_t> enc;
+                    if (!encode_text(arg->s, enc)) continue;
+                    size_t pos = out.size();
+                    out.push_back(0); out.push_back(0);
+                    str_pool.push_back({pos, enc});
+                } else emit_le(eval(arg, log), 2);
+            }
+        } else {
+            log += "  ; warning [W001]: function " + s->name + " not in gadgets/labels -> skipped\n";
+            for (auto& arg : s->args) emit_le(eval(arg, log), 2);
+        }
+    }
     void stmt(const StmtP& s) {
         switch (s->k) {
             case Stmt::Assign: {
@@ -743,48 +1015,17 @@ struct Emitter {
             }
             case Stmt::Call: {
                 std::string key = lower(s->name);
-                // print(...) accepts both orders: CWiz's print(x, y, "text")
-                // and CasioC's print("text", x, y).
-                size_t text_arg = 3;
-                if (key == "print" && s->args.size() == 3) {
-                    if (s->args[0]->k == Expr::Str) text_arg = 0;
-                    else if (s->args[2]->k == Expr::Str) text_arg = 2;
-                }
-                if (text_arg != 3) {
-                    const ExprP& text = s->args[text_arg];
-                    const ExprP& ax = s->args[text_arg == 0 ? 1 : 0];
-                    const ExprP& ay = s->args[text_arg == 0 ? 2 : 1];
-                    std::vector<uint8_t> enc; std::string err;
-                    if (!charmap().encode(text->s, enc, err)) { log += "  ; error: " + err + "\n"; return; }
-                    enc.push_back(0);
-                    uint32_t x = eval(ax, log), y = eval(ay, log);
-                    call("pop xr0");
-                    out.push_back((uint8_t)(x & 0xFF));
-                    out.push_back((uint8_t)(y & 0xFF));
-                    size_t sp = out.size();
-                    out.push_back(0); out.push_back(0);
-                    str_pool.push_back({sp, enc});
-                    log += "  ; print \"" + text->s + "\" x=" + std::to_string(x) + " y=" + std::to_string(y) + "\n";
-                    call("line_print");
+                // The text/graphics builtins have their own argument ABI and
+                // are emitted by hand; everything else goes through the
+                // generic "call then arguments" path.
+                if (key == "print" || key == "print_line") { emit_print(s, false); return; }
+                if (key == "print_small") { emit_print(s, true); return; }
+                if (key == "line" || key == "draw_line" || key == "rect" || key == "draw_rect") {
+                    emit_line(s);
                     return;
                 }
-                uint32_t a = 0; std::string f;
-                if (find_addr(key, a, f)) {
-                    call(key);
-                    for (auto& arg : s->args) {
-                        if (arg->k == Expr::Str) {
-                            std::vector<uint8_t> enc; std::string err;
-                            if (!charmap().encode(arg->s, enc, err)) { log += "  ; error: " + err + "\n"; continue; }
-                            enc.push_back(0);
-                            size_t pos = out.size();
-                            out.push_back(0); out.push_back(0);
-                            str_pool.push_back({pos, enc});
-                        } else emit_le(eval(arg, log), 2);
-                    }
-                } else {
-                    log += "  ; warning [W001]: function " + s->name + " not in gadgets/labels -> skipped\n";
-                    for (auto& arg : s->args) emit_le(eval(arg, log), 2);
-                }
+                if (key == "bitmap" || key == "draw_bitmap") { emit_bitmap(s); return; }
+                emit_generic_call(s);
                 return;
             }
             case Stmt::If: {
@@ -796,23 +1037,23 @@ struct Emitter {
                 for (auto& x : s->then_b) stmt(x);
                 jump_label(en, "goto " + en);
                 labels[el] = out.size();
-                log += el + ":\n";
+                log += "; " + el + "\n";
                 for (auto& x : s->else_b) stmt(x);
                 labels[en] = out.size();
-                log += en + ":\n";
+                log += "; " + en + "\n";
                 return;
             }
             case Stmt::While: {
                 std::string lp = "loop_" + std::to_string(out.size());
                 std::string en = "end_" + std::to_string(out.size());
                 labels[lp] = out.size();
-                log += lp + ":\n";
+                log += "; " + lp + "\n";
                 int c = eval_cond(s->cond);
                 if (c == 0) { labels[en] = out.size(); log += "  ; while false\n"; return; }
                 for (auto& x : s->body) stmt(x);
                 jump_label(lp, "goto " + lp);
                 labels[en] = out.size();
-                log += en + ":\n";
+                log += "; " + en + "\n";
                 return;
             }
             case Stmt::For: {
@@ -830,7 +1071,7 @@ struct Emitter {
                 return;
             }
             case Stmt::Goto: jump_label(s->name, "goto " + s->name); return;
-            case Stmt::Label: labels[s->name] = out.size(); log += s->name + ":\n"; return;
+            case Stmt::Label: labels[s->name] = out.size(); log += "; " + s->name + "\n"; return;
             case Stmt::Asm:
                 for (auto& l : s->asm_lines) {
                     log += "  ; asm " + l + "\n";
@@ -849,6 +1090,7 @@ struct Emitter {
         }
     }
     static std::string hex4(uint32_t v) { char b[8]; std::snprintf(b, sizeof b, "%04X", v); return b; }
+    static std::string hex2(uint32_t v) { char b[8]; std::snprintf(b, sizeof b, "%02X", v & 0xFF); return b; }
     RopResult run(const Program& prog) {
         RopResult r;
         home = prog.has_org ? prog.org : 0xE9E0;
@@ -862,6 +1104,8 @@ struct Emitter {
                 has_sfr_setup = has_sfr_setup || n == "setsfr";
             }
         }
+        // This is the exact hdcompiler/RAC preamble.  setlr_pc is a different
+        // gadget and does not reproduce the working RAC chain's startup.
         if (!has_lr_setup) call("setlr");
         if (!has_sfr_setup) call("setsfr");
         for (auto& g : prog.globals) {
@@ -870,9 +1114,11 @@ struct Emitter {
             if (g.has_init) log += "  ; global " + g.name + " @ " + hex4(a) + " = " + std::to_string(g.init) + "\n";
         }
         for (auto& f : prog.funcs) {
-            log += "func " + f.name + "\n";
+            log += "; func " + f.name + "\n";
             for (auto& s : f.body) stmt(s);
         }
+        call("brk"); // halt after main: without it the chain runs into the
+                     // string pool and the calculator resets.
         // append string pool
         for (auto& sp : str_pool) {
             size_t off = out.size();
@@ -891,11 +1137,26 @@ struct Emitter {
             out[p.first + 1] = (uint8_t)((target >> 8) & 0xFF);
             log += "  ; patch " + p.second + " -> [" + hex4(target) + "]\n";
         }
-        if (prog.funcs.empty()) log += "warning: no function found\n";
+        if (prog.funcs.empty()) log += "  ; warning: no function found\n";
+        // A ROP payload always ends with a null buffer.  The community
+        // programs rely on it: the copy performed by the launcher moves a
+        // fixed number of bytes, and the trailing zeros keep the chain from
+        // running into whatever the calculator has in RAM after the program.
+        // 256 bytes is the default; `#pad N` sets another size and `#nopad`
+        // turns the buffer off.
+        if (pad_size > 0) {
+            out.insert(out.end(), (size_t)pad_size, (uint8_t)0);
+            log += "  ; null buffer: " + std::to_string(pad_size) + " bytes\n";
+        }
         r.ok = true;
         r.bytes = std::move(out);
         r.base = home;
-        r.log = std::move(log);
+        // The low level view of the chain comes first, the notes follow.
+        std::string listing = build_listing(r.bytes, rows, data_home);
+        if (home != data_home)
+            listing = "; payload injected at " + hex4(data_home) + ", executed at " + hex4(home) + "\n" + listing;
+        r.log = listing;
+        if (!log.empty()) r.log += log;
         return r;
     }
 };
@@ -930,7 +1191,7 @@ uint32_t parse_length(std::string a) {
 }
 
 std::string strip_directives(std::string src, std::string& model, uint32_t& org, bool& has_org,
-                             LauncherOpts& lopts) {
+                             LauncherOpts& lopts, int& pad) {
     std::string out;
     std::istringstream in(src);
     std::string line;
@@ -949,6 +1210,13 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                 std::string a; ls >> a;
                 org = parse_number(a);
                 has_org = true;
+            } else if (dlow == "pad" || dlow == "nopad") {
+                if (dlow == "nopad") {
+                    pad = 0;
+                } else {
+                    std::string a; ls >> a;
+                    if (!a.empty()) pad = (int)parse_number(a);
+                }
             } else if (dlow == "launcher") {
                 std::string a;
                 if (!(ls >> a)) {
@@ -1017,7 +1285,8 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         uint32_t org = 0xE9E0;
         bool has_org = false;
         LauncherOpts lopts;
-        std::string body = strip_directives(source, m, org, has_org, lopts);
+        int pad = 256;  // null buffer appended to the payload
+        std::string body = strip_directives(source, m, org, has_org, lopts, pad);
         r.model = m;
         Program prog = Parser(lex(body)).parse();
         if (prog.model.empty()) prog.model = m;
@@ -1043,6 +1312,7 @@ RopResult build_rop(const std::string& source, const std::string& model) {
         db.load(r.model == "880" ? ROP_DB_880 : ROP_DB_580);
         Emitter em(db);
         em.data_home = common ? backup : org;
+        em.pad_size = pad;
         r = em.run(prog);
         r.model = r.model.empty() ? m : r.model;
         // `base` is where the debugger writes the payload.  It is not
@@ -1053,14 +1323,6 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             out.push_back((uint8_t)(v & 0xFF));
             out.push_back((uint8_t)((v >> 8) & 0xFF));
         };
-        // Chain words are: 16-bit gadget address followed by a 16-bit class
-        // tag (0x3030 call, 0x3031 pop, 0x3032 stack/flow).
-        auto emit_gadget = [](std::vector<uint8_t>& out, uint32_t addr, uint32_t tag) {
-            out.push_back((uint8_t)(addr & 0xFF));
-            out.push_back((uint8_t)((addr >> 8) & 0xFF));
-            out.push_back((uint8_t)(tag & 0xFF));
-            out.push_back((uint8_t)((tag >> 8) & 0xFF));
-        };
 
         // The common launcher is entered through the calculator's program
         // input area; the simple stub defaults to the historical 8154 entry.
@@ -1068,42 +1330,92 @@ RopResult build_rop(const std::string& source, const std::string& model) {
             r.launcher_base = lopts.base;
         else
             r.launcher_base = (r.model == "880" ? 0x9268u : 0xD180u);
-        const uint32_t length = lopts.has_length ? lopts.length : 3;
+        const uint32_t length = lopts.length;
+        // RAC length codes: 01 -> 0x01FE (510) bytes, 02 -> 0x02FE (766),
+        // 03 -> 0x03FE (1022) bytes.
+        const uint32_t code = length == 1 ? 1u : (length == 2 ? 2u : 3u);
+        const uint32_t copy_len = (code << 8) | 0xFEu;
+
+        // The launcher gadgets are taken from the gadget database as well, so
+        // that no ROM address is hard coded in the compiler.  The simple stub
+        // keeps its historical bytes: for the 880 the database does not know
+        // these two gadgets, so the old addresses are used as a fallback.
+        std::string missing_gadget;
+        auto launcher_gadget = [&](const char* name, uint32_t fallback) -> uint32_t {
+            const uint32_t a = db.find_gadget(name);
+            if (a == 0xFFFFFFFFu) {
+                if (fallback == 0) {
+                    if (missing_gadget.empty()) missing_gadget = name;
+                    return 0;
+                }
+                return fallback;
+            }
+            return a;
+        };
 
         if (lopts.kind == LauncherKind::Common) {
             if (r.model == "880") {
-                // 880: fd 26 <payload-2> <sp gadget>
+                // 880 common launcher: FD 26 | 2E E3 | C0 75 32 30
+                // (C0 75 32 30 = segment-2 call of the 880 sp gadget).
                 r.launcher.push_back(0xFD);
                 r.launcher.push_back(0x26);
-                emit16(r.launcher, (backup - 2) & 0xFFFF);
-                emit_gadget(r.launcher, 0x75C0, 0x3032);
+                emit16(r.launcher, (backup - 2) & 0xFFFF);   // 2E E3
+                r.launcher.push_back(0xC0);
+                r.launcher.push_back(0x75);
+                r.launcher.push_back(0x32);
+                r.launcher.push_back(0x30);
             } else {
-                // RAC's proven 580 launcher chung: set LR, load destination and
-                // source into XR0, BL memcpy, then transfer SP to main-2.
-                r.launcher.push_back(0xFD);
-                r.launcher.push_back(0x24);
-                emit16(r.launcher, 0x3030);
-                emit_gadget(r.launcher, 0x308D0, 0x3033);              // setlr_pc
-                emit_gadget(r.launcher, 0x17B34, 0x3031);              // pop xr0
-                emit16(r.launcher, main);                             // destination
-                emit16(r.launcher, backup);                           // source
-                emit_gadget(r.launcher, 0x09451, 0x3030);              // BL memcpy
-                r.launcher.push_back(0xFE);                           // size marker
-                r.launcher.push_back((uint8_t)(length & 0xFF));        // 01/02/03
-                emit_gadget(r.launcher, 0x10742, 0x3031);              // pop er14
-                emit16(r.launcher, (main - 2) & 0xFFFF);
-                emit_gadget(r.launcher, 0x20D60, 0x3032);              // sp = er14, pop er14
+                // The 580 "launcher chung", byte for byte the one from the
+                // community guide (section 3.1):
+                //
+                //   FD 24 30 30 | DA 7B 31 30 | FE <code> | <src> | <dst> |
+                //   <dst-2> | 32 89 31 30 | 30 30 | 74 1F 32 48
+                //
+                // "pop qr0" loads the copy length, the backup address, the
+                // execution address and the jump target; the copy gadget then
+                // moves the payload from the backup area to the execution area
+                // and the last word branches into it.
+                emit_gadget(r.launcher, 0x024FD);                  // trigger
+                emit_gadget(r.launcher, launcher_gadget("pop qr0", 0));
+                r.launcher.push_back(0xFE);                       // length marker
+                r.launcher.push_back((uint8_t)(code & 0xFF));     // 01/02/03
+                emit16(r.launcher, backup);                       // source
+                emit16(r.launcher, main);                         // destination
+                emit16(r.launcher, (main - 2) & 0xFFFF);          // jump target
+                emit_gadget(r.launcher, launcher_gadget("launcher_copy", 0));
+                r.launcher.push_back(0x30);                       // filler
+                r.launcher.push_back(0x30);
+                emit_gadget(r.launcher, launcher_gadget("sp = er6,pop er8", 0),
+                            kChainVariantBranch);
+                if (r.bytes.size() > copy_len)
+                    r.log += "  ; warning [W002]: payload too large for launcher length code (" +
+                             std::to_string(copy_len) + " bytes, payload is " +
+                             std::to_string(r.bytes.size()) + " bytes)\n";
             }
             r.log += "  ; launcher (" + std::string(r.model == "880" ? "880 common" : "580 common") +
                      ") " + std::to_string(r.launcher.size()) + " bytes\n";
         } else {
             // Simple 10-byte stub: pop er14 / payload-2 / sp = er14, pop er14.
-            const uint32_t pop_er14 = 0x15C78;
-            const uint32_t set_sp = 0x20D60;
-            emit_gadget(r.launcher, pop_er14 & 0xFFFF, 0x3031);
+            //
+            // This is the launcher from the community notes: "78 5C 31 30
+            // [payload - 2] 60 0D 32 30".  The gadgets come from the gadget
+            // database of the model, so the 580 uses 0x15C78 / 0x20D60 and the
+            // 880 uses its own 0x1086C / 0x29852.
+            const uint32_t pop_er14 = r.model == "880"
+                                          ? launcher_gadget("pop er14", 0x1086Cu)
+                                          : launcher_gadget("pop er14", 0x15C78u);
+            const uint32_t set_sp = r.model == "880"
+                                        ? launcher_gadget("sp = er14,pop er14", 0x29852u)
+                                        : launcher_gadget("sp = er14,pop er14", 0x20D60u);
+            emit_gadget(r.launcher, pop_er14);
             emit16(r.launcher, (r.base >= 2 ? r.base - 2 : r.base) & 0xFFFF);
-            emit_gadget(r.launcher, set_sp & 0xFFFF, 0x3032);
+            emit_gadget(r.launcher, set_sp);
             r.log += "  ; launcher (simple) " + std::to_string(r.launcher.size()) + " bytes\n";
+        }
+        if (!missing_gadget.empty()) {
+            r.ok = false;
+            r.error = "launcher gadget '" + missing_gadget + "' not found in the gadget database";
+            return r;
         }
         r.launcher_hex = hex_bytes(r.launcher);
         char hb[16];

@@ -46,7 +46,7 @@ public:
 	using CompileCallback = std::function<CompileResult(const std::string&)>;
 
 	explicit LibCompilerImGuiWindow(CompileCallback cb = nullptr)
-		: UIWindow("Rop Compiler"), compileCallback_(std::move(cb)) {
+		: UIWindow("Injection"), compileCallback_(std::move(cb)) {
 		setupTextEditor();
 		setupMemoryEditor();
 		editor_.SetText(
@@ -80,26 +80,10 @@ public:
 		}
 
 		const float diagnosticsHeight = 135.0f;
-		const float mainHeight =
-			ImGui::GetContentRegionAvail().y - diagnosticsHeight - ImGui::GetStyle().ItemSpacing.y;
-
-		if (ImGui::BeginTable("##compiler_layout", 2,
-				ImGuiTableFlags_Resizable |
-					ImGuiTableFlags_BordersInnerV |
-					ImGuiTableFlags_SizingStretchProp,
-				ImVec2(-1, mainHeight))) {
-			ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch, 0.58f);
-			ImGui::TableSetupColumn("Output", ImGuiTableColumnFlags_WidthStretch, 0.42f);
-			ImGui::TableNextRow();
-
-			ImGui::TableSetColumnIndex(0);
-			drawSourcePanel(mainHeight);
-
-			ImGui::TableSetColumnIndex(1);
-			drawOutputPanel(mainHeight);
-
-			ImGui::EndTable();
-		}
+		const float avail = ImGui::GetContentRegionAvail().y - diagnosticsHeight - ImGui::GetStyle().ItemSpacing.y;
+		const float topH = avail * 0.55f;
+		drawSourcePanel(topH);
+		drawOutputPanel(avail - topH);
 
 		drawDiagnosticsPanel(diagnosticsHeight);
 		handleShortcuts();
@@ -126,6 +110,7 @@ private:
 	uint32_t baseAddress_ = 0x8154;
 	std::string diagnosticsText_;
 	bool lastCompileOk_ = true;
+	bool safeMode_ = false;
 	CompileCallback compileCallback_;
 
 	// Database state
@@ -555,6 +540,14 @@ private:
 			lastCompileOk_ = true;
 		}
 
+		// Safe mode toggle
+		ImGui::SameLine();
+		ImGui::Checkbox("Safe", &safeMode_);
+		if (safeMode_ && baseAddress_ >= 0x8000) {
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(1,0.3,0.3,1), "Critical addr blocked");
+		}
+
 		// Show database load error if any (inline red badge)
 		if (!dbLoadError_.empty()) {
 			ImGui::SameLine();
@@ -691,8 +684,22 @@ private:
 
 			outputBytes_ = std::move(result.bytes);
 			baseAddress_ = result.baseAddress;
-			applyDiagnostics(result.diagnostics);
-			lastCompileOk_ = true;
+
+			// Validation: hex format / safe mode
+			if (safeMode_ && baseAddress_ >= 0x8000) {
+				lastCompileOk_ = false;
+				diagnosticsText_ = "Safe mode: critical address blocked";
+			} else if (outputBytes_.size() > 128) {
+				lastCompileOk_ = false;
+				diagnosticsText_ = "Payload too large (>128 bytes)";
+			} else {
+				applyDiagnostics(result.diagnostics);
+				lastCompileOk_ = true;
+				if (diagnosticsText_.empty()) {
+					diagnosticsText_ = g_local.Format("RopCompiler.CompileSuccess",
+						(int)outputBytes_.size());
+				}
+			}
 
 			// Check if any diagnostic was an error
 			for (const auto& d : result.diagnostics) {

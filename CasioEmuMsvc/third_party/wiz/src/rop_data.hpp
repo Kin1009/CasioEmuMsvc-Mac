@@ -34,6 +34,7 @@ static const char ROP_DB_580[] = R"ROPDB(
 0a8a6 pop er8
 16eca pop er12,rt
 17bda pop qr0
+18932 launcher_copy
 12da8 pop qr8
 177da pop r0
 1844a pop r8

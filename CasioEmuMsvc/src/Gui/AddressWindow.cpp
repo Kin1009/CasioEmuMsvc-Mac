@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "AddressWindow.h"
 #include <Hooks.h>
 #include <Localization.h>
@@ -71,39 +72,46 @@ private:
 	std::vector<AddressInfo> addresses;
 	uint32_t newAddress = 0;
 
+	int bytesPerRow_ = 16; // dynamic to fit wider payloads
+
 	void RenderAddressTable() {
 		if (ImGui::BeginTable("Addresses", 3, pretty_table)) {
-			ImGui::TableSetupColumn("AddressWindow.Address"_lc);
-			ImGui::TableSetupColumn("AddressWindow.Value"_lc);
-			ImGui::TableSetupColumn("AddressWindow.Fixed"_lc);
+			float availW = ImGui::GetContentRegionAvail().x;
+			// Bytes per row controls how many hex glyph groups are visible before wrapping
+			bytesPerRow_ = static_cast<int>(std::max(1.0f, std::min(static_cast<float>(availW / (3 * 9.5f)), 64.0f)));
+
+			ImGui::TableSetupColumn("AddressWindow.Address"_lc, 0, 0.28f);
+			ImGui::TableSetupColumn("AddressWindow.Value"_lc, 0, 0.48f);
+			float dynamicW = std::min<float>(0.24f, 0.1f + 0.01f * bytesPerRow_);
+			ImGui::TableSetupColumn("AddressWindow.Fixed"_lc, 0, dynamicW);
 			ImGui::TableHeadersRow();
 
-			for (size_t i = 0; i < addresses.size(); ++i) {
-				ImGui::PushID(i + 1145);
-				auto& info = addresses[i];
+		for (size_t i = 0; i < addresses.size(); ++i) {
+			ImGui::PushID(i + 1145);
+			auto& info = addresses[i];
 
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				UIHelpers::ClickableAddress(info.address);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			UIHelpers::ClickableAddress(info.address);
 
-				ImGui::TableSetColumnIndex(1);
-				uint8_t value = info.value;
-				if (!info.locked)
-					value = m_emu->chipset.mmu.ReadData(info.address);
-				if (ImGui::InputScalar("##value", ImGuiDataType_U8, &value, 0, 0, "%x")) {
-					info.value = value;
-					UpdateMemoryValue(info.address, info.value);
-				}
-
-				ImGui::TableSetColumnIndex(2);
-				bool locked = info.locked;
-				if (ImGui::Checkbox("##lock", &locked)) {
-					info.locked = locked;
-				}
-				ImGui::PopID();
+			ImGui::TableSetColumnIndex(1);
+			uint8_t value = info.value;
+			if (!info.locked)
+				value = m_emu->chipset.mmu.ReadData(info.address);
+			if (ImGui::InputScalar("##value", ImGuiDataType_U8, &value, 0, 0, "%x")) {
+				info.value = value;
+				UpdateMemoryValue(info.address, info.value);
 			}
 
-			ImGui::EndTable();
+			ImGui::TableSetColumnIndex(2);
+			bool locked = info.locked;
+			if (ImGui::Checkbox("##lock", &locked)) {
+				info.locked = locked;
+			}
+			ImGui::PopID();
+		}
+
+		ImGui::EndTable();
 		}
 	}
 

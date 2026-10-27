@@ -20,7 +20,9 @@
 namespace wiz {
 
 struct WizError : CompileError {
-    explicit WizError(const std::string& msg, int line = 0) : CompileError(msg, line) {}
+    explicit WizError(const std::string& msg, int line = 0, int col = 0,
+                      const std::string& hint = "", const std::string& code = "")
+        : CompileError(msg, line, col, hint, code) {}
 };
 
 struct WizResult {

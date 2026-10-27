@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include "common.hpp"
 
@@ -17,11 +18,14 @@ struct Target {
     int ram_lo;
     int var_base;
     int var_limit;
+    // Inclusive RAM holes which the global allocator must not occupy.
     int planes;            // LCD bitplanes
     int rom_seg = 0;       // data segment (DSR) of ROM tables; 3 for 'cwapp'
     int rows = 64;         // visible LCD rows (width is always 192)
     std::string core = "nX-U8/100";
     int row_off = 0;       // VRAM row of user y=0 (cw: 1)
+    // Inclusive RAM holes which the global allocator must not occupy.
+    std::vector<std::pair<int, int>> reserved_ram;
 };
 
 extern const Target TARGET_CWII;

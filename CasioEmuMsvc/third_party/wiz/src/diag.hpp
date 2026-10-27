@@ -27,6 +27,7 @@ inline const char* LOCATION = "1";     // bold
 inline const char* CARET = "1;32";     // bold green
 inline const char* OK = "32";          // green
 inline const char* INFO = "36";        // cyan
+inline const char* HINT = "1;36";      // bold cyan
 inline const char* DIM_TXT = "2";
 }  // namespace style
 
@@ -53,11 +54,14 @@ struct Diag {
     explicit Diag(std::string tool_) : tool(std::move(tool_)) {}
 
     void error(const std::string& msg, const std::string& file = "", int line = -1, int col = -1,
-               const std::string& src = "");
+               const std::string& src = "", const std::string& code = "");
     void warning(const std::string& msg, const std::string& file = "", int line = -1, int col = -1,
                  const std::string& src = "");
     void note(const std::string& msg, const std::string& file = "", int line = -1, int col = -1,
               const std::string& src = "");
+    // A "help:" line printed after an error/warning, without counting as a new
+    // diagnostic. Used for the CompileError::hint text.
+    void help(const std::string& msg);
     [[noreturn]] void fatal(const std::string& msg, const std::string& file = "", int line = -1,
                             int col = -1);
     int summary();

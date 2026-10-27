@@ -23,6 +23,13 @@ struct RopResult {
 
 // Compile CWiz-syntax ROP source. `model` is "580" or "880".
 RopResult build_rop(const std::string& source, const std::string& model);
+// The upstream toolchain passes the source language so it can also accept Wiz
+// syntax.  The vendored ROP backend is CWiz-only; the language argument is
+// accepted for source compatibility and ignored.
+inline RopResult build_rop(const std::string& source, const std::string& model,
+                           const std::string& /*language*/) {
+    return build_rop(source, model);
+}
 
 // True when the source asks for the ROP backend (contains a `#rop` line).
 bool source_is_rop(const std::string& source);

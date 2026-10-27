@@ -31,6 +31,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "build.hpp"
@@ -204,7 +205,10 @@ struct Diag {
 	Sev sev = Sev::Error;
 	int line = -1;
 	int col = -1;
+	int end_col = -1;
 	std::string msg;
+	std::string hint;
+	std::string code;
 };
 
 ImVec4 DiagColor(Sev sev) {
@@ -369,10 +373,10 @@ private:
 				out = wiz::build_source(src, target);
 			return true;
 		} catch (const wiz::CompileError& e) {
-			diag = {Sev::Error, e.line, e.col, e.what()};
+			diag = {Sev::Error, e.line, e.col, e.end_col, e.what(), e.hint, e.code};
 			return false;
 		} catch (const std::exception& e) {
-			diag = {Sev::Error, -1, -1, e.what()};
+			diag = {Sev::Error, -1, -1, -1, e.what()};
 			std::string message = e.what();
 			if (message.find("cannot read") != std::string::npos ||
 				message.find("runtime.asm") != std::string::npos)
@@ -411,8 +415,11 @@ private:
 		if (!Compile(src, result, diag)) {
 			diags_.push_back(diag);
 			if (diag.line > 0)
-				editor_.SetErrorMarkers({ {diag.line, diag.msg} });
+				editor_.SetErrorMarkers({ {diag.line, diag.hint.empty()
+													  ? diag.msg
+													  : diag.msg + "\n" + diag.hint} });
 			AddLog(Sev::Error, wiz::fmt("%s: %s", SevName(diag.sev), diag.msg.c_str()));
+			if (!diag.hint.empty()) AddLog(Sev::Note, "help: " + diag.hint);
 			return;
 		}
 
@@ -455,7 +462,7 @@ private:
 		}
 		if (!rop.ok) {
 			AddLog(Sev::Error, rop.error);
-			diags_.push_back({Sev::Error, -1, -1, rop.error});
+			diags_.push_back({Sev::Error, -1, -1, -1, rop.error});
 			return;
 		}
 		if (rop.bytes.empty()) {
@@ -543,11 +550,21 @@ private:
 			} else {
 				++notes;
 			}
-			const std::string message =
+			std::string message =
 				item.rule.empty() ? item.message : item.message + "  [" + item.rule + "]";
-			diags_.push_back({sev, item.line, item.col, message});
+			if (!item.hint.empty()) message += "\n    help: " + item.hint;
+			Diag d;
+			d.sev = sev;
+			d.line = item.line;
+			d.col = item.col;
+			d.end_col = item.end_col;
+			d.msg = item.message + (item.rule.empty() ? "" : "  [" + item.rule + "]");
+			d.hint = item.hint;
+			d.code = item.code;
+			diags_.push_back(std::move(d));
 			if (item.line > 0)
-				markers[item.line] = item.message;
+				markers[item.line] = item.hint.empty() ? item.message
+													   : item.message + "\n" + item.hint;
 		}
 		editor_.SetErrorMarkers(markers);
 		AddLog(errors ? Sev::Error : (warnings ? Sev::Warning : Sev::Note),
@@ -1149,29 +1166,64 @@ private:
 		ImGui::EndChild();
 	}
 
+	void RenderClearRamSection() {
+		static char ram_addr_str[32] = "E9E0";
+		static int ram_size_int = 256;
+		ImGui::PushItemWidth(80);
+		ImGui::InputText("Addr", ram_addr_str, sizeof(ram_addr_str), ImGuiInputTextFlags_CharsHexadecimal);
+		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(120);
+		if (ImGui::InputInt("Size", &ram_size_int)) ram_size_int = std::max(1, std::min(ram_size_int, 65536));
+		ImGui::SameLine();
+		if (ImGui::Button("Clear RAM")) {
+			uint32_t addr = 0;
+			std::istringstream ss(ram_addr_str);
+			if ((ss >> std::hex >> addr) && me_mmu) {
+				for (int i = 0; i < ram_size_int; ++i)
+					me_mmu->WriteData(addr + static_cast<uint32_t>(i), 0, 0);
+				AddLog(Sev::Note, wiz::fmt("cleared RAM [%04X] %d bytes", addr, ram_size_int));
+			} else {
+				AddLog(Sev::Error, "Clear RAM: invalid hex address");
+			}
+		}
+	}
+
 	void RenderOutputPanel(float height) {
 		ImGui::BeginChild("##wiz_output_panel", ImVec2(-1, height), true);
 		ImGui::TextUnformatted("Build output");
-		ImGui::Separator();
-
-		if (ImGui::Button("Clear"))
-			log_.clear();
-		ImGui::SameLine();
-		if (ImGui::Button("Copy"))
-			ImGui::SetClipboardText(LogText().c_str());
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", built_ok_ ? "last build: ok" : "last build: not run or failed");
+		ImGui::SameLine();
+		RenderClearRamSection();
 		ImGui::Separator();
 
-		ImGui::BeginChild("##wiz_log", ImVec2(-1, -1), false);
-		for (const auto& item : log_) {
-			ImGui::PushStyleColor(ImGuiCol_Text, DiagColor(item.first));
-			ImGui::TextWrapped("%s", item.second.c_str());
-			ImGui::PopStyleColor();
+		if (ImGui::BeginTabBar("##wiz_output_tabs")) {
+			if (ImGui::BeginTabItem("Log")) {
+				if (ImGui::Button("Clear"))
+					log_.clear();
+				ImGui::SameLine();
+				if (ImGui::Button("Copy"))
+					ImGui::SetClipboardText(LogText().c_str());
+				ImGui::Separator();
+
+				ImGui::BeginChild("##wiz_log", ImVec2(-1, -1), false);
+				for (const auto& item : log_) {
+					ImGui::PushStyleColor(ImGuiCol_Text, DiagColor(item.first));
+					ImGui::TextWrapped("%s", item.second.c_str());
+					ImGui::PopStyleColor();
+				}
+				if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+					ImGui::SetScrollHereY(1.0f);
+				ImGui::EndChild();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Result")) {
+				RenderResultTab();
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
 		}
-		if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-			ImGui::SetScrollHereY(1.0f);
-		ImGui::EndChild();
 		ImGui::EndChild();
 	}
 
@@ -1211,6 +1263,18 @@ private:
 				ImGui::TextDisabled("%s", file_name_);
 			ImGui::SameLine();
 			ImGui::TextWrapped("%s", d.msg.c_str());
+			if (!d.hint.empty()) {
+				ImGui::Indent(24.0f);
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.75f, 0.85f, 1.0f));
+				ImGui::TextWrapped("help: %s", d.hint.c_str());
+				ImGui::PopStyleColor();
+				ImGui::Unindent(24.0f);
+			}
+			if (!d.code.empty()) {
+				ImGui::Indent(24.0f);
+				ImGui::TextDisabled("%s", d.code.c_str());
+				ImGui::Unindent(24.0f);
+			}
 			ImGui::PopID();
 		}
 		ImGui::EndChild();
@@ -1228,6 +1292,48 @@ private:
 			SaveSource();
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_O))
 			LoadSource();
+	}
+
+	void RenderResultTab() {
+		if (last_build_.rom.empty() && rop_bytes_.empty()) {
+			ImGui::TextDisabled("No build result yet. Run Build & Run first.");
+			return;
+		}
+		if (!rop_bytes_.empty()) {
+			ImGui::Separator();
+			ImGui::Text("ROP payload @ %04X (%zu bytes)", rop_base_, rop_bytes_.size());
+			ImGui::Text("Launcher @ %04X (%zu bytes)  hex: %s",
+				rop_launcher_base_, rop_launcher_.size(), rop_launcher_hex_.c_str());
+			ImGui::SameLine();
+			if (ImGui::Button("Copy launcher"))
+				ImGui::SetClipboardText(rop_launcher_hex_.c_str());
+			ImGui::Separator();
+		}
+		if (!last_build_.rom.empty()) {
+			if (ImGui::Button("Download .bin")) {
+				AddLog(Sev::Note, wiz::fmt("download: %zu ROM bytes", last_build_.rom.size()));
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Copy hex")) {
+				std::string hex;
+				for (uint8_t b : last_build_.rom) {
+					char buf[4];
+					snprintf(buf, sizeof(buf), "%02X ", b);
+					hex += buf;
+				}
+				ImGui::SetClipboardText(hex.c_str());
+			}
+		}
+		if (!rop_bytes_.empty()) {
+			std::string hex;
+			for (uint8_t b : rop_bytes_) {
+				char buf[4];
+				snprintf(buf, sizeof(buf), "%02X ", b);
+				hex += buf;
+			}
+			ImGui::InputTextMultiline("Payload hex", hex.data(), hex.size() + 1,
+				ImVec2(-FLT_MIN, 120), ImGuiInputTextFlags_ReadOnly);
+		}
 	}
 
 	std::string LogText() const {

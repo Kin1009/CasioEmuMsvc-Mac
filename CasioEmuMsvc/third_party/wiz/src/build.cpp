@@ -77,6 +77,9 @@ std::string runtime_for(const Target& target) {
     if (!ok) throw std::runtime_error("cannot read runtime.asm");
     std::vector<std::string> out;
     out.push_back(fmt("_ROWS EQU %d", target.rows));  // pixel() ignores y >= _ROWS
+    // Drawing targets the shadow buffer (SB2); render() copies it to the LCD (SB1).
+    out.push_back(fmt("_SB1 EQU %s", "0F800H"));
+    out.push_back(fmt("_SB2 EQU %s", target.name == "cwii" ? "0CA54H" : "0DDD3H"));
     for (const std::string& raw : split(text, '\n')) {
         std::string line = raw;
         std::string r = rstrip(line);
@@ -94,7 +97,8 @@ std::string runtime_for(const Target& target) {
 // ------------------------------------------------------------------ pipeline
 static BuildResult finish(const std::string& body, const std::map<std::string, int>& variables,
                           const Target& tg) {
-    std::string full = make_boot(tg) + body + runtime_for(tg);
+    std::string full = make_boot(tg) + body;
+    if (tg.name != "fwnx") full += runtime_for(tg);
     Assembler as(tg.core);
     auto img = as.assemble(full);
     BuildResult res;
@@ -117,6 +121,44 @@ BuildResult build_source(const std::string& src, const std::string& target) {
 BuildResult build_cwiz(const std::string& src, const std::string& target,
                        const std::string& path) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
+    // Handle #binary directive for full firmware image mode (fwnx)
+    std::string binary_dir = (path.find('/') != std::string::npos) ? path.substr(0, path.find_last_of('/')) : "";
+    std::string binary_path;
+    size_t bp = src.find("#binary");
+    if (bp != std::string::npos) {
+        std::string rest = src.substr(bp + 8);
+        size_t q1 = rest.find('"');
+        if (q1 != std::string::npos) {
+            size_t q2 = rest.find('"', q1 + 1);
+            if (q2 != std::string::npos) binary_path = strip(rest.substr(q1 + 1, q2 - q1 - 1));
+        }
+    }
+    if (!binary_path.empty() && tg.name == "fwnx") {
+        std::string binary_path_fixed = binary_path;
+        if (!binary_path_fixed.empty() && binary_path_fixed[0] != '/' && binary_path_fixed.find("/") != std::string::npos) {
+            binary_path_fixed = binary_dir + "/" + binary_path_fixed;
+        }
+        bool ok = false;
+        std::vector<uint8_t> bin_data = read_binary_file(binary_path_fixed, &ok);
+        if (!ok) throw std::runtime_error("#binary file not found: " + binary_path_fixed);
+        std::string asm_body = "; firmware ROM binary image (reconstructed)\n";
+        for (size_t i = 0; i < bin_data.size(); i += 8) {
+            std::string line = "DB ";
+            for (size_t j = i; j < std::min(i + 8, bin_data.size()); j++) {
+                if (j > i) line += ",";
+                line += fmt("0x%02X", (int)(uint8_t)bin_data[j]);
+            }
+            asm_body += line + "\n";
+        }
+        BuildResult res;
+        res.rom = bin_data;
+        res.full_asm = "ORG 0\n" + asm_body;
+        res.variables = {};
+        res.syms = {};
+        res.cwapp = false;
+        res.slot = 2;
+        return res;
+    }
     // CWiz is the language with preprocessor directives; Wiz uses `#` for comments.
     CwizPreprocessInfo pp = preprocess_cwiz_info(src, path, tg.name);
     std::string selected = select_sections(pp.text, tg);
