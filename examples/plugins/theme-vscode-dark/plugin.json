@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.theme.vscode-dark",
+  "name": "VS Code Dark",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "A dark palette inspired by the MIT-licensed VS Code default theme.",
+  "min_host": "2.1.0",
+  "platforms": ["macos"],
+  "type": "theme",
+  "permissions": ["ui.shell"],
+  "entry_point": "assets/theme.json",
+  "assets": ["assets/theme.json"]
+}

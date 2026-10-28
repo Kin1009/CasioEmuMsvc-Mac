@@ -28,6 +28,7 @@
 #ifndef TEST_BUILD
 #include "Rop/RopCompilerUI.h"
 #include "PluginLogWindow.hpp"
+#include "Plugin/PluginRegistry.h"
 #include "SnapshotWindow.h"
 #endif
 #include "imgui/imgui.h"
@@ -197,6 +198,10 @@ static void RenderDebuggerGuiWindows() {
 #endif
 		win->Render();
 	}
+
+#ifndef TEST_BUILD
+	casioemu::plugin::PluginRegistry::Instance().RenderTrustModal();
+#endif
 
 #ifndef __ANDROID__
 	RenderStatusBar();

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.layout.compact",
+  "name": "Compact Layout",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "Hides the tool dock and keeps a compact workspace sidebar.",
+  "min_host": "2.1.0",
+  "platforms": ["macos"],
+  "type": "ui_revamp",
+  "permissions": ["ui.shell"],
+  "entry_point": "assets/layout.json",
+  "assets": ["assets/layout.json"]
+}

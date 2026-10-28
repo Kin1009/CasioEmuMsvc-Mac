@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.tab.notes",
+  "name": "Session Notes",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "Example native tab plugin with a scratch notes panel.",
+  "min_host": "2.1.0",
+  "platforms": ["macos"],
+  "type": "tab",
+  "permissions": ["ui.shell", "filesystem.read", "filesystem.write"],
+  "entry_point": "assets/info.json",
+  "native_entry": "lib/tab_notes.dylib",
+  "assets": ["assets/info.json"]
+}

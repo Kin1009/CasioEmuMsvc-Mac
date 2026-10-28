@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.tool.clock",
+  "name": "Clock Tool",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "Example native tool plugin that adds a clock window.",
+  "min_host": "2.1.0",
+  "platforms": ["macos"],
+  "type": "tool",
+  "permissions": ["ui.shell"],
+  "entry_point": "assets/info.json",
+  "native_entry": "lib/tool_clock.dylib",
+  "assets": ["assets/info.json"]
+}

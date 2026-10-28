@@ -92,6 +92,12 @@ void LoadPlugins() {
         }
     }
 }
+#elif defined(__APPLE__)
+#include "PluginRegistry.h"
+
+void LoadPlugins() {
+	casioemu::plugin::PluginRegistry::Instance().Initialize();
+}
 #else
 void LoadPlugins() {}
 #endif

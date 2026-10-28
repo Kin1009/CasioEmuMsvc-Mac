@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "payloads": [
+    {
+      "id": "example.hello",
+      "name": "Hello payload",
+      "description": "Example payload; replace the bytes with a real gadget chain.",
+      "target": "any",
+      "address": "0xE9E0",
+      "bytes": "3C 3C 66 66 7E 7E 66 66",
+      "safe": true
+    }
+  ]
+}

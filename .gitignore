@@ -412,3 +412,7 @@ app/src/main/assets/
 
 # universal build output
 /build-universal/
+
+# plugin example build products
+/examples/plugins/*/lib/
+/examples/plugins/**/*.plugin

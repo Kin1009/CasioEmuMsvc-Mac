@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "Compact Layout",
+  "shell": {
+    "type": "default",
+    "sidebar": { "visible": true, "width": 220 },
+    "bottom": { "visible": true, "height": 140, "active": "output" },
+    "tools": {
+      "visible": false,
+      "width": 320,
+      "tabs": ["Variables", "Hardware", "Labels", "Watch", "Funcs", "Code"],
+      "hidden": ["Rop Compiler", "Bitmap"]
+    },
+    "sessions": { "tabs": "top", "showClose": true }
+  }
+}

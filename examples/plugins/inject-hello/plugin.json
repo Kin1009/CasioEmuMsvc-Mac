@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.inject.hello",
+  "name": "Hello Injection",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "An example injection payload list.",
+  "min_host": "2.1.0",
+  "platforms": ["macos"],
+  "type": "inject",
+  "permissions": ["emulator.inject"],
+  "entry_point": "assets/payloads.json",
+  "assets": ["assets/payloads.json"]
+}
