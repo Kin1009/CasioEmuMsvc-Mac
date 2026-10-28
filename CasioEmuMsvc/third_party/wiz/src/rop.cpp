@@ -1009,6 +1009,12 @@ bool source_is_rop(const std::string& source) {
     return false;
 }
 
+RopResult build_rop(const std::string& source, const std::string& model,
+                    const std::string& language) {
+    (void)language;
+    return build_rop(source, model);
+}
+
 RopResult build_rop(const std::string& source, const std::string& model) {
     RopResult r;
     r.model = (model == "880" || lower(model) == "880btg") ? "880" : "580";
