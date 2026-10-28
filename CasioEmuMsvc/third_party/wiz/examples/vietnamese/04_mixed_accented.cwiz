@@ -1,0 +1,21 @@
+// Vietnamese mixed with ASCII labels, accented against unaccented text.
+//
+// print_cw() lays out each argument left to right.  A plain "..." argument is
+// text, and a normalizeText(...) call is also text, so labels, Vietnamese and
+// numbers can share one line.  The second line is the same content without
+// accents, for comparison.
+//
+// Layout limit: print_cw() at x = 0 fits at most 17 printable characters
+// (including spaces) per line.  Every line below stays within that limit;
+// longer text must be wrapped with print_cw(0, y, ...) and 14 px spacing.
+//
+// Build: wizc examples/vietnamese/04_mixed_accented.cwiz --target 580
+//        wizc examples/vietnamese/04_mixed_accented.cwiz --target 880
+
+void main() {
+    clear();
+    print_cw(0, 2, "Diem: ", normalizeText("Nguyễn A"));
+    print_cw(0, 16, "Diem: Nguyen A");
+    print_cw(0, 30, normalizeText("Nhiệt độ: 25 C"));
+    render();
+}

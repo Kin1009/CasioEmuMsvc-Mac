@@ -14,8 +14,9 @@
 namespace wiz {
 
 struct CwizError : CompileError {
-    explicit CwizError(const std::string& msg, int line = 0, int col = 0)
-        : CompileError(msg, line, col) {}
+    explicit CwizError(const std::string& msg, int line = 0, int col = 0,
+                       const std::string& hint = "", const std::string& code = "")
+        : CompileError(msg, line, col, hint, code) {}
 };
 
 struct CwizVarInfo {

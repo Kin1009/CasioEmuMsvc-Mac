@@ -22,6 +22,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace wiz {
 
@@ -29,6 +30,8 @@ struct CwizPreprocessInfo {
     std::string text;
     bool has_cwapp = false;  // the source contains a #cwapp section
     int slot = 2;            // #slot n (1..12); 2 when the directive is absent
+    std::string binary_path; // #binary directive file path (if any)
+    std::vector<std::string> binary_asm; // DB lines emitted
 };
 
 // Preprocess `src` (which came from file `file`) for target `target` (an internal

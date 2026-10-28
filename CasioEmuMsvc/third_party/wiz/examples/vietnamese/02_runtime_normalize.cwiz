@@ -1,0 +1,18 @@
+// Vietnamese on the CW Display, converted at runtime.
+//
+// Source strings are UTF-8 byte strings.  normalizeText() scans them and
+// returns a static 256-byte buffer holding F4 bytes, ready for text_cw() or
+// print_cw().  The unaccented line shows the same text without the scan.
+//
+// Layout limit: print_cw() at x = 0 fits at most 17 printable characters
+// (including spaces) per line.  Both lines here are shorter than that.
+//
+// Build: wizc examples/vietnamese/02_runtime_normalize.cwiz --target 580
+//        wizc examples/vietnamese/02_runtime_normalize.cwiz --target 880
+
+void main() {
+    clear();
+    print_cw(0, 2, normalizeText("Tiếng Việt"));
+    print_cw(0, 16, "Tieng Viet");
+    render();
+}

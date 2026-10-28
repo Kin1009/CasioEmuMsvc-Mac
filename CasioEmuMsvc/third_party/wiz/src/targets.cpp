@@ -6,19 +6,26 @@
 
 namespace wiz {
 
+// var_limit stops the allocator before SB2 (the shadow screen buffer):
+//   cw / cwapp: SB2 = 0xDDD3-0xE5D2, stack starts at 0xE5D3
+//   cwii:       SB2 = 0xCA54-0xE253, stack starts at 0xE254
 const Target TARGET_CWII{"cwii", "ML620909", "template_ML620909.asm", 0x9000, 0x9000,
-                         0x9000, 0xE000, 2};
+                         0x9000, 0xCA54, 2, 0, 64, "nX-U8/100", 0, {}};
 const Target TARGET_CW{"cw", "ML620906", "template_ML620906.asm", 0xD000, 0xD000, 0xD000,
-                       0xE000, 1, 0, 63, "nX-U16/100", 1};
+                       0xDDD3, 1, 0, 63, "nX-U16/100", 1,
+                       {{0xD16C, 0xD175}, {0xD180, 0xD247}, {0xD31A, 0xD391},
+                        {0xD392, 0xD521}, {0xD522, 0xD5E9}, {0xD784, 0xD913}}};
 const Target TARGET_CWAPP{"cwapp", "ML620906", "template_cwapp.asm", 0xD000, 0xD000, 0xD000,
-                          0xE000, 1, 3, 63, "nX-U16/100", 1};
+                          0xDDD3, 1, 3, 63, "nX-U16/100", 1, {}};
+const Target TARGET_FW{"fwnx", "ML620906", "template_fwnx.asm", 0, 0, 0, 0x40000,
+                        1, 0, 63, "nX-U16/100", 0, {}};
 
 const std::string DEFAULT_TARGET = [] {
     const char* e = std::getenv("WIZ_TARGET");
     return std::string(e && *e ? e : "cwii");
 }();
 
-static const char* const MODELS = "580, 880";
+static const char* const MODELS = "580, 880, fwnx";
 
 std::optional<std::string> canonical(const std::string& name) {
     std::string key;
@@ -27,7 +34,7 @@ std::optional<std::string> canonical(const std::string& name) {
         key += (char)std::tolower((unsigned char)c);
     }
     static const std::unordered_map<std::string, std::string> ALIASES = {
-        {"580", "cw"}, {"cw", "cw"}, {"880", "cwii"}, {"cwii", "cwii"}, {"cwapp", "cwapp"}};
+        {"580", "cw"}, {"cw", "cw"}, {"880", "cwii"}, {"cwii", "cwii"}, {"cwapp", "cwapp"}, {"fwnx", "fwnx"}, {"fw", "fwnx"}};
     auto it = ALIASES.find(key);
     if (it == ALIASES.end()) return std::nullopt;
     return it->second;
@@ -38,7 +45,9 @@ const Target& get_target(const std::string& t) {
     if (!name) throw std::runtime_error(fmt("unknown target '%s' (use %s)", t.c_str(), MODELS));
     if (*name == "cw") return TARGET_CW;
     if (*name == "cwii") return TARGET_CWII;
-    return TARGET_CWAPP;
+    if (*name == "cwapp") return TARGET_CWAPP;
+    if (*name == "fwnx" || *name == "fw") return TARGET_FW;
+    throw std::runtime_error(fmt("unknown target '%s' (use %s)", t.c_str(), MODELS));
 }
 
 const Target& get_target(const Target& t) { return t; }

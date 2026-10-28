@@ -1,0 +1,23 @@
+// Vietnamese on the CW Display with explicit F4 key bytes.
+//
+// A Vietnamese glyph is 0xF4 followed by its column byte (0x10..0x95).
+// This example spells the bytes out so the encoding is visible:
+//   Việt = 56 69 F4 3E 74   (ệ is F43E)
+//   á!   = F4 51 21         (á is F451, then ASCII '!')
+// The renderer consumes an F4 pair as one glyph, so it costs one 11 px cell.
+//
+// Layout limit: print_cw() at x = 0 fits at most 17 printable characters
+// (including spaces) per line.  Both strings here are short.
+//
+// Build: wizc examples/vietnamese/03_f4_manual.cwiz --target 580
+//        wizc examples/vietnamese/03_f4_manual.cwiz --target 880
+
+rom8 char viet[6] = "\x56\x69\xF4\x3E\x74";
+rom8 char sample[4] = "\xF4\x51\x21";
+
+void main() {
+    clear();
+    print_cw(0, 2, viet);
+    print_cw(0, 16, sample);
+    render();
+}

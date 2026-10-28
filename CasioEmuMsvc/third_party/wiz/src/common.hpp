@@ -12,19 +12,76 @@
 
 namespace wiz {
 
-// A source-located compiler error. `line`/`col` are 1-based, or -1 when unknown.
+// A source-located compiler error. `line`/`col`/`end_col` are 1-based, or -1/0
+// when unknown.  `code` is a stable machine-readable category
+// ("syntax.expected-token", "sema.undefined-identifier", ...) and `hint` is an
+// actionable suggestion printed after the diagnostic.
 struct CompileError : std::runtime_error {
     int line;
     int col;
-    explicit CompileError(const std::string& msg, int line = -1, int col = -1)
-        : std::runtime_error(msg), line(line), col(col) {}
+    int end_col;
+    std::string code;
+    std::string hint;
+    explicit CompileError(const std::string& msg, int line = -1, int col = -1,
+                          const std::string& hint = "", const std::string& code = "",
+                          int end_col = -1)
+        : std::runtime_error(msg),
+          line(line),
+          col(col),
+          end_col(end_col),
+          code(code),
+          hint(hint) {}
 };
 
 // An assembler error.
 struct AsmError : CompileError {
     explicit AsmError(const std::string& msg, int line = -1, int col = -1)
-        : CompileError(msg, line, col) {}
+        : CompileError(msg, line, col, "", "asm.error") {}
 };
+
+// ---------------------------------------------------------------- suggestions
+// Levenshtein distance, used for "did you mean ...?" hints.
+inline int edit_distance(const std::string& a, const std::string& b) {
+    std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); j++) prev[j] = (int)j;
+    for (size_t i = 1; i <= a.size(); i++) {
+        cur[0] = (int)i;
+        for (size_t j = 1; j <= b.size(); j++) {
+            int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+            int v = prev[j - 1] + cost;
+            if (prev[j] + 1 < v) v = prev[j] + 1;
+            if (cur[j - 1] + 1 < v) v = cur[j - 1] + 1;
+            cur[j] = v;
+        }
+        prev.swap(cur);
+    }
+    return prev[b.size()];
+}
+
+// The closest candidate to `word`, or "" if nothing is close enough.  The
+// threshold keeps short names from producing silly suggestions.
+inline std::string closest_match(const std::string& word,
+                                 const std::vector<std::string>& candidates) {
+    if (word.size() < 2) return "";
+    std::string best;
+    int best_d = 0;
+    const int limit = word.size() <= 3 ? 1 : (word.size() <= 6 ? 2 : 3);
+    for (const std::string& c : candidates) {
+        if (c == word) return "";
+        int d = edit_distance(word, c);
+        if (d <= limit && (best.empty() || d < best_d)) {
+            best = c;
+            best_d = d;
+        }
+    }
+    return best;
+}
+
+inline std::string did_you_mean(const std::string& word,
+                                const std::vector<std::string>& candidates) {
+    std::string hit = closest_match(word, candidates);
+    return hit.empty() ? std::string() : "did you mean '" + hit + "'?";
+}
 
 // printf-style formatting into a std::string.
 #if defined(__GNUC__)

@@ -12,6 +12,7 @@
 #include "common.hpp"
 #include "cwiz.hpp"
 #include "targets.hpp"
+#include "vn_f4.hpp"
 
 namespace wiz {
 namespace {
@@ -78,6 +79,167 @@ std::string strip_comment(const std::string& s) {
         out += c;
     }
     return rstrip(out);
+}
+
+// ------------------------------------------------------- __normalized__
+// `__normalized__ char s[] = "Tiếng Việt";` is rewritten at compile time to
+// the same bytes normalizeText() would produce: ASCII unchanged and each
+// Vietnamese codepoint replaced by 0xF4,<column>.  The marker applies to the
+// string literals on its own logical line; escape sequences are decoded first
+// so both "\xE1\xBA\xBF" and "ế" work.
+bool utf8_next(const std::string& s, size_t& i, uint32_t& cp) {
+    if (i >= s.size()) return false;
+    unsigned char c = (unsigned char)s[i++];
+    if (c < 0x80) {
+        cp = c;
+        return true;
+    }
+    int extra = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1;
+    if (extra < 0 || i + (size_t)extra > s.size()) {
+        cp = c;
+        return true;
+    }
+    cp = c & (0x3F >> extra);
+    for (int k = 0; k < extra; k++) cp = (cp << 6) | ((unsigned char)s[i++] & 0x3F);
+    return true;
+}
+
+std::string normalized_literal(const std::string& body, int line) {
+    // Decode C escapes to bytes first.
+    std::string bytes;
+    for (size_t i = 0; i < body.size(); i++) {
+        char c = body[i];
+        if (c != '\\') {
+            bytes += c;
+            continue;
+        }
+        if (++i >= body.size())
+            throw CwizError("unterminated escape in __normalized__ string", line);
+        char e = body[i];
+        switch (e) {
+            case 'n': bytes += '\n'; break;
+            case 't': bytes += '\t'; break;
+            case 'r': bytes += '\r'; break;
+            case '0': bytes += '\0'; break;
+            case '\\': bytes += '\\'; break;
+            case '\'': bytes += '\''; break;
+            case '"': bytes += '"'; break;
+            case 'a': bytes += '\a'; break;
+            case 'b': bytes += '\b'; break;
+            case 'f': bytes += '\f'; break;
+            case 'v': bytes += '\v'; break;
+            case 'x': {
+                std::string hex;
+                while (i + 1 < body.size() && std::isxdigit((unsigned char)body[i + 1]))
+                    hex += body[++i];
+                if (hex.empty())
+                    throw CwizError("\\x needs at least one hex digit in __normalized__ string",
+                                    line);
+                bytes += (char)(std::strtoul(hex.c_str(), nullptr, 16) & 0xFF);
+                break;
+            }
+            default: bytes += e; break;
+        }
+    }
+
+    std::string out = "\"";
+    size_t i = 0;
+    while (i < bytes.size()) {
+        unsigned char c = (unsigned char)bytes[i];
+        if (c == 0xF4 && i + 1 < bytes.size()) {
+            out += "\\xf4";
+            out += "\\x";
+            out += fmt("%02x", (unsigned char)bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (c < 0x80) {
+            out += "\\x";
+            out += fmt("%02x", c);
+            i += 1;
+            continue;
+        }
+        uint32_t cp = 0;
+        utf8_next(bytes, i, cp);
+        uint8_t code = vn_f4_code(cp);
+        if (code) {
+            out += "\\xf4";
+            out += "\\x";
+            out += fmt("%02x", code);
+        } else {
+            out += "\\x3f";
+        }
+    }
+    out += "\"";
+    return out;
+}
+
+std::string apply_normalized(const std::string& line, int line_no) {
+    size_t marker = std::string::npos;
+    bool in_str = false, in_chr = false;
+    for (size_t i = 0; i + 14 <= line.size(); i++) {
+        char c = line[i];
+        if (in_str || in_chr) {
+            if (c == '\\') { i++; continue; }
+            if (in_str && c == '"') in_str = false;
+            if (in_chr && c == '\'') in_chr = false;
+            continue;
+        }
+        if (c == '"') { in_str = true; continue; }
+        if (c == '\'') { in_chr = true; continue; }
+        if (c == '/' && i + 1 < line.size() && line[i + 1] == '/') break;
+        if (c == '/' && i + 1 < line.size() && line[i + 1] == '*') break;
+        if (line.compare(i, 14, "__normalized__") == 0) {
+            bool prev_ok = i == 0 || !ident_char(line[i - 1]);
+            bool next_ok = i + 14 >= line.size() || !ident_char(line[i + 14]);
+            if (prev_ok && next_ok) {
+                marker = i;
+                break;
+            }
+        }
+    }
+    if (marker == std::string::npos) return line;
+
+    std::string work = line.substr(0, marker) + line.substr(marker + 14);
+    std::string out;
+    in_str = false;
+    in_chr = false;
+    for (size_t i = 0; i < work.size(); i++) {
+        char c = work[i];
+        if (in_str || in_chr) {
+            if (c == '\\' && i + 1 < work.size()) {
+                out += c;
+                out += work[++i];
+                continue;
+            }
+            out += c;
+            if (in_str && c == '"') in_str = false;
+            if (in_chr && c == '\'') in_chr = false;
+            continue;
+        }
+        if (c == '/' && i + 1 < work.size() && (work[i + 1] == '/' || work[i + 1] == '*')) {
+            out += work.substr(i);
+            break;
+        }
+        if (c == '"') {
+            size_t j = i + 1;
+            std::string body;
+            while (j < work.size() && work[j] != '"') {
+                if (work[j] == '\\' && j + 1 < work.size()) body += work[j++];
+                body += work[j++];
+            }
+            out += normalized_literal(body, line_no);
+            i = j;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = true;
+            out += c;
+            continue;
+        }
+        out += c;
+    }
+    return out;
 }
 
 struct Macro {
@@ -274,12 +436,15 @@ public:
         active_stack.push_back(Frame{true, true, true, false});
         emit_lines(src, file);
         if (active_stack.size() != 1)
-            throw CwizError("unterminated #if (missing #endif)", file_line);
+            throw CwizError("unterminated #if (missing #endif)", file_line, 0,
+                            "add '#endif' at the end of the conditional block",
+                            "preproc.unbalanced-conditional");
         return join(out, "\n");
     }
 
     bool has_cwapp() const { return has_cwapp_; }
     int slot() const { return slot_; }
+    std::string binary_path() const { return binary_path_; }
 
 private:
     struct Frame {
@@ -299,6 +464,7 @@ private:
     bool has_cwapp_ = false;
     int slot_ = 2;
     bool slot_seen_ = false;
+    std::string binary_path_ = "";
     int file_line = 0;
 
     bool active() const { return active_stack.back().active; }
@@ -332,7 +498,7 @@ private:
                     throw;
                 }
             } else if (active()) {
-                push_out(expand(joined, 0), file, (int)i + 1);
+                push_out(apply_normalized(expand(joined, 0), (int)i + 1), file, (int)i + 1);
             } else {
                 push_out("", file, (int)i + 1);
             }
@@ -366,9 +532,15 @@ private:
             return;
         }
         if (name == "elif") {
-            if (active_stack.size() <= 1) throw CwizError("#elif without #if", line);
+            if (active_stack.size() <= 1)
+                throw CwizError("#elif without #if", line, 0,
+                                "add an #if/#ifdef before this #elif",
+                                "preproc.unbalanced-conditional");
             Frame& f = active_stack.back();
-            if (f.seen_else) throw CwizError("#elif after #else", line);
+            if (f.seen_else)
+                throw CwizError("#elif after #else", line, 0,
+                                "move the #elif branch before #else",
+                                "preproc.unbalanced-conditional");
             if (!f.parent || f.taken) {
                 f.active = false;
             } else {
@@ -379,9 +551,15 @@ private:
             return;
         }
         if (name == "else") {
-            if (active_stack.size() <= 1) throw CwizError("#else without #if", line);
+            if (active_stack.size() <= 1)
+                throw CwizError("#else without #if", line, 0,
+                                "add an #if/#ifdef before this #else",
+                                "preproc.unbalanced-conditional");
             Frame& f = active_stack.back();
-            if (f.seen_else) throw CwizError("duplicate #else", line);
+            if (f.seen_else)
+                throw CwizError("duplicate #else", line, 0,
+                                "a conditional block can have only one #else",
+                                "preproc.unbalanced-conditional");
             f.seen_else = true;
             f.active = f.parent && !f.taken;
             f.taken = f.taken || f.active;
@@ -389,7 +567,10 @@ private:
             return;
         }
         if (name == "endif") {
-            if (active_stack.size() <= 1) throw CwizError("#endif without #if", line);
+            if (active_stack.size() <= 1)
+                throw CwizError("#endif without #if", line, 0,
+                                "remove it, or add the missing #if/#ifdef",
+                                "preproc.unbalanced-conditional");
             active_stack.pop_back();
             push_out("", file, line);
             return;
@@ -423,10 +604,19 @@ private:
             std::string inc = include_path(rest, file, line);
             std::string canon = canon_file(inc);
             if (once_files.count(canon)) return;
-            if (contains(include_stack, canon)) throw CwizError("#include cycle: " + inc, line);
+            if (contains(include_stack, canon))
+                throw CwizError("#include cycle: " + inc, line, 0,
+                                "remove the include that points back to a file already being read",
+                                "preproc.include-cycle");
             bool ok = false;
             std::string text = read_text_file(inc, &ok);
-            if (!ok) throw CwizError("#include: file not found '" + inc + "' (looked relative to source '" + file + "':" + std::to_string(line) + ")", line);
+            if (!ok)
+                throw CwizError("#include: file not found '" + inc +
+                                    "' (looked relative to source '" + file + "':" +
+                                    std::to_string(line) + ")",
+                                line, 0,
+                                "check the file name and place the included file next to the source",
+                                "preproc.include-not-found");
             include_stack.push_back(canon);
             emit_lines(text, inc);
             include_stack.pop_back();
@@ -442,30 +632,71 @@ private:
         if (name == "cwapp") {
             // `#cwapp` only valid after `#for 580` (the app flavour of the 580).
             if (prev_target_for.find("580") == std::string::npos) {
-                throw CwizError("#cwapp requires #for 580 before it (found: #for " + prev_target_for + ")", line);
+                throw CwizError("#cwapp requires #for 580 before it (found: #for " +
+                                    prev_target_for + ")",
+                                line, 0, "add '#for 580' before '#cwapp'",
+                                "preproc.cwapp-order");
             }
             has_cwapp_ = true;
             slot_seen_ = false;
             push_out("for cwapp", file, line);
             return;
         }
+        if (name == "org") {
+            std::string rest_o = strip(rest);
+            push_out("ORG " + rest_o, file, line);
+            return;
+        }
+        if (name == "binary") {
+            std::string rest_s = strip(rest);
+            size_t q1 = rest_s.find('"');
+            // #org directive: set assembly origin
+            if (name == "org") {
+                std::string rest_o = strip(rest);
+                push_out("ORG " + rest_o, file, line);
+                return;
+            }
+            if (q1 == std::string::npos)
+                throw CwizError("#binary needs \"path\"", line, 0,
+                                "write #binary \"firmware.bin\"", "preproc.binary");
+            size_t q2 = rest_s.find('"', q1 + 1);
+            if (q2 == std::string::npos)
+                throw CwizError("#binary unterminated string", line, 0,
+                                "add the closing '\"' after the path", "preproc.binary");
+            std::string bpath = rest_s.substr(q1 + 1, q2 - q1 - 1);
+            binary_path_ = bpath;
+            // emit nothing; build_cwiz will inject DB directly
+            push_out("", file, line);
+            return;
+        }
         if (name == "slot") {
             // `#slot n` - choose the fx-580VN X menu slot (1..12) that the
             // compiler patches.  It is only meaningful in a #cwapp section.
             if (!has_cwapp_)
-                throw CwizError("#slot is only available after #cwapp", line);
+                throw CwizError("#slot is only available after #cwapp", line, 0,
+                                "move '#slot n' below the '#cwapp' line", "preproc.slot-order");
             if (slot_seen_)
-                throw CwizError("#slot is already set for this #cwapp section", line);
+                throw CwizError("#slot is already set for this #cwapp section", line, 0,
+                                "keep a single '#slot n' per #cwapp section",
+                                "preproc.slot-duplicate");
             char* end = nullptr;
             long n = std::strtol(rest.c_str(), &end, 10);
             if (rest.empty() || !end || *end != '\0' || n < 1 || n > 12)
-                throw CwizError("#slot needs a slot number from 1 to 12", line);
+                throw CwizError("#slot needs a slot number from 1 to 12", line, 0,
+                                "for example '#slot 2'", "preproc.slot-range");
             slot_ = (int)n;
             slot_seen_ = true;
             push_out("", file, line);
             return;
         }
-        throw CwizError("unknown directive '#" + name + "'", line);
+        {
+            static const std::vector<std::string> known = {
+                "if", "ifdef", "ifndef", "elif", "else", "endif", "define", "undef",
+                "pragma", "error", "include", "for", "cwapp", "org", "binary", "slot"};
+            std::string hint = did_you_mean(name, known);
+            throw CwizError("unknown directive '#" + name + "'", line, 0, hint,
+                            "preproc.unknown-directive");
+        }
     }
 
     static std::string canon_file(const std::string& p) {
@@ -476,12 +707,18 @@ private:
 
     std::string include_path(const std::string& rest, const std::string& file, int line) {
         std::string r = strip(rest);
-        if (r.size() < 2) throw CwizError("#include needs \"file\"", line);
+        if (r.size() < 2)
+            throw CwizError("#include needs \"file\"", line, 0,
+                            "write #include \"file.cwiz\"", "preproc.include");
         char open = r[0];
         char close = (open == '<') ? '>' : '"';
-        if (open != '"' && open != '<') throw CwizError("#include needs \"file\"", line);
+        if (open != '"' && open != '<')
+            throw CwizError("#include needs \"file\"", line, 0,
+                            "write #include \"file.cwiz\"", "preproc.include");
         size_t end = r.find(close, 1);
-        if (end == std::string::npos) throw CwizError("unterminated #include", line);
+        if (end == std::string::npos)
+            throw CwizError("unterminated #include", line, 0,
+                            "add the closing quote or '>'", "preproc.include");
         std::string name = r.substr(1, end - 1);
         if (!name.empty() && name[0] == '/') return name;
         std::string cand = dir_name(file) + name;
@@ -491,7 +728,10 @@ private:
     }
 
     void define_macro(const std::string& rest, int line) {
-        if (rest.empty() || !ident_start(rest[0])) throw CwizError("#define needs a name", line);
+        if (rest.empty() || !ident_start(rest[0]))
+            throw CwizError("#define needs a name", line, 0,
+                            "write #define NAME value or #define NAME(a) value",
+                            "preproc.define");
         size_t i = 0;
         while (i < rest.size() && ident_char(rest[i])) i++;
         std::string name = rest.substr(0, i);
@@ -502,14 +742,20 @@ private:
             while (true) {
                 while (j < rest.size() && (rest[j] == ' ' || rest[j] == '\t')) j++;
                 if (j < rest.size() && rest[j] == ')') { j++; break; }
-                if (j >= rest.size()) throw CwizError("unterminated macro parameter list", line);
+                if (j >= rest.size())
+                    throw CwizError("unterminated macro parameter list", line, 0,
+                                    "add the closing ')' after the parameters",
+                                    "preproc.define");
                 if (rest[j] == '.') {  // variadic tail: ... -> __VA_ARGS__
                     m.params.push_back("__VA_ARGS__");
                     while (j < rest.size() && rest[j] != ')') j++;
                     if (j < rest.size()) j++;
                     break;
                 }
-                if (!ident_start(rest[j])) throw CwizError("bad macro parameter", line);
+                if (!ident_start(rest[j]))
+                    throw CwizError("bad macro parameter", line, 0,
+                                    "parameter names use letters, digits and '_'",
+                                    "preproc.define");
                 size_t k = j;
                 while (k < rest.size() && ident_char(rest[k])) k++;
                 m.params.push_back(rest.substr(j, k - j));
@@ -517,7 +763,9 @@ private:
                 while (j < rest.size() && (rest[j] == ' ' || rest[j] == '\t')) j++;
                 if (j < rest.size() && rest[j] == ',') { j++; continue; }
                 if (j < rest.size() && rest[j] == ')') { j++; break; }
-                throw CwizError("expected ',' or ')' in macro parameters", line);
+                throw CwizError("expected ',' or ')' in macro parameters", line, 0,
+                                "separate parameters with ',' and close with ')'",
+                                "preproc.define");
             }
             i = j;
         }
@@ -829,6 +1077,7 @@ CwizPreprocessInfo preprocess_cwiz_info(const std::string& src, const std::strin
     info.text = pre.run(src, file);
     info.has_cwapp = pre.has_cwapp();
     info.slot = pre.slot();
+    info.binary_path = pre.binary_path();
     return info;
 }
 

@@ -21,15 +21,19 @@ struct LintDiagnostic {
     LintSeverity severity = LintSeverity::Warning;
     int line = 0;         // 1-based; 0 when the diagnostic has no position
     int col = 0;          // 1-based
+    int end_col = 0;      // 1-based exclusive; 0 means "one column after col"
     std::string rule;     // e.g. "readability/unused-variable"
     std::string message;
+    std::string hint;     // optional "how to fix" line
+    std::string code;     // optional compiler error category
 };
 
 // `target` is a target name ("580", "880", "cw", "cwii", "cwapp").  The language
 // is chosen by `file_name` (.cwiz => CWiz).  Compile diagnostics are included.
 std::vector<LintDiagnostic> lint_source(const std::string& source,
                                         const std::string& file_name,
-                                        const std::string& target);
+                                        const std::string& target,
+                                        int line_limit = 100);
 
 // The rule ids the linter can emit, with a one-line description.
 struct LintRuleInfo {
