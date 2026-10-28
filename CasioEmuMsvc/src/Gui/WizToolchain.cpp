@@ -31,6 +31,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "build.hpp"
@@ -1279,7 +1280,25 @@ private:
 		}
 		if (!last_build_.rom.empty()) {
 			if (ImGui::Button("Download .bin")) {
-				AddLog(Sev::Note, wiz::fmt("download: %zu ROM bytes", last_build_.rom.size()));
+				std::string preferred = std::filesystem::path(file_name_).stem().string();
+				if (preferred.empty())
+					preferred = "program";
+				preferred += ".bin";
+				auto rom = last_build_.rom;
+				SystemDialogs::SaveFileDialog(preferred, [this, rom = std::move(rom)](std::filesystem::path path) {
+					std::ofstream out(path, std::ios::binary);
+					if (!out.is_open()) {
+						AddLog(Sev::Error, "cannot open " + path.string() + " for writing");
+						return;
+					}
+					out.write(reinterpret_cast<const char*>(rom.data()),
+						static_cast<std::streamsize>(rom.size()));
+					if (!out) {
+						AddLog(Sev::Error, "failed while writing " + path.string());
+						return;
+					}
+					AddLog(Sev::Note, wiz::fmt("saved %s (%zu bytes)", path.string().c_str(), rom.size()));
+				});
 			}
 			ImGui::SameLine();
 			if (ImGui::Button("Copy hex")) {
