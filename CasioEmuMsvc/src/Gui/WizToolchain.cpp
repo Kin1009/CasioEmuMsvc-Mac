@@ -15,6 +15,7 @@
 
 #include "Chipset/Chipset.hpp"
 #include "Chipset/ePSCpu.h"
+#include "Ext/RomPackage.h"
 #include "Ext/SysDialog.h"
 
 #include <SDL.h>
@@ -30,6 +31,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1301,6 +1303,11 @@ private:
 				});
 			}
 			ImGui::SameLine();
+			if (ImGui::Button("Export package")) {
+				show_export_popup_ = true;
+				export_password_[0] = '\0';
+			}
+			ImGui::SameLine();
 			if (ImGui::Button("Copy hex")) {
 				std::string hex;
 				for (uint8_t b : last_build_.rom) {
@@ -1320,6 +1327,132 @@ private:
 			}
 			ImGui::TextWrapped("%s", hex.c_str());
 		}
+
+		if (show_export_popup_) {
+			ImGui::OpenPopup("Export package###wiz_export_package");
+			show_export_popup_ = false;
+		}
+		if (ImGui::BeginPopupModal("Export package###wiz_export_package", nullptr,
+				ImGuiWindowFlags_AlwaysAutoResize)) {
+			ImGui::TextWrapped("Export the current model and compiled program as a .package file.");
+			ImGui::Spacing();
+			ImGui::Checkbox("Encrypt with password", &export_encrypt_);
+			if (export_encrypt_) {
+				ImGui::InputText("Password", export_password_, sizeof(export_password_),
+					ImGuiInputTextFlags_Password);
+				if (export_password_[0] == '\0')
+					ImGui::TextColored(UIHelpers::kColorWarning, "Enter a password or turn encryption off.");
+			}
+			ImGui::Spacing();
+			ImGui::TextDisabled("The package contains the model ROM, flash, interface, and metadata.");
+			ImGui::Separator();
+
+			const bool can_export = !export_encrypt_ || export_password_[0] != '\0';
+			if (ImGui::Button("Export", ImVec2(120, 0)) && can_export) {
+				std::string password = export_password_;
+				std::fill(std::begin(export_password_), std::end(export_password_), '\0');
+				ImGui::CloseCurrentPopup();
+				ExportPackage(password);
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+				std::fill(std::begin(export_password_), std::end(export_password_), '\0');
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+	}
+
+	void ExportPackage(const std::string& password) {
+		if (!m_emu) {
+			AddLog(Sev::Error, "no running model to export");
+			return;
+		}
+		if (last_build_.rom.empty()) {
+			AddLog(Sev::Error, "no compiled ROM to export");
+			return;
+		}
+
+		const std::string stock = StockRomPath();
+		if (stock.empty()) {
+			AddLog(Sev::Error, "this model has no ROM file to export");
+			return;
+		}
+
+		std::vector<uint8_t> rom;
+		try {
+			if (last_build_.cwapp) {
+				if (!Is580()) {
+					AddLog(Sev::Error, "the firmware-app patch is only supported on the fx-580VN X");
+					return;
+				}
+				rom = m_emu->ReadModelResource(stock);
+				int patch_slot = slot_ + 1;
+				if (const int from_source = SourceMenuSlot(editor_.GetText()))
+					patch_slot = from_source;
+				wiz::RomPatchReport report = wiz::patch_rom_image(
+					std::move(rom), last_build_, patch_slot, true, true);
+				for (const std::string& warning : report.warnings)
+					AddLog(Sev::Warning, warning);
+				if (!report.ok) {
+					AddLog(Sev::Error, "patch: " + report.error);
+					return;
+				}
+				rom = std::move(report.rom);
+			}
+			else {
+				rom = last_build_.rom;
+				const size_t stock_size = m_emu->ReadModelResource(stock).size();
+				if (stock_size && rom.size() > stock_size) {
+					AddLog(Sev::Error, wiz::fmt("the image is %zu bytes but the model ROM is only %zu",
+						rom.size(), stock_size));
+					return;
+				}
+				if (stock_size && rom.size() < stock_size)
+					rom.resize(stock_size, 0xFF);
+			}
+		}
+		catch (const std::exception& error) {
+			AddLog(Sev::Error, std::string("cannot read the model ROM: ") + error.what());
+			return;
+		}
+
+		RomPackage package;
+		package.ModelInfo = m_emu->ModelDefinition;
+		package.ModelInfo.rom_path = stock;
+		package.RomData = std::move(rom);
+		try {
+			if (!package.ModelInfo.flash_path.empty())
+				package.FlashData = m_emu->ReadModelResource(package.ModelInfo.flash_path);
+			package.InterfaceData = m_emu->ReadModelResource(package.ModelInfo.interface_path);
+		}
+		catch (const std::exception& error) {
+			AddLog(Sev::Error, std::string("cannot read the model resources: ") + error.what());
+			return;
+		}
+
+		if (!password.empty())
+			package.Encrypt(password);
+
+		std::string preferred = std::filesystem::path(file_name_).stem().string();
+		if (preferred.empty())
+			preferred = "program";
+		preferred += ".package";
+
+		SystemDialogs::SaveFileDialog(preferred, [this, package = std::move(package)](std::filesystem::path path) {
+			try {
+				std::ofstream out(path, std::ios::binary);
+				if (!out)
+					throw std::runtime_error("cannot create the output file");
+				Binary::Write(out, package);
+				out.close();
+				AddLog(Sev::Note, wiz::fmt("exported %s (%s)",
+					path.string().c_str(), package.IsEncrypted ? "password encrypted" : "unencrypted"));
+			}
+			catch (const std::exception& error) {
+				AddLog(Sev::Error, std::string("export failed: ") + error.what());
+			}
+		});
 	}
 
 	std::string LogText() const {
@@ -1339,6 +1472,9 @@ private:
 	int target_idx_ = 0;
 	int lang_idx_ = 0;
 	int slot_ = 0;
+	bool show_export_popup_ = false;
+	bool export_encrypt_ = true;
+	char export_password_[128]{};
 	char file_name_[128] = {};
 	bool data_dir_set_ = false;
 	bool picked_target_ = false;
