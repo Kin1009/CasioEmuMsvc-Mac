@@ -26,6 +26,8 @@
 using namespace material_color_utilities;
 #endif
 
+bool g_plugin_theme_active = false;
+
 namespace {
 #ifdef CASIOEMU_CORE_WEB
 constexpr const char* kThemeSettingsPath = "/persist/theme.bin";
@@ -151,11 +153,13 @@ void ThemeManager::LoadSettings() {
 		}
 
 		m_fontScale = m_settings.scale;
-		if (m_settings.isDarkMode) {
-			SetDarkMode();
-		}
-		else {
-			SetLightMode();
+		if (!g_plugin_theme_active) {
+			if (m_settings.isDarkMode) {
+				SetDarkMode();
+			}
+			else {
+				SetLightMode();
+			}
 		}
 		if (strlen(m_settings.language) > 0) {
 			g_local.ChangeLanguage(m_settings.language);
@@ -328,6 +332,7 @@ void ThemeManager::UpdateUIScale() {
 // 主题切换
 // ============================================================================
 void ThemeManager::SetLightMode() {
+	g_plugin_theme_active = false;
 	EnsureThemeStyleInitialized(m_settings.igs_light, false);
 	if (ImGui::GetCurrentContext()) {
 		ImGuiStyle styled = m_settings.igs_light;
@@ -340,6 +345,7 @@ void ThemeManager::SetLightMode() {
 
 
 void ThemeManager::SetDarkMode() {
+	g_plugin_theme_active = false;
 	EnsureThemeStyleInitialized(m_settings.igs_dark, true);
 	if (ImGui::GetCurrentContext()) {
 		ImGuiStyle styled = m_settings.igs_dark;

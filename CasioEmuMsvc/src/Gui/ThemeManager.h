@@ -19,6 +19,11 @@
 #define THEME_DEFAULT_SCALE 1.0f
 #endif
 
+// Set by the plugin host while a declarative theme plugin owns the active
+// ImGui style.  Saved built-in theme settings must not overwrite it when the
+// Settings window loads theme.bin.
+extern bool g_plugin_theme_active;
+
 #define THEME_CONFIG_MAP(CFG_VAR, CFG_STR)\
 	CFG_VAR(bool, isDarkMode, true)\
 	CFG_VAR(ImGuiStyle, igs_light, ImGuiStyle())\

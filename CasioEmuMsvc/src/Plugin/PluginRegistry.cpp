@@ -374,6 +374,7 @@ bool PluginRegistry::LoadDeclarative(PluginEntry& entry) {
 			entry.loaded = false;
 			return false;
 		}
+		g_plugin_theme_active = true;
 	}
 	else {
 		try {
@@ -520,8 +521,10 @@ void PluginRegistry::SetEnabled(const std::string& id, bool enabled) {
 				entry.loaded = false;
 				entry.state = "Disabled";
 			}
-			if (entry.package.valid && entry.package.manifest.type == PluginType::Theme)
+			if (entry.package.valid && entry.package.manifest.type == PluginType::Theme) {
+				g_plugin_theme_active = false;
 				ThemeManager::Instance().ApplyDefaultTheme();
+			}
 		}
 		UpsertTrust(entry, entry.blocked);
 		SaveTrust();
@@ -547,8 +550,10 @@ void PluginRegistry::Remove(const std::string& id) {
 		}
 		RemoveTrust(id);
 		SaveTrust();
-		if (!loaded_native && was_theme)
+		if (!loaded_native && was_theme) {
+			g_plugin_theme_active = false;
 			ThemeManager::Instance().ApplyDefaultTheme();
+		}
 		LogLine("[INFO] Removed plugin " + id);
 		return;
 	}
