@@ -62,8 +62,8 @@ inline std::string GetMonospaceFontPath() {
 #elif defined(__APPLE__)
 	candidates = {
 		"/System/Library/Fonts/Monaco.ttf",
-		"/System/Library/Fonts/Menlo.ttc",
 		"/System/Library/Fonts/SFNSMono.ttf",
+		"/System/Library/Fonts/Menlo.ttc",
 		"/Library/Fonts/Courier New.ttf"};
 #else // Linux / Unix
 	// Linux 等宽字体非常多，这里列出主流发行版的默认项
@@ -201,7 +201,15 @@ inline void RebuildFont(float scale = 0.0f) {
 	}
 
 	// Merge additional glyph ranges based on localization settings.
+#ifdef __APPLE__
+	// Keep Vietnamese available even when the UI language is not vi_VN.  The
+	// preview shows Vietnamese in plugin names, paths, compiler output, and the
+	// CWiz examples, all of which use the UI font.  Monaco and SF Mono both
+	// contain the full 1EA0-1EF9 range.
+	const bool load_vietnamese = true;
+#else
 	const bool load_vietnamese = "Localization.LoadVietnamese"_l == "1" || "Localization.LoadVietnamese"_l == "true";
+#endif
 	const bool load_cyrillic = "Localization.LoadCyrillic"_l == "1" || "Localization.LoadCyrillic"_l == "true";
 	const bool load_greek = "Localization.LoadGreek"_l == "1" || "Localization.LoadGreek"_l == "true";
 	const bool load_thai = "Localization.LoadThai"_l == "1" || "Localization.LoadThai"_l == "true";

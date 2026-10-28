@@ -5,9 +5,11 @@
 ; Routines may clobber ER2-ER14. Leaf routines return with RT; the few that BL to another
 ; routine (__buffered, __key_hit) do PUSH LR ... POP PC like compiled functions.
 ;
-; Runtime RAM (above the variable area 0x9000-0xDFFF, below the stack that grows down from 0xF000):
-;   0xE000-0xE7FF  back buffer (same layout as LCD VRAM: y*32 + x/8, one plane, black/white)
-;   0xE800         draw mode: 0 = draw straight to the LCD, 1 = draw to back buffer (see buffered/flip)
+; Shadow model: every drawing primitive writes into the shadow buffer (SB2).
+; Only render() copies SB2 into the visible LCD buffer (SB1) at 0xF800.
+;   SB1 = 0xF800-0xFFFF
+;   SB2 = 0xDDD3-0xE5D2 (cw)  /  0xCA54-0xE253 (cwii)
+; _SB2 is defined by the build pipeline for the selected target.
 ;   0xE808-0xE80F  key_hit edge-detect bitmap (1 bit per scan index)
 
 ; ER0 * ER2 -> ER0 (low 16 bits)
@@ -109,7 +111,7 @@ __sra16_e:
     RT
 
 ; pixel(x=ER0, y=ER2, c=R4) : c=0 clears, nonzero sets. Off-screen coordinates are ignored.
-; mode 0: both LCD bitplanes (black).  mode 1: the back buffer at 0xE000.
+; Draws into the shadow buffer SB2; call render() to make it visible.
 __pixel:
     CMP R1, #0
     BNE __pixel_x
@@ -128,19 +130,15 @@ __pixel:
     MOV R11, #0
     ADD ER6, ER10
     ADD ER6, #32 ;@off
+    MOV R10, #(_SB2 & 255)
+    ADD R6, R10
+    ADDC R7, #((_SB2 >> 8) & 255)
     MOV R8, #80H
     MOV R10, R0
     AND R10, #7
     SRL R8, R10
     MOV R11, R8
     XOR R11, #0FFH
-    L R10, 0E800H
-    CMP R10, #0
-    BNE __pixel_b
-    ADD R7, #0F8H
-    MOV R12, #0
-__pixel_p:
-    ST R12, 0F037H ;@2p
     L R10, [ER6]
     CMP R9, #0
     BEQ __pixel_c
@@ -150,94 +148,101 @@ __pixel_c:
     AND R10, R11
 __pixel_w:
     ST R10, [ER6]
-    ADD R12, #4
-    CMP R12, #8 ;@2p
-    CMP R12, #4 ;@1p
-    BNE __pixel_p
-    RT
-__pixel_b:
-    ADD R7, #0E0H
-    L R10, [ER6]
-    CMP R9, #0
-    BEQ __pixel_bc
-    OR R10, R8
-    BAL __pixel_bw
-__pixel_bc:
-    AND R10, R11
-__pixel_bw:
-    ST R10, [ER6]
 __pixel_x:
     RT
 
-; clear the LCD (mode 0, both bitplanes) or the back buffer (mode 1)
+; clear(): zero the whole shadow buffer (SB2).
 __clear:
-    L R10, 0E800H
-    CMP R10, #0
-    BNE __clear_b
-    MOV R12, #0
-__clear_p:
-    ST R12, 0F037H ;@2p
-    MOV R6, #0
-    MOV R7, #0F8H
-    MOV R8, #0
-    MOV R9, #4
+    MOV R6, #(_SB2 & 255)
+    MOV R7, #((_SB2 >> 8) & 255)
     MOV ER10, #0
-__clear_l:
-    ST ER10, [ER6]
-    ADD ER6, #2
-    ADD ER8, #-1
-    BNE __clear_l
-    ADD R12, #4
-    CMP R12, #8 ;@2p
-    CMP R12, #4 ;@1p
-    BNE __clear_p
-    RT
-__clear_b:
-    MOV R6, #0
-    MOV R7, #0E0H
-    MOV R8, #0
-    MOV R9, #4
-    MOV ER10, #0
-__clear_bl:
-    ST ER10, [ER6]
-    ADD ER6, #2
-    ADD ER8, #-1
-    BNE __clear_bl
+    MOV R8, #8
+__clear_o:
+    MOV R9, #0
+__clear_i:
+    ST R10, [ER6]
+    ADD ER6, #1
+    ADD R9, #-1
+    BNE __clear_i
+    ADD R8, #-1
+    BNE __clear_o
     RT
 
-; buffered(on): on != 0 -> draw into the back buffer (cleared now); on == 0 -> draw straight to the LCD
+; buffered(on): retained for source compatibility; drawing is always shadowed now.
 __buffered:
-    ST R0, 0E800H
-    CMP R0, #0
-    BEQ __buffered_e
-    PUSH LR
-    BL __clear
-    POP PC
-__buffered_e:
     RT
 
-; flip(): copy the back buffer to both LCD bitplanes (shows the finished frame)
+; clearRender(): clear SB1 first, then SB2 (immediately).
+__clearRender:
+    MOV R6, #(_SB1 & 255)
+    MOV R7, #((_SB1 >> 8) & 255)
+    MOV ER10, #0
+    MOV R8, #8
+__clearRender_o:
+    MOV R9, #0
+__clearRender_i:
+    ST ER10, [ER6]
+    ADD ER6, #1
+    ADD R9, #-1
+    BNE __clearRender_i
+    ADD R8, #-1
+    BNE __clearRender_o
+    B __clear
+
+; flip(): legacy alias for render().
 __flip:
+    B __render
+
+; render(): copy the shadow buffer (SB2) to the visible LCD plane(s) (SB1).
+; On cwii both bitplanes are refreshed from the same monochrome shadow.
+__render:
     MOV R12, #0
-__flip_p:
+__render_p:
     ST R12, 0F037H ;@2p
-    MOV R6, #0
-    MOV R7, #0E0H
+    MOV R6, #(_SB2 & 255)
+    MOV R7, #((_SB2 >> 8) & 255)
     MOV R10, #0
     MOV R11, #0F8H
-    MOV R8, #0
-    MOV R9, #4
-__flip_l:
-    L ER4, [ER6]
-    ST ER4, [ER10]
-    ADD ER6, #2
-    ADD ER10, #2
-    ADD ER8, #-1
-    BNE __flip_l
+    MOV R8, #8
+__render_o:
+    MOV R9, #0
+__render_i:
+    L R4, [ER6]
+    ST R4, [ER10]
+    ADD ER6, #1
+    ADD ER10, #1
+    ADD R9, #-1
+    BNE __render_i
+    ADD R8, #-1
+    BNE __render_o
     ADD R12, #4
     CMP R12, #8 ;@2p
     CMP R12, #4 ;@1p
-    BNE __flip_p
+    BNE __render_p
+    RT
+
+; renderStatus(): copy only the 23-byte status-icon region from SB2 to LCD SB1.
+; On cwii both LCD planes are refreshed; the icon map's final slot is at offset 22.
+__renderStatus:
+    MOV R12, #0
+__renderStatus_p:
+    ST R12, 0F037H ;@2p
+    MOV R6, #(_SB2 & 255)
+    MOV R7, #((_SB2 >> 8) & 255)
+    MOV R10, #0
+    MOV R11, #0F8H
+    MOV R8, #23
+__renderStatus_l:
+    L R4, [ER6]
+    ST R4, [ER10]
+    ADD ER6, #1
+    ADD ER10, #1
+    ADD R8, #-1
+    BNE __renderStatus_l
+    ADD R12, #4
+    CMP R12, #8 ;@2p
+    CMP R12, #4 ;@1p
+    BNE __renderStatus_p
     RT
 
 ; runtime state init (called once at entry, before top-level code)
@@ -367,7 +372,7 @@ __poke:
     RT
 
 ; _hspan(x0=ER0, x1=ER2, y=ER4, c=R6): fill pixels x0..x1-1 on row y. Caller guarantees 0<=x0<x1<=192, 0<=y<_ROWS.
-; c=0 clears, else sets. Works on the LCD (both bitplanes) or the back buffer, like pixel().
+; c=0 clears, else sets. Draws into the shadow buffer SB2; call render() to make it visible.
 __hspan:
     MOV R8, R4
     MOV R9, #0
@@ -393,21 +398,9 @@ __hspan:
     MOV R11, #0
     ADD ER8, ER10
     ADD ER8, #32 ;@off
-    L R3, 0E800H
-    CMP R3, #0
-    BNE __hs_b
-    ADD R9, #0F8H
-    BAL __hs_go
-__hs_b:
-    ADD R9, #0E0H
-__hs_go:
-    MOV R12, #0
-__hs_plane:
-    L R3, 0E800H
-    CMP R3, #0
-    BNE __hs_ns
-    ST R12, 0F037H ;@2p
-__hs_ns:
+    MOV R10, #(_SB2 & 255)
+    ADD R8, R10
+    ADDC R9, #((_SB2 >> 8) & 255)
     MOV ER10, ER8
     CMP R13, #0
     BNE __hs_multi
@@ -463,12 +456,17 @@ __hs_l0:
 __hs_l1:
     ST R4, [ER10]
 __hs_next:
-    ADD R12, #4
-    L R3, 0E800H
-    CMP R3, #0
-    BNE __hs_done
-    CMP R12, #8 ;@2p
-    CMP R12, #4 ;@1p
-    BNE __hs_plane
-__hs_done:
     RT
+
+; wipe(): clear every byte of RAM 0xD000..0xFFFF, then halt.
+; Uses registers only, so it can safely erase its own stack/return frame.
+__wipe:
+    MOV R0, #0
+    MOV R1, #0D0H
+__wipe_l:
+    MOV R2, #0
+    ST R2, [ER0]
+    ADD ER0, #1
+    BNE __wipe_l
+__wipe_h:
+    B __wipe_h
