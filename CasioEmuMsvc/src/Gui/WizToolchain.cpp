@@ -17,6 +17,7 @@
 #include "Chipset/ePSCpu.h"
 #include "Ext/RomPackage.h"
 #include "Ext/SysDialog.h"
+#include "ModelConfig.h"
 
 #include <SDL.h>
 
@@ -1306,6 +1307,8 @@ private:
 			if (ImGui::Button("Export package")) {
 				show_export_popup_ = true;
 				export_password_[0] = '\0';
+				export_metadata_error_.clear();
+				RefreshExportMetadata();
 			}
 			ImGui::SameLine();
 			if (ImGui::Button("Copy hex")) {
@@ -1347,12 +1350,32 @@ private:
 			ImGui::TextDisabled("The package contains the model ROM, flash, interface, and metadata.");
 			ImGui::Separator();
 
+			ImGui::TextUnformatted("Metadata");
+			ImGui::TextDisabled("Edit model name, key labels, sprites, status indicators, display settings, hardware fields, paths, and extra values.");
+			ImGui::TextDisabled("ROM, RAM, flash, and interface bytes are not editable here.");
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Reset from model"))
+				RefreshExportMetadata();
+			ImGui::BeginChild("##export_metadata_editor", ImVec2(760, 260), true);
+			ImGui::InputTextMultiline("##export_metadata_json", export_metadata_,
+				sizeof(export_metadata_), ImVec2(-1.0f, -1.0f));
+			ImGui::EndChild();
+			if (!export_metadata_error_.empty())
+				ImGui::TextColored(UIHelpers::kColorError, "%s", export_metadata_error_.c_str());
+			ImGui::Separator();
+
 			const bool can_export = !export_encrypt_ || export_password_[0] != '\0';
 			if (ImGui::Button("Export", ImVec2(120, 0)) && can_export) {
-				std::string password = export_password_;
-				std::fill(std::begin(export_password_), std::end(export_password_), '\0');
-				ImGui::CloseCurrentPopup();
-				ExportPackage(password);
+				casioemu::ModelInfo metadata;
+				if (!ParseExportMetadata(metadata)) {
+					// Keep the dialog open so the JSON error stays visible.
+				}
+				else {
+					std::string password = export_password_;
+					std::fill(std::begin(export_password_), std::end(export_password_), '\0');
+					ImGui::CloseCurrentPopup();
+					ExportPackage(password, metadata);
+				}
 			}
 			ImGui::SameLine();
 			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
@@ -1363,7 +1386,41 @@ private:
 		}
 	}
 
-	void ExportPackage(const std::string& password) {
+	void RefreshExportMetadata() {
+		export_metadata_error_.clear();
+		if (!m_emu)
+			return;
+		casioemu::ModelInfo info = m_emu->ModelDefinition;
+		info.rom_path = StockRomPath();
+		try {
+			std::ostringstream out;
+			casioemu::WriteModelInfoJson(out, info);
+			const std::string text = out.str();
+			const size_t length = std::min(text.size(), sizeof(export_metadata_) - 1);
+			std::memcpy(export_metadata_, text.data(), length);
+			export_metadata_[length] = '\0';
+		}
+		catch (const std::exception& error) {
+			export_metadata_error_ = std::string("cannot serialize metadata: ") + error.what();
+		}
+	}
+
+	bool ParseExportMetadata(casioemu::ModelInfo& info) {
+		try {
+			std::istringstream input{ std::string(export_metadata_) };
+			casioemu::ReadModelInfoJson(input, info);
+			if (info.rom_path.empty())
+				throw std::runtime_error("rom_path must not be empty");
+			export_metadata_error_.clear();
+			return true;
+		}
+		catch (const std::exception& error) {
+			export_metadata_error_ = std::string("metadata error: ") + error.what();
+			return false;
+		}
+	}
+
+	void ExportPackage(const std::string& password, const casioemu::ModelInfo& metadata) {
 		if (!m_emu) {
 			AddLog(Sev::Error, "no running model to export");
 			return;
@@ -1418,8 +1475,7 @@ private:
 		}
 
 		RomPackage package;
-		package.ModelInfo = m_emu->ModelDefinition;
-		package.ModelInfo.rom_path = stock;
+		package.ModelInfo = metadata;
 		package.RomData = std::move(rom);
 		try {
 			if (!package.ModelInfo.flash_path.empty())
@@ -1475,6 +1531,8 @@ private:
 	bool show_export_popup_ = false;
 	bool export_encrypt_ = true;
 	char export_password_[128]{};
+	char export_metadata_[65536]{};
+	std::string export_metadata_error_;
 	char file_name_[128] = {};
 	bool data_dir_set_ = false;
 	bool picked_target_ = false;
