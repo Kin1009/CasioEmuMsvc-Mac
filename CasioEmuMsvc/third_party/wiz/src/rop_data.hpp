@@ -227,7 +227,7 @@ static const char ROP_DB_580[] = R"ROPDB(
 2641A diag_contrast
 2C58A diag_8_keytest
 1F24C getscancode
-25C1C getkey
+2F5EA getkey
 2F5E8 getkeycode
 29892 cvt_key
 0A0E0 setsfr

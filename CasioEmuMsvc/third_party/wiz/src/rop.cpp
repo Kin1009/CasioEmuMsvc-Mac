@@ -1071,26 +1071,40 @@ struct Emitter {
             return;
         }
         if (db.model == "580") {
-            // Verified working community pattern: call the OS key handler at
-            // 2:5C1A through its BL ENTER word (2:5C1C).  It blocks until a
-            // key is accepted and leaves the FCxx key ID in ER0, ready for
-            // cmp_ea.  setlr re-enables interrupts (its BL target is EI,RT)
-            // before the scan; the keytable branch disables them again.
-            call("setlr");
-            call("getkey");
+            // Community pattern:
+            //     er0 = adr(a)
+            //     getkey
+            //     pop er0
+            //   a: 0x3030
+            // The slot starts as 0x3030, so a released key never matches a
+            // key table entry.  getkey is entered at 2:F5EA (BL ENTER) and its
+            // LEAVE returns through the chain.
+            const std::string name = lower(s->name);
+            const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
+            call("pop er0");
+            const size_t addr_pos = out.size();
+            out.push_back(0);
+            out.push_back(0);
+            call(gc);
+            call("pop er0");
+            const size_t slot_pos = out.size();
+            out.push_back(0x30);
+            out.push_back(0x30);
+            key_slot = home + (uint32_t)slot_pos;
             has_key_slot = true;
-            log += "  ; " + std::string(s->name) +
-                   " -> OS key handler 25C1C (ER0 = FCxx key id)\n";
+            out[addr_pos] = (uint8_t)(key_slot & 0xFF);
+            out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
+            log += "  ; " + name + " -> inline slot [" + hex4(key_slot) +
+                   "] (0x3030 default)\n";
             return;
         }
-        // The write gadget ends in `rt`; LR must be valid.  A preceding
-        // print/render BL may have clobbered the LR set by the preamble.
+        // 880: clear the inline slot, write KI/KO, then reload the value.
         call("setlr");
         call("pop xr0");
         const size_t zero_pos = out.size();
         out.push_back(0);
         out.push_back(0);
-        out.push_back(0);   // ER2 = 0
+        out.push_back(0);
         out.push_back(0);
         call("[er0]=er2,rt");
         call("pop er0");
@@ -1098,8 +1112,6 @@ struct Emitter {
         out.push_back(0);
         out.push_back(0);
         const std::string name = lower(s->name);
-        // getkey and getkeycode share the community inline-slot ABI; the
-        // database maps the getkeycode spelling to the getkey entry.
         const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
         call(gc);
         call("setlr");
@@ -1113,8 +1125,8 @@ struct Emitter {
         out[zero_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
         out[addr_pos] = (uint8_t)(key_slot & 0xFF);
         out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
-        log += "  ; " + std::string(s->name) + " -> inline KI/KO slot [" +
-               hex4(key_slot) + "] (cleared before read)\n";
+        log += "  ; " + name + " -> inline KI/KO slot [" + hex4(key_slot) +
+               "] (cleared before read)\n";
     }
     // keytable(0x0480, up, 0x0840, down, ..., 0x0000, loop)
     //
@@ -1141,19 +1153,6 @@ struct Emitter {
         for (size_t i = 0; i < args.size(); i += 2) {
             KeyTableEntry e;
             e.key = (uint16_t)eval(args[i], log);
-            // getkey() now returns the OS key ID (FCxx).  Accept the older
-            // raw KI/KO scancodes too so existing community tables keep
-            // working: left 0x0480, right 0x0840, down 0x0880, up 0x0440.
-            if (db.model == "580") {
-                static const std::pair<uint16_t, uint16_t> kRawToId[] = {
-                    {0x0480, 0xFC1F},   // community "up"    -> stock up
-                    {0x0840, 0xFC1E},   // community "down"  -> stock down
-                    {0x0440, 0xFC1C},   // community "left"  -> stock left
-                    {0x0880, 0xFC1D},   // community "right" -> stock right
-                };
-                for (const auto& m : kRawToId)
-                    if (e.key == m.first) { e.key = m.second; break; }
-            }
             if (args[i + 1]->k != Expr::Var && args[i + 1]->k != Expr::Str) {
                 report_error("keytable target must be a label", "E101");
                 return;

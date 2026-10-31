@@ -49,9 +49,9 @@ right:
     goto keys;
 keys:
     getkey();
-    keytable(0xFC1F, up,
-             0xFC1E, down,
-             0xFC1C, left,
-             0xFC1D, right,
+    keytable(0x0480, up,
+             0x0840, down,
+             0x0440, left,
+             0x0880, right,
              0x0000, keys);
 }

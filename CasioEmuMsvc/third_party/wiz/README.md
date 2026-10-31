@@ -54,11 +54,8 @@ Bundled ROP examples under `examples/rop/`:
 `waitshift()`, `wait_shift()` and `getkeycode()` are accepted as aliases of the
 community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
 
-The 580 key read uses the OS handler at `0x25C1C` (the `BL ENTER` word of
-`2:5C1A`). It blocks until a key is accepted and leaves the `FCxx` key ID in
-ER0, which is what `keytable()` compares. Before the `sp=er6,pop er8` branch,
-`getkey()` emits `setlr` before the `25C1C` call (its `BL` target is `EI,RT`,
-re-enabling interrupts for the scan). `keytable()` emits `setlr; di,rt` before
-the branch, as the community `.rsc` does, because the handler returns through
-`LEAVE` and LR is no longer the chain's `POP PC`. Older raw tables
-(`0x0480`/`0x0840`/`0x0440`/`0x0880`) are translated to the matching IDs.
+The 580 key path is the community raw pattern used by `trex.asm`:
+`er0 = adr(slot); getkey (2:F5EA); pop er0; slot: 0x3030`. `getkey` writes the
+raw KI/KO word into the slot; a released key leaves `0x3030`, which matches no
+table entry. `keytable()` emits `setlr; di,rt` before the branch so the
+handler's first gadget has a valid LR.
