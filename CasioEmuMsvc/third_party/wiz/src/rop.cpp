@@ -1073,10 +1073,6 @@ struct Emitter {
         // The write gadget ends in `rt`; LR must be valid.  A preceding
         // print/render BL may have clobbered the LR set by the preamble.
         call("setlr");
-        // Keep the OS key/display interrupt out of the chain stack while the
-        // key is polled.  The ISR otherwise returns through the payload and
-        // crashes on the first key press (community `di,rt` rule).
-        call("di,rt");
         call("pop xr0");
         const size_t zero_pos = out.size();
         out.push_back(0);
@@ -1094,10 +1090,6 @@ struct Emitter {
         const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
         call(gc);
         call("setlr");
-        // setlr re-enables interrupts (its BL target is EI,RT); turn them back
-        // off so the keytable jump and the handler do not run an ISR on the
-        // chain stack.
-        call("di,rt");
         call("pop er0");
         const size_t slot_pos = out.size();
         out.push_back(0);

@@ -54,11 +54,9 @@ Bundled ROP examples under `examples/rop/`:
 `waitshift()`, `wait_shift()` and `getkeycode()` are accepted as aliases of the
 community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
 
-`getkey()` follows `setlr` with `di,rt` (`0x0A05C`) both before and after the
-poll. `setlr` re-enables interrupts, and a key/display ISR that fires while the
-chain owns SP returns through the payload and crashes on the first key press.
-
 The 580 entry is `0x2F5E8` (`PUSH LR`), not the community's `0x2F5EA`.
 `0x2F5EA` is the `BL ENTER` inside the routine; entering there skips the LR
 push, so `B LEAVE` pops one slot early and returns into the chain, which hangs
 at the handler. `getscancode` likewise starts at `0x1F24C`, not `0x1F24E`.
+Do not wrap the poll in `di,rt`: interrupts also drive the keyboard refresh,
+and the scan then reads no key at all.
