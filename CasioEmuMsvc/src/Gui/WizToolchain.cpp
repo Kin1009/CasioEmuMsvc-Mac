@@ -444,7 +444,28 @@ private:
 		const std::string model = std::string(HardwareTarget()) == "cwii" ? "880" : "580";
 		AddLog(Sev::Note, wiz::fmt("building for rop (%s)", ModelLabel(model == "880" ? "cwii" : "cw")));
 
-		wiz::RopResult rop = wiz::build_rop(src, model, EffectiveLang());
+		// The UI padding slider overrides any #pad/#nopad line in the source.
+		// Inject it before the first section header and drop the source's own
+		// directives, so section selection cannot hide it.
+		std::string effective = "#pad " + std::to_string(std::max(0, rop_pad_)) + "\n";
+		{
+			std::istringstream in(src);
+			std::string line;
+			while (std::getline(in, line)) {
+				const size_t first = line.find_first_not_of(" \t");
+				if (first != std::string::npos && line[first] == '#') {
+					std::string directive = line.substr(first + 1);
+					const size_t end = directive.find_first_of(" \t");
+					if (end != std::string::npos)
+						directive.resize(end);
+					if (directive == "pad" || directive == "nopad")
+						continue;
+				}
+				effective += line;
+				effective.push_back('\n');
+			}
+		}
+		wiz::RopResult rop = wiz::build_rop(effective, model, EffectiveLang());
 		std::istringstream lines(rop.log);
 		std::string line;
 		while (std::getline(lines, line)) {
@@ -473,6 +494,7 @@ private:
 		rop_launcher_ = std::move(rop.launcher);
 		rop_launcher_base_ = rop.launcher_base;
 		rop_launcher_hex_ = rop.launcher_hex;
+		AddLog(Sev::Note, wiz::fmt("00 padding: %d byte(s)", std::max(0, rop_pad_)));
 		AddLog(Sev::Note, wiz::fmt("payload %zu bytes @ %04X, launcher %zu bytes @ %04X",
 								   rop_bytes_.size(), rop_base_, rop_launcher_.size(),
 								   rop_launcher_base_));
@@ -848,6 +870,28 @@ private:
 
 	std::string DumpDataDir() const { return "data files: " + wiz::data_dir(); }
 
+	// Adopt a source's own #pad/#nopad value when a file or example is loaded;
+	// the UI slider then starts from the value the source asks for.
+	void SyncPadFromSource(const std::string& text) {
+		std::istringstream in(text);
+		std::string line;
+		while (std::getline(in, line)) {
+			const size_t first = line.find_first_not_of(" \t");
+			if (first == std::string::npos || line[first] != '#')
+				continue;
+			std::istringstream rest(line.substr(first + 1));
+			std::string directive;
+			rest >> directive;
+			if (directive == "pad") {
+				int value = 0;
+				if (rest >> value)
+					rop_pad_ = std::clamp(value, 0, 4096);
+			} else if (directive == "nopad") {
+				rop_pad_ = 0;
+			}
+		}
+	}
+
 	void SaveSource() {
 		std::string directory = m_emu ? m_emu->GetModelFilePath("wiz") : std::string();
 		if (directory.empty())
@@ -871,6 +915,7 @@ private:
 		}
 		std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
 		editor_.SetText(text);
+		SyncPadFromSource(text);
 		src_path_ = path;
 		AddLog(Sev::Note, "loaded " + path);
 	}
@@ -883,6 +928,7 @@ private:
 		}
 		std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
 		editor_.SetText(text);
+		SyncPadFromSource(text);
 		editor_.SetCursorPosition(TextEditor::Coordinates());
 
 		const std::string name = path.filename().string();
@@ -1181,6 +1227,31 @@ private:
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", built_ok_ ? "last build: ok" : "last build: not run or failed");
 		ImGui::Separator();
+
+		const bool rop_mode = IsRopTarget() || wiz::source_is_rop(editor_.GetText()) ||
+			!rop_bytes_.empty();
+		if (rop_mode) {
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted("00 padding");
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+				ImGui::BeginTooltip();
+				ImGui::TextDisabled("Zero bytes appended after the ROP payload; rebuild to apply.");
+				ImGui::EndTooltip();
+			}
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(150.0f);
+			ImGui::SliderInt("##wiz_rop_pad", &rop_pad_, 0, 4096, "%d bytes");
+			rop_pad_ = std::clamp(rop_pad_, 0, 4096);
+			ImGui::SameLine();
+			if (ImGui::Button("-##wiz_rop_pad", ImVec2(26.0f, 0.0f)))
+				rop_pad_ = std::max(0, rop_pad_ - 16);
+			ImGui::SameLine();
+			if (ImGui::Button("+##wiz_rop_pad", ImVec2(26.0f, 0.0f)))
+				rop_pad_ = std::min(4096, rop_pad_ + 16);
+			ImGui::SameLine();
+			ImGui::TextDisabled("zeros from the end (rebuild to apply)");
+			ImGui::Separator();
+		}
 
 		if (ImGui::BeginTabBar("##wiz_output_tabs")) {
 			if (ImGui::BeginTabItem("Log")) {
@@ -1542,6 +1613,7 @@ private:
 	wiz::BuildResult last_build_;
 	std::vector<uint8_t> rop_bytes_;
 	uint32_t rop_base_ = 0;
+	int rop_pad_ = 256;
 	std::vector<uint8_t> rop_launcher_;
 	uint32_t rop_launcher_base_ = 0;
 	std::string rop_launcher_hex_;
