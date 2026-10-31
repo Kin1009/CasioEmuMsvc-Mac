@@ -1174,10 +1174,11 @@ struct Emitter {
         call("cmp_ea");
         call("er6 = [ea]");
         // The key handler returns through LEAVE, so LR is not the chain's
-        // POP PC by the time the branch target starts.  Re-arm it exactly as
-        // the community .rsc does: setlr_pc; di,rt; sp=er6,pop er8.
-        call("setlr_pc");
-        call("di,rt");
+        // POP PC by the time the branch target starts.  setlr re-arms LR (its
+        // BL target is EI,RT, so it also keeps interrupts enabled for the next
+        // key scan).  Do not add di,rt here: the handler loops back to getkey,
+        // and the OS scanner needs interrupts.
+        call("setlr");
         call("sp=er6,pop er8");
         log += "  ; keytable: " + std::to_string(table.entries.size()) + " entries\n";
         for (const auto& e : table.entries)
