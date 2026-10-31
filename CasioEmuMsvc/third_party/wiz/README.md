@@ -57,7 +57,8 @@ community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
 The 580 key read uses the OS handler at `0x25C1C` (the `BL ENTER` word of
 `2:5C1A`). It blocks until a key is accepted and leaves the `FCxx` key ID in
 ER0, which is what `keytable()` compares. Before the `sp=er6,pop er8` branch,
-`keytable()` emits `setlr` before the branch because the handler returns
-through `LEAVE` and LR is no longer the chain's `POP PC`; `setlr` also keeps
-interrupts enabled for the next key scan. Older raw tables
+`getkey()` emits `setlr` before the `25C1C` call (its `BL` target is `EI,RT`,
+re-enabling interrupts for the scan). `keytable()` emits `setlr; di,rt` before
+the branch, as the community `.rsc` does, because the handler returns through
+`LEAVE` and LR is no longer the chain's `POP PC`. Older raw tables
 (`0x0480`/`0x0840`/`0x0440`/`0x0880`) are translated to the matching IDs.

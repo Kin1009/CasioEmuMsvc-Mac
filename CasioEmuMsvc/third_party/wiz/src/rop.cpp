@@ -1074,8 +1074,9 @@ struct Emitter {
             // Verified working community pattern: call the OS key handler at
             // 2:5C1A through its BL ENTER word (2:5C1C).  It blocks until a
             // key is accepted and leaves the FCxx key ID in ER0, ready for
-            // cmp_ea.  Do not load an inline slot: the handler returns the
-            // value directly.
+            // cmp_ea.  setlr re-enables interrupts (its BL target is EI,RT)
+            // before the scan; the keytable branch disables them again.
+            call("setlr");
             call("getkey");
             has_key_slot = true;
             log += "  ; " + std::string(s->name) +
@@ -1174,11 +1175,11 @@ struct Emitter {
         call("cmp_ea");
         call("er6 = [ea]");
         // The key handler returns through LEAVE, so LR is not the chain's
-        // POP PC by the time the branch target starts.  setlr re-arms LR (its
-        // BL target is EI,RT, so it also keeps interrupts enabled for the next
-        // key scan).  Do not add di,rt here: the handler loops back to getkey,
-        // and the OS scanner needs interrupts.
-        call("setlr");
+        // POP PC by the time the branch target starts.  The community .rsc
+        // re-arms LR and disables interrupts before the branch:
+        // setlr_pc; di,rt; sp=er6,pop er8.  getkey() re-enables them.
+        call("setlr_pc");
+        call("di,rt");
         call("sp=er6,pop er8");
         log += "  ; keytable: " + std::to_string(table.entries.size()) + " entries\n";
         for (const auto& e : table.entries)
