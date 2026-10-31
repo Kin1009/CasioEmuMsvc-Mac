@@ -56,6 +56,6 @@ community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
 
 The 580 key path is the community raw pattern used by `trex.asm`:
 `er0 = adr(slot); getkey (2:F5EA); pop er0; slot: 0x3030`. `getkey` writes the
-raw KI/KO word into the slot; a released key leaves `0x3030`, which matches no
-table entry. `keytable()` emits `setlr; di,rt` before the branch so the
-handler's first gadget has a valid LR.
+raw KI/KO word into the slot; a released key leaves the zeroed slot, which
+matches only the default entry. `keytable()` also accepts the `FCxx` key IDs (`FC1F` up, `FC1E` down, `FC1C`
+left, `FC1D` right) and translates them to the raw words.

@@ -1154,6 +1154,17 @@ struct Emitter {
         for (size_t i = 0; i < args.size(); i += 2) {
             KeyTableEntry e;
             e.key = (uint16_t)eval(args[i], log);
+            // getkey() returns raw KI/KO words; accept the FCxx key IDs too so
+            // tables written either way dispatch the same key.
+            if (db.model == "580") {
+                switch (e.key) {
+                case 0xFC1F: e.key = 0x0480; break;   // up
+                case 0xFC1E: e.key = 0x0840; break;   // down
+                case 0xFC1C: e.key = 0x0440; break;   // left
+                case 0xFC1D: e.key = 0x0880; break;   // right
+                default: break;
+                }
+            }
             if (args[i + 1]->k != Expr::Var && args[i + 1]->k != Expr::Str) {
                 report_error("keytable target must be a label", "E101");
                 return;
