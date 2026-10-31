@@ -1621,7 +1621,7 @@ private:
 	wiz::BuildResult last_build_;
 	std::vector<uint8_t> rop_bytes_;
 	uint32_t rop_base_ = 0;
-	int rop_pad_ = 256;
+	int rop_pad_ = 16;
 	std::vector<uint8_t> rop_launcher_;
 	uint32_t rop_launcher_base_ = 0;
 	std::string rop_launcher_hex_;
