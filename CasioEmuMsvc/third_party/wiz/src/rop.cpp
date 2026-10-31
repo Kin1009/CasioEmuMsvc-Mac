@@ -1397,6 +1397,11 @@ struct Emitter {
                 for (auto& l : s->asm_lines) {
                     log += "  ; asm " + l + "\n";
                     std::string k = lower(l);
+                    // A raw asm getkey also leaves a key word in ER0, so a
+                    // following keytable() should not warn W004.
+                    if (k.find("getkey") != std::string::npos ||
+                        k.find("getkeycode") != std::string::npos)
+                        has_key_slot = true;
                     uint32_t a = 0; std::string f;
                     if (find_addr(k, a, f)) { call(k); continue; }
                     if (k.rfind("0x", 0) == 0 || k.rfind("hex ", 0) == 0) {
