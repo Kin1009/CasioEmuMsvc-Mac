@@ -1085,17 +1085,18 @@ struct Emitter {
             const size_t addr_pos = out.size();
             out.push_back(0);
             out.push_back(0);
+            call("setlr");
             call(gc);
             call("pop er0");
             const size_t slot_pos = out.size();
-            out.push_back(0x30);
-            out.push_back(0x30);
+            out.push_back(0x00);
+            out.push_back(0x00);
             key_slot = home + (uint32_t)slot_pos;
             has_key_slot = true;
             out[addr_pos] = (uint8_t)(key_slot & 0xFF);
             out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
             log += "  ; " + name + " -> inline slot [" + hex4(key_slot) +
-                   "] (0x3030 default)\n";
+                   "] (zeroed before read)\n";
             return;
         }
         // 880: clear the inline slot, write KI/KO, then reload the value.
@@ -1177,8 +1178,7 @@ struct Emitter {
         // POP PC by the time the branch target starts.  The community .rsc
         // re-arms LR and disables interrupts before the branch:
         // setlr_pc; di,rt; sp=er6,pop er8.  getkey() re-enables them.
-        call("setlr_pc");
-        call("di,rt");
+        call("setlr");
         call("sp=er6,pop er8");
         log += "  ; keytable: " + std::to_string(table.entries.size()) + " entries\n";
         for (const auto& e : table.entries)

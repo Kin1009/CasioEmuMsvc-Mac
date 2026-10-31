@@ -23,12 +23,13 @@ loop:
         // slot = 0x3030, so a released key matches no table entry
         "pop xr0";
         "0xE8E8";
-        "0x3030";
+        "0x0000";
         "setlr";
         "[er0]=er2,rt";
         // er0 = adr(slot); getkey; er0 = [slot]
         "pop er0";
         "0xE8E8";
+        "setlr";
         "getkey";
         "setlr";                 // getkey left LR inside itself; re-arm it
         "pop er0";
