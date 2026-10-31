@@ -28,6 +28,7 @@ loop:
         "pop er0";
         "0xE9D0";
         "getkey";
+        "setlr";                 // getkey left LR inside itself; re-arm it
         "pop er0";
         "0xE9D0";
         "er0=[er0],pop xr8,rt";
