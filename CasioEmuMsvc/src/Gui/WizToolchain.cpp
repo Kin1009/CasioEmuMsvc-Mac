@@ -511,6 +511,18 @@ private:
 		WriteFile(bin_path_, std::string(rop_bytes_.begin(), rop_bytes_.end()));
 		AddLog(Sev::Note, wiz::fmt("wrote %s", bin_path_.c_str()));
 
+		// Also write the assembly listing next to the .bin, like wizc does.
+		// The listing is the compiler's disassembly of the emitted chain and
+		// the gadget/label comments, which is what the debugger and the
+		// community examples use.
+		asm_path_ = (std::filesystem::path(directory) / (Stem() + ".asm")).string();
+		std::string listing = wiz::fmt("; ROP payload @ %04X (%zu bytes)\n; launcher @ %04X (%zu bytes)\n",
+									   rop_base_, rop_bytes_.size(), rop_launcher_base_, rop_launcher_.size());
+		listing += "; launcher: " + rop_launcher_hex_ + "\n" + rop.log;
+		last_asm_listing_ = listing;
+		WriteFile(asm_path_, listing);
+		AddLog(Sev::Note, wiz::fmt("wrote %s", asm_path_.c_str()));
+
 		if (run_after)
 			InjectRop();
 	}
@@ -1401,6 +1413,28 @@ private:
 			}
 		}
 		if (!rop_bytes_.empty()) {
+			if (!last_asm_listing_.empty() && ImGui::Button("Download .asm")) {
+				std::string preferred = std::filesystem::path(file_name_).stem().string();
+				if (preferred.empty())
+					preferred = "program";
+				preferred += ".asm";
+				auto text = last_asm_listing_;
+				SystemDialogs::SaveFileDialog(preferred, [this, text = std::move(text)](std::filesystem::path path) {
+					std::ofstream out(path, std::ios::binary);
+					if (!out.is_open()) {
+						AddLog(Sev::Error, "cannot open " + path.string());
+						return;
+					}
+					out.write(text.data(), static_cast<std::streamsize>(text.size()));
+					if (!out) {
+						AddLog(Sev::Error, "failed while writing " + path.string());
+						return;
+					}
+					AddLog(Sev::Note, wiz::fmt("saved %s (%zu bytes)", path.string().c_str(), text.size()));
+				});
+			}
+			if (!last_asm_listing_.empty())
+				ImGui::SameLine();
 			std::string hex;
 			for (uint8_t b : rop_bytes_) {
 				char buf[4];
@@ -1630,6 +1664,7 @@ private:
 	std::string stock_rom_path_;
 	std::string bin_path_;
 	std::string asm_path_;
+	std::string last_asm_listing_;
 	std::string src_path_;
 };
 
