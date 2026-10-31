@@ -46,17 +46,17 @@ Bundled ROP examples under `examples/rop/`:
 
 - `41_rop_hello.cwiz`, `42_rop_line.cwiz`, `43_rop_common.cwiz` — text and
   line payloads with the common launcher.
-- `44_rop_keys.cwiz` — `getkey()` / `keytable()` arrow-key menu with the real
-  scancodes (`up 0x0480`, `down 0x0840`, `left 0x0440`, `right 0x0880`).
+- `44_rop_keys.cwiz` — `getkey()` / `keytable()` arrow-key menu with the OS
+  key IDs (`up 0xFC1F`, `down 0xFC1E`, `left 0xFC1C`, `right 0xFC1D`).
 - `45_rop_guide.cwiz` — the community guide primitives in CWiz: SHIFT-gated
   Vietnamese text, `bitmap()`, `line()`, then `getkey()` dispatch.
 
 `waitshift()`, `wait_shift()` and `getkeycode()` are accepted as aliases of the
 community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
 
-The 580 entry is `0x2F5E8` (`PUSH LR`), not the community's `0x2F5EA`.
-`0x2F5EA` is the `BL ENTER` inside the routine; entering there skips the LR
-push, so `B LEAVE` pops one slot early and returns into the chain, which hangs
-at the handler. `getscancode` likewise starts at `0x1F24C`, not `0x1F24E`.
-Do not wrap the poll in `di,rt`: interrupts also drive the keyboard refresh,
-and the scan then reads no key at all.
+The 580 key read uses the OS handler at `0x25C1C` (the `BL ENTER` word of
+`2:5C1A`). It blocks until a key is accepted and leaves the `FCxx` key ID in
+ER0, which is what `keytable()` compares. Before the `sp=er6,pop er8` branch,
+`keytable()` emits `setlr; di,rt` because the handler returns through `LEAVE`
+and LR is no longer the chain's `POP PC`. Older raw tables
+(`0x0480`/`0x0840`/`0x0440`/`0x0880`) are translated to the matching IDs.

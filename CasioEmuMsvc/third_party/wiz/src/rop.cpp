@@ -1067,7 +1067,19 @@ struct Emitter {
     // KI/KO word for keytable().
     void emit_getkey(const StmtP& s) {
         if (!s->args.empty()) {
-            report_error(s->name + " takes no arguments; the compiler owns its inline KI/KO slot", "E101");
+            report_error(s->name + " takes no arguments", "E101");
+            return;
+        }
+        if (db.model == "580") {
+            // Verified working community pattern: call the OS key handler at
+            // 2:5C1A through its BL ENTER word (2:5C1C).  It blocks until a
+            // key is accepted and leaves the FCxx key ID in ER0, ready for
+            // cmp_ea.  Do not load an inline slot: the handler returns the
+            // value directly.
+            call("getkey");
+            has_key_slot = true;
+            log += "  ; " + std::string(s->name) +
+                   " -> OS key handler 25C1C (ER0 = FCxx key id)\n";
             return;
         }
         // The write gadget ends in `rt`; LR must be valid.  A preceding
@@ -1128,6 +1140,19 @@ struct Emitter {
         for (size_t i = 0; i < args.size(); i += 2) {
             KeyTableEntry e;
             e.key = (uint16_t)eval(args[i], log);
+            // getkey() now returns the OS key ID (FCxx).  Accept the older
+            // raw KI/KO scancodes too so existing community tables keep
+            // working: left 0x0480, right 0x0840, down 0x0880, up 0x0440.
+            if (db.model == "580") {
+                static const std::pair<uint16_t, uint16_t> kRawToId[] = {
+                    {0x0480, 0xFC1F},   // community "up"    -> stock up
+                    {0x0840, 0xFC1E},   // community "down"  -> stock down
+                    {0x0440, 0xFC1C},   // community "left"  -> stock left
+                    {0x0880, 0xFC1D},   // community "right" -> stock right
+                };
+                for (const auto& m : kRawToId)
+                    if (e.key == m.first) { e.key = m.second; break; }
+            }
             if (args[i + 1]->k != Expr::Var && args[i + 1]->k != Expr::Str) {
                 report_error("keytable target must be a label", "E101");
                 return;
@@ -1140,15 +1165,19 @@ struct Emitter {
             log += "  ; warning [W004]: keytable without a getkey(); ER0 is not a scancode\n";
         if (!has_default)
             log += "  ; warning [W005]: keytable has no 0x0000 default entry\n";
-        // ER0 was loaded by getkey(); only the table address still has to be
-        // put into EA.  Do not emit another pop er0 here: that would load the
-        // slot address instead of the KI/KO value.
+        // ER0 holds the key id returned by getkey(); only the table address
+        // still has to be put into EA.
         call("pop ea");
         table.addr_pos = out.size();
         out.push_back(0);
         out.push_back(0);
         call("cmp_ea");
         call("er6 = [ea]");
+        // The key handler returns through LEAVE, so LR is not the chain's
+        // POP PC by the time the branch target starts.  Re-arm it exactly as
+        // the community .rsc does: setlr_pc; di,rt; sp=er6,pop er8.
+        call("setlr_pc");
+        call("di,rt");
         call("sp=er6,pop er8");
         log += "  ; keytable: " + std::to_string(table.entries.size()) + " entries\n";
         for (const auto& e : table.entries)

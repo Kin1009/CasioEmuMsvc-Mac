@@ -1,9 +1,8 @@
 // rop/06_rop_keys.cwiz — getkey/keytable menu with the real arrow scancodes.
 //
-// getkey() writes the two-byte KI/KO word into an inline slot and leaves the
-// value in ER0; keytable() compares it with cmp_ea and branches to the label.
+// getkey() calls the OS key handler and leaves the FCxx key ID in ER0; keytable() compares it with cmp_ea and branches to the label.
 //
-//   0x0480 = Up, 0x0840 = Down, 0x0440 = Left, 0x0880 = Right.
+//   0xFC1F = Up, 0xFC1E = Down, 0xFC1C = Left, 0xFC1D = Right.
 #rop
 #for 580
 #org E9E0
@@ -17,10 +16,10 @@ int main() {
     render();
 loop:
     getkey();
-    keytable(0x0480, up,
-             0x0840, down,
-             0x0440, left,
-             0x0880, right,
+    keytable(0xFC1F, up,
+             0xFC1E, down,
+             0xFC1C, left,
+             0xFC1D, right,
              0x0000, loop);
 up:
     screen_del();
