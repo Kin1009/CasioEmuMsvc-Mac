@@ -1228,28 +1228,36 @@ private:
 		ImGui::TextDisabled("%s", built_ok_ ? "last build: ok" : "last build: not run or failed");
 		ImGui::Separator();
 
+		// Always visible so the padding control is discoverable; it is only
+		// active for ROP payloads.
 		const bool rop_mode = IsRopTarget() || wiz::source_is_rop(editor_.GetText()) ||
 			!rop_bytes_.empty();
-		if (rop_mode) {
+		{
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextUnformatted("00 padding");
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
 				ImGui::BeginTooltip();
-				ImGui::TextDisabled("Zero bytes appended after the ROP payload; rebuild to apply.");
+				ImGui::TextDisabled("Zero bytes appended after the ROP payload.\nRebuild to apply.");
 				ImGui::EndTooltip();
 			}
 			ImGui::SameLine();
-			ImGui::SetNextItemWidth(150.0f);
+			if (!rop_mode)
+				ImGui::BeginDisabled();
+			ImGui::SetNextItemWidth(110.0f);
 			ImGui::SliderInt("##wiz_rop_pad", &rop_pad_, 0, 4096, "%d bytes");
 			rop_pad_ = std::clamp(rop_pad_, 0, 4096);
 			ImGui::SameLine();
-			if (ImGui::Button("-##wiz_rop_pad", ImVec2(26.0f, 0.0f)))
+			if (ImGui::Button("-##wiz_rop_pad", ImVec2(24.0f, 0.0f)))
 				rop_pad_ = std::max(0, rop_pad_ - 16);
 			ImGui::SameLine();
-			if (ImGui::Button("+##wiz_rop_pad", ImVec2(26.0f, 0.0f)))
+			if (ImGui::Button("+##wiz_rop_pad", ImVec2(24.0f, 0.0f)))
 				rop_pad_ = std::min(4096, rop_pad_ + 16);
-			ImGui::SameLine();
-			ImGui::TextDisabled("zeros from the end (rebuild to apply)");
+			if (!rop_mode)
+				ImGui::EndDisabled();
+			if (!rop_mode) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("(ROP only)");
+			}
 			ImGui::Separator();
 		}
 
