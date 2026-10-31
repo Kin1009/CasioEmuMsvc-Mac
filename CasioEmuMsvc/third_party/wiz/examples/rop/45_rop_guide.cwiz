@@ -1,0 +1,57 @@
+// rop/07_rop_guide.cwiz — the ROP EZ guide primitives in CWiz.
+//
+//   waitshift()  block until SHIFT is pressed
+//   print()      pad, line position, text (real spaces)
+//   bitmap()     x, y, width, height, quoted hexadecimal bitmap
+//   line()       x1, y1, x2, y2
+//   getkey()     read the KI/KO word
+//   keytable()   dispatch on the scancode
+#rop
+#for 580
+#org E9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+
+    waitshift();
+    print(0x30, 0x01, "Mẹ các bạn béo   ");
+    print(0x30, 0x11, "CUỘC SỐNG        ");
+    render();
+
+    waitshift();
+    bitmap(0x20, 0x20, 16, 16, "0007000F001F003E007C60F871F03BE01FC01F800F001F803BC0F1E0E060E000");
+    line(0, 0, 191, 63);
+    render();
+
+    goto keys;
+up:
+    screen_del();
+    print(0x30, 0x11, "UP");
+    render();
+    goto keys;
+down:
+    screen_del();
+    print(0x30, 0x11, "DOWN");
+    render();
+    goto keys;
+left:
+    screen_del();
+    print(0x30, 0x11, "LEFT");
+    render();
+    goto keys;
+right:
+    screen_del();
+    print(0x30, 0x11, "RIGHT");
+    render();
+    goto keys;
+keys:
+    getkey();
+    keytable(0x0480, up,
+             0x0840, down,
+             0x0440, left,
+             0x0880, right,
+             0x0000, keys);
+}

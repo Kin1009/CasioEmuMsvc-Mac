@@ -591,6 +591,9 @@ std::vector<std::string> stdlib_candidates(const std::string& name) {
     else if (k == "print_small") push({"smallprint"});
     else if (k == "render" || k == "flush" || k == "flip") push({"render","render.ddd4","render.ca54"});
     else if (k == "delay" || k == "sleep") push({"delay"});
+    else if (k == "wait_shift" || k == "waitshift" || k == "wait") push({"waitshift"});
+    else if (k == "wait_shift_striped" || k == "waitshift_striped") push({"waitshift_striped"});
+    else if (k == "render_bitmap") push({"render_bitmap"});
     else if (k == "get_key" || k == "key") push({"getkey","getkeycode","getscancode","cvt_key"});
     else if (k == "is_key_pressed" || k == "check_key") push({"check_any_key_pressed__"});
     else if (k == "wait_key" || k == "pause") push({"diagnostic_wait_key"});
@@ -1081,7 +1084,10 @@ struct Emitter {
         const size_t addr_pos = out.size();
         out.push_back(0);
         out.push_back(0);
-        const std::string gc = lower(s->name) == "getscancode" ? "getscancode" : "getkey";
+        const std::string name = lower(s->name);
+        // getkey and getkeycode share the community inline-slot ABI; the
+        // database maps the getkeycode spelling to the getkey entry.
+        const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
         call(gc);
         call("setlr");
         call("pop er0");
@@ -1296,6 +1302,7 @@ struct Emitter {
                 if (key == "rect" || key == "draw_rect") { emit_rect(s); return; }
                 if (key == "bitmap" || key == "draw_bitmap") { emit_bitmap(s); return; }
                 if (key == "getkey" || key == "get_key" || key == "key" ||
+                    key == "getkeycode" || key == "get_keycode" ||
                     key == "getscancode_nodelay" || key == "getscancode") { emit_getkey(s); return; }
                 if (key == "keytable" || key == "table") { emit_keytable(s); return; }
                 if (key == "delay" || key == "sleep") { emit_delay(s); return; }

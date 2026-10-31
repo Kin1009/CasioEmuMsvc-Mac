@@ -41,3 +41,15 @@ NUL-terminated string pointer, call `line_print`, and finish with
 but the string pool remains at the backup address `E9E0`; pointers must target
 the backup pool. See the upstream Wiz `docs/ROP.md` and the bundled ROP
 examples for the complete byte layout.
+
+Bundled ROP examples under `examples/rop/`:
+
+- `41_rop_hello.cwiz`, `42_rop_line.cwiz`, `43_rop_common.cwiz` — text and
+  line payloads with the common launcher.
+- `44_rop_keys.cwiz` — `getkey()` / `keytable()` arrow-key menu with the real
+  scancodes (`up 0x0480`, `down 0x0840`, `left 0x0440`, `right 0x0880`).
+- `45_rop_guide.cwiz` — the community guide primitives in CWiz: SHIFT-gated
+  Vietnamese text, `bitmap()`, `line()`, then `getkey()` dispatch.
+
+`waitshift()`, `wait_shift()` and `getkeycode()` are accepted as aliases of the
+community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
