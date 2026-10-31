@@ -53,3 +53,7 @@ Bundled ROP examples under `examples/rop/`:
 
 `waitshift()`, `wait_shift()` and `getkeycode()` are accepted as aliases of the
 community gadgets; `getkeycode()` uses the same inline-slot ABI as `getkey()`.
+
+`getkey()` follows `setlr` with `di,rt` (`0x0A05C`) both before and after the
+poll. `setlr` re-enables interrupts, and a key/display ISR that fires while the
+chain owns SP returns through the payload and crashes on the first key press.
