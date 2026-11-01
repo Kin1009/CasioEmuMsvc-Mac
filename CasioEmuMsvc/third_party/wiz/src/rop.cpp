@@ -1400,7 +1400,6 @@ struct Emitter {
             case 0x0840: return "KEY_DOWN";
             case 0x0440: return "KEY_LEFT";
             case 0x0880: return "KEY_RIGHT";
-            case 0x0201: return "KEY_EXE";
             default: break;
         }
         return std::string();
@@ -1457,7 +1456,7 @@ struct Emitter {
             const std::string& name = kv.second;
             if (off < str_start) {
                 add_expr(home + (uint32_t)off, "adr(" + name + ")");
-                if (off >= 2) add_expr(home + (uint32_t)off - 2, "adr(" + name + ") - 2");
+                if (off >= 2) add_expr(home + (uint32_t)off - 2, "eval(adr(" + name + ") - 2)");
             } else {
                 add_expr(data_home + (uint32_t)off, "eval(adr(" + name + ")+dist.main)");
             }
@@ -1471,14 +1470,10 @@ struct Emitter {
         for (const auto& r : rows) row_at[r.offset] = &r;
 
         std::string s;
-        s += "; wiz rop asm listing\n";
-        s += "; payload " + std::to_string(out.size()) + " bytes, injected @ " + hex4(data_home) +
-             ", executed @ " + hex4(home) + "\n";
-        s += "; section.main " + hex4(home) + ", backup " + hex4(data_home) + " (dist.main = " +
-             hex4(data_home - home) + ")\n";
-        s += "section.main\n";
-        s += "org 0x" + lhex4(home) + "\n";
-        s += "backup 0x" + lhex4(data_home) + "\n\n";
+        s += "# wiz rop asm listing\n";
+        s += "# payload " + std::to_string(out.size()) + " bytes, injected @ " + hex4(data_home) +
+             ", executed @ " + hex4(home) + " (dist.main = " + hex4(data_home - home) + ")\n";
+        s += "@section.main at 0x" + lhex4(home) + " backup 0x" + lhex4(data_home) + "\n\n";
 
         auto line = [&](const std::string& text, const std::string& comment) {
             std::string l = "    " + text;
@@ -1493,9 +1488,17 @@ struct Emitter {
         while (i < out.size()) {
             if (pad_size > 0 && i == pad_start) {
                 s += "lbl pad\n";
-                s += "    hex 00 00 00 00 00 00 00 00";
-                if (pad_size > 8) s += "   # " + std::to_string(pad_size) + " zero bytes";
-                s += "\n";
+                // Every byte has to be written out: the listing is meant to be
+                // fed back into the assembler, and the null buffer is part of
+                // the payload.
+                for (size_t k = 0; k < (size_t)pad_size; k += 8) {
+                    s += "    hex";
+                    for (size_t m = k; m < std::min<size_t>(k + 8, (size_t)pad_size); ++m)
+                        s += " 00";
+                    if (k + 8 >= (size_t)pad_size)
+                        s += "   # " + std::to_string(pad_size) + " zero bytes";
+                    s += "\n";
+                }
                 break;
             }
             auto la = at.find(i);
@@ -1665,7 +1668,18 @@ struct Emitter {
         r.bytes = std::move(out);
         r.base = home;
         r.log = listing;
-        if (!log.empty()) r.log += "\n; ---- notes ----\n" + log;
+        if (!log.empty()) {
+            // The notes are comments in the same source: `#`, not `;`.
+            std::string notes;
+            std::istringstream in(log);
+            std::string line;
+            while (std::getline(in, line)) {
+                const size_t k = line.find_first_not_of(" \t");
+                if (k != std::string::npos && line[k] == ';') line[k] = '#';
+                notes += line + "\n";
+            }
+            r.log += "\n# ---- notes ----\n" + notes;
+        }
         return r;
     }
 };
@@ -2036,7 +2050,7 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
                              std::to_string(copy_len) + " bytes, payload is " +
                              std::to_string(r.bytes.size()) + " bytes)\n";
             }
-            r.log += "  ; launcher (" + std::string(r.model == "880" ? "880 common" : "580 common") +
+            r.log += "  # launcher (" + std::string(r.model == "880" ? "880 common" : "580 common") +
                      ") " + std::to_string(r.launcher.size()) + " bytes\n";
         } else {
             // Simple 10-byte stub: pop er14 / payload-2 / sp = er14, pop er14.
@@ -2054,7 +2068,7 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
             emit_gadget(r.launcher, pop_er14);
             emit16(r.launcher, (r.base >= 2 ? r.base - 2 : r.base) & 0xFFFF);
             emit_gadget(r.launcher, set_sp);
-            r.log += "  ; launcher (simple) " + std::to_string(r.launcher.size()) + " bytes\n";
+            r.log += "  # launcher (simple) " + std::to_string(r.launcher.size()) + " bytes\n";
         }
         if (!missing_gadget.empty()) {
             r.ok = false;
@@ -2066,7 +2080,7 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
         std::snprintf(hb, sizeof hb, "%04X", r.launcher_base);
         char pb[16];
         std::snprintf(pb, sizeof pb, "%04X", r.base);
-        r.log += std::string("  ; launcher @ ") + hb + " -> [" + pb + "]\n";
+        r.log += std::string("  # launcher @ ") + hb + " -> [" + pb + "]\n";
         return r;
     } catch (const std::exception& e) {
         RopResult bad;

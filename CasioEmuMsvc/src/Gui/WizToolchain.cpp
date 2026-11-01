@@ -516,9 +516,9 @@ private:
 		// gadget mnemonics, `hex`, `adr(label)`), which is what the community
 		// examples use.
 		asm_path_ = (std::filesystem::path(directory) / (Stem() + ".asm")).string();
-		std::string listing = wiz::fmt("; ROP payload @ %04X (%zu bytes)\n; launcher @ %04X (%zu bytes)\n",
+		std::string listing = wiz::fmt("# ROP payload @ %04X (%zu bytes)\n# launcher @ %04X (%zu bytes)\n",
 									   rop_base_, rop_bytes_.size(), rop_launcher_base_, rop_launcher_.size());
-		listing += "; launcher: " + rop_launcher_hex_ + "\n" + rop.log;
+		listing += "# launcher: " + rop_launcher_hex_ + "\n" + rop.log;
 		last_asm_listing_ = listing;
 		WriteFile(asm_path_, listing);
 		AddLog(Sev::Note, wiz::fmt("wrote %s", asm_path_.c_str()));
