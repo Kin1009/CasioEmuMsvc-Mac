@@ -1530,12 +1530,14 @@ struct Emitter {
             auto nl = at.upper_bound(i);
             if (nl != at.end()) limit = std::min(limit, nl->first);
             if (limit > i + 2 && limit - i > 8) limit = i + 8;
-            // A key table entry's KI/KO word.
+            // A key table entry's KI/KO word: raw bytes, with the community
+            // key name as a comment.  The hex keeps the listing byte exact
+            // even when the assembler's KEY_xx values are unknown.
             auto kw = key_words.find(i);
             if (kw != key_words.end() && i + 2 <= limit) {
                 const std::string kn = key_name(kw->second);
                 if (!kn.empty()) {
-                    s += line(kn, hex4(kw->second));
+                    s += line("hex " + byte_hex(out[i]) + " " + byte_hex(out[i + 1]), kn);
                     i += 2;
                     continue;
                 }
