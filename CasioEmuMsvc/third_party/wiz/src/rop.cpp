@@ -710,64 +710,7 @@ struct ChainRow {
     std::string name;    // gadget name (or the register for a pop)
 };
 
-const char* kind_name(GKind c) {
-    switch (c) {
-        case GKind::Pop: return "pop";
-        case GKind::Flow: return "flow";
-        case GKind::SetlrPc: return "setlr";
-        case GKind::Call: break;
-    }
-    return "call";
-}
-
-std::string hex_bytes_compact(const uint8_t* p, size_t n) {
-    static const char* digits = "0123456789ABCDEF";
-    std::string s;
-    for (size_t i = 0; i < n; i++) {
-        if (i) s += ' ';
-        s += digits[p[i] >> 4];
-        s += digits[p[i] & 0x0F];
-    }
-    return s;
-}
-
-// Build the low level listing of a payload:
-//
-//   E9E0  09 FA 30 30   call     0x09FA8  setlr
-//   E9E8  34 7B 31 30   pop      0x17B34  xr0
-//   E9EC  01 30 0C EA             data    01 30 0C EA
-std::string build_listing(const std::vector<uint8_t>& bytes, const std::vector<ChainRow>& rows,
-                           uint32_t base) {
-    std::string s;
-    char addr[16];
-    size_t i = 0, r = 0;
-    while (i < bytes.size()) {
-        if (r < rows.size() && rows[r].offset == i) {
-            const ChainRow& g = rows[r];
-            std::snprintf(addr, sizeof addr, "%04X", base + (uint32_t)i);
-            std::string kind = kind_name(g.kind);
-            while (kind.size() < 9) kind += ' ';
-            char ga[16];
-            std::snprintf(ga, sizeof ga, "0x%05X", g.addr);
-            s += std::string(addr) + "  " + hex_bytes_compact(&bytes[i], 4) + "   " + kind + ga +
-                 "  " + g.name + "\n";
-            i += 4;
-            r++;
-            continue;
-        }
-        // Plain data (arguments, string pool, ...): up to four bytes per row.
-        size_t n = 4;
-        if (r < rows.size() && rows[r].offset > i) n = std::min(n, rows[r].offset - i);
-        n = std::min(n, bytes.size() - i);
-        std::snprintf(addr, sizeof addr, "%04X", base + (uint32_t)i);
-        std::string col = hex_bytes_compact(&bytes[i], n);
-        while (col.size() < 11) col += ' ';
-        s += std::string(addr) + "  " + col + "             data    " +
-             hex_bytes_compact(&bytes[i], n) + "\n";
-        i += n;
-    }
-    return s;
-}
+// ---------------------------------------------------------------- asm listing
 
 // ---------------------------------------------------------------- key tables
 // A cmp_ea table is a list of (16 bit key, 16 bit target) entries.  The
@@ -792,8 +735,17 @@ struct Emitter {
     std::map<std::string, size_t> labels;
     std::vector<std::pair<size_t, std::string>> patches;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
+    std::map<size_t, std::string> str_text;   // pointer position -> source text
+    std::map<size_t, uint32_t> key_words;     // key table offset -> KI/KO word
     std::vector<ChainRow> rows;      // the chain, for the low level listing
     std::vector<KeyTable> key_tables;
+    // Names the listing prints with `lbl`: key tables, string pool entries and
+    // the getkey() slots.  The offset is relative to the payload.
+    std::map<size_t, std::string> data_labels;
+    std::map<size_t, std::string> data_comments;
+    size_t str_start = 0;    // first string-pool byte
+    size_t pad_start = 0;    // first null-buffer byte
+    int slot_count = 0;
     uint32_t home = 0xE9E0;
     uint32_t data_home = 0xE9E0;
     int pad_size = 256;
@@ -972,6 +924,7 @@ struct Emitter {
         size_t sp = out.size();
         out.push_back(0); out.push_back(0);
         str_pool.push_back({sp, enc});
+        str_text[sp] = args[ti]->s;
         log += "  ; " + std::string(small ? "print_small" : "print") + " \"" + args[ti]->s + "\" " +
                (small ? "font=0x" : "pad=0x") + hex2(a) + " linepos=0x" + hex2(b) + " -> " + found + "\n";
         call(found);
@@ -1095,6 +1048,7 @@ struct Emitter {
             has_key_slot = true;
             out[addr_pos] = (uint8_t)(key_slot & 0xFF);
             out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
+            data_labels[slot_pos] = slot_count++ ? "keyslot_" + std::to_string(slot_count) : "keyslot";
             log += "  ; " + name + " -> inline slot [" + hex4(key_slot) +
                    "] (zeroed before read)\n";
             return;
@@ -1126,6 +1080,7 @@ struct Emitter {
         out[zero_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
         out[addr_pos] = (uint8_t)(key_slot & 0xFF);
         out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
+        data_labels[slot_pos] = slot_count++ ? "keyslot_" + std::to_string(slot_count) : "keyslot";
         log += "  ; " + name + " -> inline KI/KO slot [" + hex4(key_slot) +
                "] (cleared before read)\n";
     }
@@ -1428,6 +1383,185 @@ struct Emitter {
     }
     static std::string hex4(uint32_t v) { char b[8]; std::snprintf(b, sizeof b, "%04X", v); return b; }
     static std::string hex2(uint32_t v) { char b[8]; std::snprintf(b, sizeof b, "%02X", v & 0xFF); return b; }
+    static std::string hex5(uint32_t v) { char b[8]; std::snprintf(b, sizeof b, "%05X", v); return b; }
+    static std::string lhex4(uint32_t v) {
+        std::string s = hex4(v);
+        for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    }
+    static std::string byte_hex(uint8_t v) {
+        char b[4]; std::snprintf(b, sizeof b, "%02x", v); return b;
+    }
+    // The raw KI/KO word of a key table entry, spelled the way the hand
+    // written sources spell it.
+    static std::string key_name(uint32_t key) {
+        switch (key) {
+            case 0x0480: return "KEY_UP";
+            case 0x0840: return "KEY_DOWN";
+            case 0x0440: return "KEY_LEFT";
+            case 0x0880: return "KEY_RIGHT";
+            case 0x0201: return "KEY_EXE";
+            default: break;
+        }
+        return std::string();
+    }
+
+    // ------------------------------------------------------------ asm listing
+    // The .asm listing is written in the community "wiz rop dsl" source style:
+    //
+    //   section.main
+    //   org 0xd730
+    //   backup 0xe9e0
+    //
+    //   lbl main
+    //       setlr
+    //       setsfr
+    //       pop xr0
+    //       hex 01 30
+    //       eval(adr(str_1)+dist.main)
+    //       printline
+    //       render
+    //   ...
+    //   lbl keytable_1
+    //       KEY_UP
+    //       adr(up) - 2
+    //
+    // Gadget words keep their mnemonic, data stays `hex`, and a data word that
+    // is a known address is printed as `adr(label)` / `adr(label) - 2` (code
+    // targets) or `eval(adr(label)+dist.main)` (string-pool pointers), which
+    // is the spelling the hand written ROP sources use.
+    std::string asm_listing() const {
+        // Best label name for each payload offset.
+        auto is_generated = [](const std::string& n) {
+            return n.rfind("loop_", 0) == 0 || n.rfind("end_", 0) == 0 ||
+                   n.rfind("for_", 0) == 0;
+        };
+        std::map<size_t, std::string> at;
+        for (const auto& kv : labels) {
+            auto it = at.find(kv.second);
+            if (it == at.end()) { at[kv.second] = kv.first; continue; }
+            const bool gen_new = is_generated(kv.first), gen_old = is_generated(it->second);
+            if (gen_new != gen_old ? gen_old : kv.first.size() < it->second.size())
+                it->second = kv.first;
+        }
+        for (const auto& kv : data_labels) {
+            if (!at.count(kv.first)) at[kv.first] = kv.second;
+        }
+
+        // Values whose data word is an address of a label.  Code lives at
+        // home; the string pool is referenced through the injected copy.
+        std::map<uint32_t, std::string> expr;
+        auto add_expr = [&](uint32_t v, const std::string& e) { expr.emplace(v, e); };
+        for (const auto& kv : at) {
+            const size_t off = kv.first;
+            const std::string& name = kv.second;
+            if (off < str_start) {
+                add_expr(home + (uint32_t)off, "adr(" + name + ")");
+                if (off >= 2) add_expr(home + (uint32_t)off - 2, "adr(" + name + ") - 2");
+            } else {
+                add_expr(data_home + (uint32_t)off, "eval(adr(" + name + ")+dist.main)");
+            }
+        }
+        auto word_at = [&](size_t p) -> uint32_t {
+            return (uint32_t)out[p] | ((uint32_t)out[p + 1] << 8);
+        };
+
+        // Chain words by offset, for the walk below.
+        std::map<size_t, const ChainRow*> row_at;
+        for (const auto& r : rows) row_at[r.offset] = &r;
+
+        std::string s;
+        s += "; wiz rop asm listing\n";
+        s += "; payload " + std::to_string(out.size()) + " bytes, injected @ " + hex4(data_home) +
+             ", executed @ " + hex4(home) + "\n";
+        s += "; section.main " + hex4(home) + ", backup " + hex4(data_home) + " (dist.main = " +
+             hex4(data_home - home) + ")\n";
+        s += "section.main\n";
+        s += "org 0x" + lhex4(home) + "\n";
+        s += "backup 0x" + lhex4(data_home) + "\n\n";
+
+        auto line = [&](const std::string& text, const std::string& comment) {
+            std::string l = "    " + text;
+            if (!comment.empty()) {
+                while (l.size() < 28) l += ' ';
+                l += " # " + comment;
+            }
+            return l + "\n";
+        };
+
+        size_t i = 0;
+        while (i < out.size()) {
+            if (pad_size > 0 && i == pad_start) {
+                s += "lbl pad\n";
+                s += "    hex 00 00 00 00 00 00 00 00";
+                if (pad_size > 8) s += "   # " + std::to_string(pad_size) + " zero bytes";
+                s += "\n";
+                break;
+            }
+            auto la = at.find(i);
+            if (la != at.end()) {
+                s += "lbl " + la->second + "\n";
+                auto cm = data_comments.find(i);
+                if (cm != data_comments.end() && !cm->second.empty())
+                    s += "    #" + cm->second + "\n";
+            }
+            auto ra = row_at.find(i);
+            if (ra != row_at.end()) {
+                const ChainRow& g = *ra->second;
+                std::string mn;
+                switch (g.kind) {
+                    case GKind::Pop: mn = "pop " + g.name; break;
+                    case GKind::SetlrPc: mn = "setlr_pc"; break;
+                    default: mn = g.name; break;
+                }
+                if (mn.empty()) mn = "call 0x" + hex5(g.addr);
+                s += line(mn, hex5(g.addr));
+                i += 4;
+                continue;
+            }
+            // Plain data: stop at the next gadget or label.
+            size_t limit = out.size();
+            if (pad_size > 0 && pad_start > i) limit = std::min(limit, pad_start);
+            auto nr = row_at.upper_bound(i);
+            if (nr != row_at.end()) limit = std::min(limit, nr->first);
+            auto nl = at.upper_bound(i);
+            if (nl != at.end()) limit = std::min(limit, nl->first);
+            if (limit > i + 2 && limit - i > 8) limit = i + 8;
+            // A key table entry's KI/KO word.
+            auto kw = key_words.find(i);
+            if (kw != key_words.end() && i + 2 <= limit) {
+                const std::string kn = key_name(kw->second);
+                if (!kn.empty()) {
+                    s += line(kn, hex4(kw->second));
+                    i += 2;
+                    continue;
+                }
+            }
+            // A whole annotated address word.
+            if (i + 2 <= limit) {
+                auto e = expr.find(word_at(i));
+                if (e != expr.end()) {
+                    s += line(e->second, hex4(word_at(i)));
+                    i += 2;
+                    continue;
+                }
+            }
+            size_t n = 1;
+            while (n < limit - i) {
+                if (n % 2 == 0 && n + 2 <= limit - i && expr.count(word_at(i + n))) break;
+                n++;
+            }
+            s += "    hex";
+            for (size_t k = 0; k < n; k++) s += " " + byte_hex(out[i + k]);
+            s += "\n";
+            i += n;
+        }
+        // Labels that point at the end of the payload.
+        for (auto it = at.lower_bound(i); it != at.end(); ++it)
+            s += "lbl " + it->second + "\n";
+        return s;
+    }
+
     RopResult run(const Program& prog) {
         RopResult r;
         home = prog.has_org ? prog.org : 0xE9E0;
@@ -1443,6 +1577,11 @@ struct Emitter {
         }
         // This is the exact hdcompiler/RAC preamble.  setlr_pc is a different
         // gadget and does not reproduce the working RAC chain's startup.
+        // The first function starts at offset 0, so its label goes before the
+        // injected preamble and the listing shows `lbl main` at the section
+        // start, like the community sources.
+        if (!prog.funcs.empty() && !labels.count(prog.funcs.front().name))
+            labels[prog.funcs.front().name] = out.size();
         if (!has_lr_setup) call("setlr");
         if (!has_sfr_setup) call("setsfr");
         for (auto& g : prog.globals) {
@@ -1454,6 +1593,7 @@ struct Emitter {
         }
         for (auto& f : prog.funcs) {
             log += "; func " + f.name + "\n";
+            if (!labels.count(f.name)) labels[f.name] = out.size();
             for (auto& s : f.body) stmt(s);
         }
         call("brk"); // halt after main: without it the chain runs into the
@@ -1461,12 +1601,15 @@ struct Emitter {
         // Append cmp_ea tables.  They are part of the payload and the launcher
         // copies them together with the code, so their addresses use the
         // execution address (home), just like the community `adr_of table`.
-        for (auto& t : key_tables) {
+        for (size_t ti = 0; ti < key_tables.size(); ++ti) {
+            auto& t = key_tables[ti];
             const uint32_t base = home + (uint32_t)out.size();
             out[t.addr_pos] = (uint8_t)(base & 0xFF);
             out[t.addr_pos + 1] = (uint8_t)((base >> 8) & 0xFF);
             log += "  ; keytable @ [" + hex4(base) + "]\n";
+            data_labels[out.size()] = "keytable_" + std::to_string(ti + 1);
             for (const auto& e : t.entries) {
+                key_words[out.size()] = e.key;
                 emit_le(e.key, 2);
                 size_t pos = out.size();
                 out.push_back(0);
@@ -1475,13 +1618,18 @@ struct Emitter {
             }
         }
         // append string pool
-        for (auto& sp : str_pool) {
+        str_start = out.size();
+        for (size_t si = 0; si < str_pool.size(); ++si) {
+            auto& sp = str_pool[si];
             size_t off = out.size();
             out.insert(out.end(), sp.second.begin(), sp.second.end());
             uint32_t target = data_home + (uint32_t)off;
             out[sp.first] = (uint8_t)(target & 0xFF);
             out[sp.first + 1] = (uint8_t)((target >> 8) & 0xFF);
             log += "  ; str pool -> [" + hex4(target) + "] " + std::to_string(sp.second.size()) + " bytes\n";
+            data_labels[off] = "str_" + std::to_string(si + 1);
+            auto txt = str_text.find(sp.first);
+            if (txt != str_text.end()) data_comments[off] = " \"" + txt->second + "\"";
         }
         // patch gotos
         for (auto& p : patches) {
@@ -1505,19 +1653,19 @@ struct Emitter {
         // 256 bytes is the default; `#pad N` sets another size and `#nopad`
         // turns the buffer off.
         if (pad_size > 0) {
+            pad_start = out.size();
             out.insert(out.end(), (size_t)pad_size, (uint8_t)0);
             log += "  ; null buffer: " + std::to_string(pad_size) + " bytes\n";
         }
         r.ok = !failed;
         if (failed) r.error = first_error.empty() ? "ROP compilation failed" : first_error;
+        // The source-style listing comes first, the notes follow.  It has to
+        // be built before `out` is moved into the result.
+        const std::string listing = asm_listing();
         r.bytes = std::move(out);
         r.base = home;
-        // The low level view of the chain comes first, the notes follow.
-        std::string listing = build_listing(r.bytes, rows, data_home);
-        if (home != data_home)
-            listing = "; payload injected at " + hex4(data_home) + ", executed at " + hex4(home) + "\n" + listing;
         r.log = listing;
-        if (!log.empty()) r.log += log;
+        if (!log.empty()) r.log += "\n; ---- notes ----\n" + log;
         return r;
     }
 };

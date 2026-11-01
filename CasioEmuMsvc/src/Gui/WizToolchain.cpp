@@ -512,9 +512,9 @@ private:
 		AddLog(Sev::Note, wiz::fmt("wrote %s", bin_path_.c_str()));
 
 		// Also write the assembly listing next to the .bin, like wizc does.
-		// The listing is the compiler's disassembly of the emitted chain and
-		// the gadget/label comments, which is what the debugger and the
-		// community examples use.
+		// The compiler writes it in the community ROP source style (`lbl`,
+		// gadget mnemonics, `hex`, `adr(label)`), which is what the community
+		// examples use.
 		asm_path_ = (std::filesystem::path(directory) / (Stem() + ".asm")).string();
 		std::string listing = wiz::fmt("; ROP payload @ %04X (%zu bytes)\n; launcher @ %04X (%zu bytes)\n",
 									   rop_base_, rop_bytes_.size(), rop_launcher_base_, rop_launcher_.size());
