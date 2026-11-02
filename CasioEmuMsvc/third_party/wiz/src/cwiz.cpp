@@ -34,7 +34,7 @@ static const std::set<std::string> CW_KEYWORDS = {
 
 // multi-character operators, longest first
 static const std::vector<std::string> OP_TABLE = {
-    "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+    "...", "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
     "==",  "!=",  "<=", ">=", "<<", ">>", "&&", "||", "+",  "-",  "*",  "/",
     "%",   "&",   "|",  "^",  "~",  "!",  "=",  "<",  ">",  "?",  ":",  ";",
     ",",   ".",   "(",  ")",  "{",  "}",  "[",  "]"};
@@ -299,9 +299,9 @@ static std::vector<Token> lex(const std::string& src) {
 
 // =================================================================== AST
 enum class NK {
-    Num, Str, Ident, Index, Call, Unary, IncDec, Bin, Cond, Assign,
-    Block, DeclStmt, DeclGroup, If, While, DoWhile, For, Return, Break, Continue, ExprStmt,
-    ConstDecl, VarDecl, ArrayDecl, Param, FuncDecl, Program
+    Num, Str, Ident, Index, Call, Unary, IncDec, Bin, Cond, Assign, Sizeof,
+    Block, DeclStmt, DeclGroup, If, While, DoWhile, For, Switch, Case, Return, Break,
+    Continue, ExprStmt, ConstDecl, VarDecl, ArrayDecl, Param, FuncDecl, Program
 };
 
 struct Node;
@@ -318,6 +318,7 @@ struct Sym {
     std::string scope = "global";
     std::string qname;
     int addr = 0;
+    int decl_line = 0;
     Func* func = nullptr;
     int index = 0;
     // initialiser (globals/arrays): 0 = none, 1 = expression node, 2 = list, 3 = string
@@ -461,11 +462,13 @@ private:
     bool at_kw(const std::set<std::string>& kws) const {
         return cur().kind == "kw" && kws.count(cur().sval);
     }
-    bool at_decl_start() const {
-        if (cur().kind != "kw") return false;
-        return TYPES.count(cur().sval) || DECL_QUALIFIERS.count(cur().sval) ||
-               cur().sval == "rom" || cur().sval == "rom8";
+    static bool is_type_start(const Token& tk) {
+        if (tk.kind != "kw") return false;
+        return TYPES.count(tk.sval) || DECL_QUALIFIERS.count(tk.sval) ||
+               tk.sval == "rom" || tk.sval == "rom8";
     }
+    bool at_decl_start() const { return is_type_start(cur()); }
+    bool type_start_at(size_t idx) const { return idx < t.size() && is_type_start(t[idx]); }
     const Token& next() { return t[p++]; }
 
     static std::string show(const Token& tk) {
@@ -478,14 +481,32 @@ private:
         if (!at_op1(op)) {
             const Token& tk = cur();
             std::string hint;
-            if (op == ";") hint = "add ';' at the end of the statement";
-            else if (op == ")") hint = "add a closing ')'";
-            else if (op == "}") hint = "add a closing '}' (or check the braces above)";
-            else if (op == "{") hint = "add '{' to start the block";
-            else if (op == "(") hint = "add '(' after the keyword";
-            else if (op == "]") hint = "add a closing ']'";
-            throw CwizError(fmt("expected '%s' before '%s'", op.c_str(), show(tk).c_str()),
-                            tk.line, tk.col, hint, "syntax.expected-token");
+            std::string code = "syntax.expected-token";
+            std::string before = show(tk);
+            if (op == ";") {
+                hint = "add ';' at the end of the statement";
+                code = "syntax.missing-semicolon";
+            } else if (op == ")") {
+                hint = "add a closing ')'";
+                if (tk.kind == "eof" || (tk.kind == "op" && (tk.sval == ";" || tk.sval == "}"))) {
+                    hint = "add ')' before this point (an opening '(' is not closed)";
+                    code = "syntax.unbalanced-paren";
+                }
+            } else if (op == "}") {
+                hint = "add a closing '}' (or check the braces above)";
+            } else if (op == "{") {
+                hint = "add '{' to start the block";
+            } else if (op == "(") {
+                hint = "add '(' after the keyword";
+            } else if (op == "]") {
+                hint = "add a closing ']'";
+                if (tk.kind == "eof" || (tk.kind == "op" && (tk.sval == ";" || tk.sval == "}"))) {
+                    hint = "add ']' before this point (an opening '[' is not closed)";
+                    code = "syntax.unbalanced-bracket";
+                }
+            }
+            throw CwizError(fmt("expected '%s' before %s", op.c_str(), before.c_str()),
+                            tk.line, tk.col, hint, code);
         }
         next();
     }
@@ -543,6 +564,10 @@ private:
             return rom_decl();
         }
         if (at_decl_start()) return type_decl(global_scope);
+        if (at_op1("}"))
+            throw CwizError("unmatched '}'", tk.line, tk.col,
+                            "remove the extra '}', or add the '{' that it closes",
+                            "syntax.unmatched-brace");
         std::string hint;
         if (tk.kind == "ident") {
             hint = "a declaration starts with a type, for example 'int " + tk.sval + ";'";
@@ -753,20 +778,14 @@ private:
     NodeP stmt() {
         Token tk = cur();
         if (at_op1("{")) return block();
-        if (at_kw1("switch"))
-            throw CwizError("switch is not supported", tk.line, tk.col,
-                            "use if/else chains; they compile to the same branches",
-                            "syntax.unsupported-switch");
+        if (at_kw1("switch")) return switch_stmt();
         if (at_kw1("case") || at_kw1("default"))
             throw CwizError("case/default only make sense inside a switch", tk.line, tk.col,
-                            "use if/else instead of switch", "syntax.unsupported-switch");
+                            "move this label inside a switch body",
+                            "syntax.case-outside-switch");
         if (at_kw1("goto"))
             throw CwizError("goto is not supported", tk.line, tk.col,
                             "use while/for with break/continue", "syntax.unsupported-goto");
-        if (at_kw1("sizeof"))
-            throw CwizError("sizeof is not supported", tk.line, tk.col,
-                            "every int is 2 bytes and every char is 1 byte",
-                            "syntax.unsupported-sizeof");
         if (at_kw1("if")) return if_stmt();
         if (at_kw1("while")) return while_stmt();
         if (at_kw1("do")) return do_stmt();
@@ -896,6 +915,58 @@ private:
         NodeP n = mk(NK::DoWhile, tk.line, tk.col);
         n->a = body;
         n->b = cond;
+        return n;
+    }
+
+    // switch (expr) { case C: ... default: ... }
+    //
+    // A case node carries its constant `value` (or `sval == "default"`) and the
+    // statements that follow it.  Falling through is preserved by emitting the
+    // bodies in source order; break leaves through the enclosing switch's end.
+    NodeP switch_stmt() {
+        Token tk = next();
+        expect_op("(");
+        NodeP cond = expr();
+        expect_op(")");
+        NodeP n = mk(NK::Switch, tk.line, tk.col);
+        n->a = cond;
+        expect_op("{");
+        NodeP current;
+        while (!at_op1("}")) {
+            if (at_kind("eof"))
+                throw CwizError("unterminated switch", tk.line, tk.col,
+                                "add '}' to close the switch opened here",
+                                "syntax.unterminated-switch");
+            if (at_kw1("case")) {
+                Token ct = next();
+                NodeP c = mk(NK::Case, ct.line, ct.col);
+                c->a = expr();
+                // `case A ... B:` (GNU range) is not part of the C subset.
+                if (at_op1("..."))
+                    throw CwizError("case ranges are not supported", cur().line, cur().col,
+                                    "write one case per value", "syntax.case-range");
+                expect_op(":");
+                n->list.push_back(c);
+                current = c;
+                continue;
+            }
+            if (at_kw1("default")) {
+                Token dt = next();
+                NodeP c = mk(NK::Case, dt.line, dt.col);
+                c->sval = "default";
+                expect_op(":");
+                n->list.push_back(c);
+                current = c;
+                continue;
+            }
+            if (!current)
+                throw CwizError("a statement inside switch must follow case/default",
+                                cur().line, cur().col,
+                                "add 'case value:' or 'default:' before this statement",
+                                "syntax.switch-statement");
+            current->list.push_back(stmt());
+        }
+        expect_op("}");
         return n;
     }
 
@@ -1090,6 +1161,21 @@ private:
 
     NodeP unary() {
         Token tk = cur();
+        // sizeof is an expression in C, not a statement.  `sizeof(type)` and
+        // `sizeof expr` are both resolved by the analyser, where symbol sizes
+        // are known (an array's size is its element count * element width).
+        if (at_kw1("sizeof")) {
+            next();
+            NodeP n = mk(NK::Sizeof, tk.line, tk.col);
+            if (at_op1("(") && type_start_at(p + 1)) {
+                next();
+                n->type = type_name();
+                expect_op(")");
+            } else {
+                n->a = unary();
+            }
+            return n;
+        }
         if (at_op1("-") || at_op1("+") || at_op1("~") || at_op1("!")) {
             next();
             NodeP n = mk(NK::Unary, tk.line, tk.col);
@@ -1555,6 +1641,122 @@ int wait_key() {
         if (k != -1) { return k; }
     }
 }
+
+// ---- strings (ported from the upstream Wiz PRELUDE) -------------------
+int strlen(char *s) {
+    int n = 0;
+    while (_rpeek(s + n) != 0) { n = n + 1; }
+    return n;
+}
+int strcmp(char *a, char *b) {
+    while (1) {
+        int ca = _rpeek(a);
+        int cb = _rpeek(b);
+        if (ca != cb) { return ca - cb; }
+        if (ca == 0) { return 0; }
+        a = a + 1;
+        b = b + 1;
+    }
+}
+char *strcpy(char *dst, char *src) {
+    int i = 0;
+    while (1) {
+        int c = _rpeek(src + i);
+        poke(dst + i, c);
+        if (c == 0) { break; }
+        i = i + 1;
+    }
+    return dst;
+}
+int atoi(char *s) {
+    int n = 0;
+    int neg = 0;
+    int c = _rpeek(s);
+    if (c == 45) {
+        neg = 1;
+        s = s + 1;
+        c = _rpeek(s);
+    }
+    while (c >= 48 && c <= 57) {
+        n = n * 10 + (c - 48);
+        s = s + 1;
+        c = _rpeek(s);
+    }
+    if (neg) { return 0 - n; }
+    return n;
+}
+char *itoa(char *buf, int n, int base) {
+    if (n == -32768) {
+        poke(buf, 45); poke(buf + 1, 51); poke(buf + 2, 50); poke(buf + 3, 55);
+        poke(buf + 4, 54); poke(buf + 5, 56); poke(buf + 6, 0);
+        return buf;
+    }
+    int pos = 0;
+    int neg = 0;
+    if (n < 0) { neg = 1; n = 0 - n; }
+    if (n == 0) { poke(buf, 48); poke(buf + 1, 0); return buf; }
+    int d = n;
+    while (d > 0) {
+        int r = d % base;
+        d = d / base;
+        if (r < 10) { poke(buf + 7 + pos, 48 + r); }
+        else { poke(buf + 7 + pos, 87 + r); }
+        pos = pos + 1;
+    }
+    if (neg) { poke(buf + 7 + pos, 45); pos = pos + 1; }
+    int i = 0;
+    while (i < pos) {
+        poke(buf + i, peek(buf + 7 + pos - 1 - i));
+        i = i + 1;
+    }
+    poke(buf + pos, 0);
+    return buf;
+}
+
+// ---- getpixel --------------------------------------------------------
+// Upstream implements this in assembly; here it reads the shadow buffer,
+// which is exactly what pixel() writes, so the result is the same before
+// and after render().
+int getpixel(int x, int y) {
+    if (x < 0 || x > 191 || y < 0 || y >= _ROWS) { return 0; }
+    int a = SB2 + (y + _ROW_OFF) * 32 + (x >> 3);
+    if (peek(a) & (128 >> (x & 7))) { return 1; }
+    return 0;
+}
+void clear_rect(int x, int y, int w, int h, int c = 0) {
+    int j = 0;
+    while (j < h) {
+        int i = 0;
+        while (i < w) {
+            pixel(x + i, y + j, c);
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+}
+void invert_rect(int x, int y, int w, int h) {
+    int j = 0;
+    while (j < h) {
+        int i = 0;
+        while (i < w) {
+            pixel(x + i, y + j, !getpixel(x + i, y + j));
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+}
+// Forward copy: the caller must choose an order that is safe for overlap.
+void copy_rect(int x, int y, int w, int h, int x2, int y2) {
+    int j = 0;
+    while (j < h) {
+        int i = 0;
+        while (i < w) {
+            pixel(x2 + i, y2 + j, getpixel(x + i, y + j));
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+}
 )CWIZ";
 
 static std::string prelude_source() {
@@ -1604,12 +1806,36 @@ static std::vector<NodeP> select_prelude(const NodeP& user_prog, const NodeP& pr
 }
 
 // =================================================================== sema
-static const std::map<std::string, std::pair<int, int>> CW_BUILTINS = {
-    {"pixel", {2, 3}},   {"clear", {0, 0}},    {"clearRender", {0, 0}},    {"key", {0, 0}},     {"delay", {1, 1}},
-    {"peek", {1, 1}},    {"poke", {2, 2}},     {"_hspan", {4, 4}},  {"key_down", {1, 1}},
-    {"key_hit", {1, 1}}, {"buffered", {1, 1}}, {"flip", {0, 0}},    {"_rpeek", {1, 1}},
-    {"wipe", {0, 0}},
-    {"exit", {0, 0}},     {"render", {0, 0}}, {"renderStatus", {0, 0}}};
+struct BuiltinInfo {
+    int lo = 0;
+    int hi = 0;
+    const char* sig = "";
+    // Bit i set = argument i is an address, where a string literal (a ROM
+    // address in this language) is meaningful.  Everywhere else a string is a
+    // type error, which catches pixel("x", 0) and friends.
+    unsigned addr_args = 0;
+};
+
+static const std::map<std::string, BuiltinInfo> CW_BUILTINS = {
+    {"pixel", {2, 3, "pixel(x, y, c = 1)", 0}},
+    {"clear", {0, 0, "clear()", 0}},
+    {"clearRender", {0, 0, "clearRender()", 0}},
+    {"key", {0, 0, "key()", 0}},
+    {"delay", {1, 1, "delay(n)", 0}},
+    {"peek", {1, 1, "peek(addr)", 1u << 0}},
+    {"poke", {2, 2, "poke(addr, value)", 1u << 0}},
+    {"_hspan", {4, 4, "_hspan(x0, x1, y, c)", 0}},
+    {"key_down", {1, 1, "key_down(k)", 0}},
+    {"key_hit", {1, 1, "key_hit(k)", 0}},
+    {"buffered", {1, 1, "buffered(on)", 0}},
+    {"flip", {0, 0, "flip()", 0}},
+    {"_rpeek", {1, 1, "_rpeek(addr)", 1u << 0}},
+    {"wipe", {0, 0, "wipe()", 0}},
+    {"recover", {0, 0, "recover()", 0}},
+    {"reset", {0, 0, "reset()", 0}},
+    {"exit", {0, 0, "exit()", 0}},
+    {"render", {0, 0, "render()", 0}},
+    {"renderStatus", {0, 0, "renderStatus()", 0}}};
 static const int PRINT_MIN = 3;
 
 struct Analyzed {
@@ -1661,6 +1887,7 @@ private:
     Func* fn = nullptr;
     std::vector<std::pair<std::string, Sym*>> locals;
     int loop_depth = 0;
+    int switch_depth = 0;
     std::map<std::string, std::set<std::string>> call_graph;
 
     Sym* new_sym(const std::string& kind, const std::string& name) {
@@ -1699,8 +1926,20 @@ private:
     }
 
     void declare_global_name(const std::string& name, const NodeP& node) {
-        if (find_in(globals, name) || find_in(arrays, name) || find_in(tables, name) ||
-            an.funcs.count(name) || consts.count(name))
+        // A second global with the same name is a common copy/paste mistake, so
+        // it gets its own code and points at the first declaration.
+        Sym* prior = find_in(globals, name);
+        if (!prior) prior = find_in(arrays, name);
+        if (!prior) prior = find_in(tables, name);
+        if (prior) {
+            std::string where = prior->decl_line > 0
+                                    ? fmt(" (first declared at line %d)", prior->decl_line)
+                                    : "";
+            err(fmt("duplicate global '%s'%s", name.c_str(), where.c_str()), node,
+                "rename one of the globals, or remove this declaration",
+                "sema.duplicate-global");
+        }
+        if (an.funcs.count(name) || consts.count(name))
             err(fmt("redefinition of '%s'", name.c_str()), node,
                 "rename one of the declarations, or remove this one", "sema.redefinition");
     }
@@ -1779,6 +2018,7 @@ private:
             declare_global_name(d->sval, d);
             Sym* sym = new_sym("var", d->sval);
             sym->vtype = d->type.empty() ? "int" : d->type;
+            sym->decl_line = d->line;
             if (d->a) sym->init_kind = 1, sym->init_node = d->a;
             globals.push_back({d->sval, sym});
             an.globals.push_back(sym);
@@ -1814,6 +2054,7 @@ private:
             Sym* sym = new_sym(d->kind, d->sval);
             sym->size = (int)size;
             sym->elem_bytes = elem_bytes;
+            sym->decl_line = d->line;
             if (d->init_is_str) {
                 sym->init_kind = 3;
                 sym->init_cps = d->cps;
@@ -1887,6 +2128,7 @@ private:
             f->locals.push_back(sym);
         }
         loop_depth = 0;
+        switch_depth = 0;
         std::vector<NodeP> all;
         walk(f->body, all);
         std::set<std::string> calls;
@@ -1904,6 +2146,7 @@ private:
         Sym* sym = new_sym("var", name);
         sym->vtype = node->type.empty() ? "int" : node->type;
         sym->scope = "local";
+        sym->decl_line = node->line;
         sym->qname = fn->name + "." + name;
         sym->func = fn;
         locals.push_back({name, sym});
@@ -1945,6 +2188,7 @@ private:
         sym->vtype = node->type.empty() ? "int" : node->type;
         sym->size = (int)size;
         sym->elem_bytes = elem_bytes;
+        sym->decl_line = node->line;
         sym->scope = "local";
         sym->qname = fn->name + "." + node->sval;
         sym->func = fn;
@@ -2019,6 +2263,40 @@ private:
                 stmt(s->d);
                 loop_depth--;
                 return;
+            case NK::Switch: {
+                if (expr(s->a) == "void")
+                    err("switch condition has type void", s,
+                        "use a value-returning expression", "sema.void-expression");
+                std::map<long long, int> seen;
+                int defaults = 0;
+                for (const NodeP& c : s->list) {
+                    if (c->k != NK::Case) continue;
+                    if (c->sval == "default") {
+                        if (++defaults > 1)
+                            err("duplicate 'default' in switch", c,
+                                "a switch may have at most one default label",
+                                "sema.duplicate-default");
+                        continue;
+                    }
+                    long long v = const_eval(c->a);
+                    c->value = v;  // codegen dispatches on the folded value
+                    auto it = seen.find(v);
+                    if (it != seen.end())
+                        err(fmt("duplicate case value %lld in switch", v), c,
+                            fmt("case %lld is already used at line %d; use a different value",
+                                v, it->second),
+                            "sema.duplicate-case");
+                    seen[v] = c->line;
+                }
+                switch_depth++;
+                for (const NodeP& c : s->list)
+                    for (const NodeP& st : c->list) stmt(st);
+                switch_depth--;
+                return;
+            }
+            case NK::Case:
+                err("case/default outside a switch", s,
+                    "move this label inside a switch body", "sema.case-outside-switch");
             case NK::Return:
                 if (s->a) {
                     std::string t = expr(s->a);
@@ -2038,12 +2316,18 @@ private:
                 }
                 return;
             case NK::Break:
+                // break is valid inside a loop or a switch; continue only in a loop.
+                if (loop_depth == 0 && switch_depth == 0)
+                    err("'break' outside a loop or switch", s,
+                        "move it inside while/do/for/switch, or remove it",
+                        "sema.break-outside-loop");
+                return;
             case NK::Continue:
                 if (loop_depth == 0)
-                    err(fmt("'%s' outside a loop",
-                            s->k == NK::Break ? "break" : "continue"),
-                        s, "move it inside while/do/for, or remove it",
-                        "sema.break-outside-loop");
+                    err("'continue' outside a loop", s,
+                        "continue skips to the next loop iteration; move it inside "
+                        "while/do/for, or remove it",
+                        "sema.continue-outside-loop");
                 return;
             default:
                 err("unsupported statement", s);
@@ -2096,6 +2380,33 @@ private:
                 return e->etype = "int";
             case NK::IncDec:
                 return e->etype = lvalue(e->a, true);
+            case NK::Sizeof: {
+                long long bytes = 0;
+                if (!e->type.empty()) {
+                    if (e->type == "void")
+                        err("sizeof(void) has no meaning", e,
+                            "use sizeof(int), sizeof(char) or sizeof(expr)",
+                            "sema.sizeof-void");
+                    bytes = type_bytes(e->type);
+                } else {
+                    std::string t = expr(e->a);
+                    bytes = type_bytes(t);
+                    if (e->a->k == NK::Str) {
+                        bytes = (long long)e->a->cps.size() + 1;  // the terminating NUL
+                    } else if (e->a->k == NK::Ident && e->a->sym) {
+                        Sym* s = e->a->sym;
+                        if (s->kind == "array" || s->kind == "rom" || s->kind == "rom8")
+                            bytes = (long long)s->elem_bytes * s->size;
+                        else if (s->kind == "const")
+                            bytes = type_bytes(s->vtype);
+                    }
+                }
+                // Fold immediately: the rest of the compiler only sees a number.
+                e->k = NK::Num;
+                e->value = bytes;
+                e->a.reset();
+                return e->etype = "int";
+            }
             case NK::Bin: {
                 std::string ta = expr(e->a);
                 std::string tb = expr(e->b);
@@ -2241,27 +2552,37 @@ private:
         }
         auto bit = CW_BUILTINS.find(name);
         if (bit != CW_BUILTINS.end()) {
-            int lo = bit->second.first, hi = bit->second.second;
+            const BuiltinInfo& bi = bit->second;
+            int lo = bi.lo, hi = bi.hi;
             int n = (int)c->list.size();
             if (!(lo <= n && n <= hi)) {
-                std::string expected = (lo == hi)
-                    ? fmt("%d", lo)
-                    : fmt("%d-%d", lo, hi);
+                std::string expected = (lo == hi) ? fmt("%d", lo) : fmt("%d-%d", lo, hi);
                 if (lo == hi)
-                    err(fmt("%s() takes %d argument%s, got %d", name.c_str(), lo,
-                            lo == 1 ? "" : "s", n),
-                        c, "pass exactly " + expected + " argument(s)", "sema.argument-count");
-                err(fmt("%s() takes %d-%d arguments, got %d", name.c_str(), lo, hi, n), c,
-                    "pass " + expected + " argument(s)", "sema.argument-count");
+                    err(fmt("%s() takes %d argument%s, got %d (expected %s)", name.c_str(), lo,
+                            lo == 1 ? "" : "s", n, bi.sig),
+                        c, fmt("pass exactly %s argument(s): %s", expected.c_str(), bi.sig),
+                        "sema.argument-count");
+                err(fmt("%s() takes %d-%d arguments, got %d (expected %s)", name.c_str(), lo, hi,
+                        n, bi.sig),
+                    c, fmt("pass %s argument(s): %s", expected.c_str(), bi.sig),
+                    "sema.argument-count");
             }
             if (name == "exit" && target.rom_seg == 0)
                 err("exit() exists only for the cwapp target", c,
                     "use it only in a #cwapp program", "sema.builtin-target");
-            for (auto& a : c->list) {
-                if (expr(a) == "void")
+            for (size_t i = 0; i < c->list.size(); i++) {
+                NodeP a = c->list[i];
+                std::string t = expr(a);
+                if (t == "void")
                     err("a void function cannot be used as a call argument", a,
                         "remove the call, or call a function that returns a value",
                         "sema.void-expression");
+                bool addr_ok = (bi.addr_args >> i) & 1u;
+                if (!addr_ok && a->k == NK::Str)
+                    err(fmt("%s() argument %d expects int, got a string", name.c_str(),
+                            (int)i + 1),
+                        a, fmt("%s: pass a 16-bit integer here", bi.sig),
+                        "sema.argument-type");
             }
             c->kind = "builtin";
             c->builtin = name;
@@ -2365,6 +2686,7 @@ private:
     std::vector<std::pair<Sym*, NodeP>> global_inits;
     std::vector<std::pair<std::string, std::string>> loops;  // (continue, break)
     std::vector<std::unique_ptr<Sym>> tmp_syms;
+    int switch_tmp = 0;
 
     void allocate() {
         next_addr = target.var_base;
@@ -3070,6 +3392,41 @@ private:
                 loops.pop_back();
                 return;
             }
+            case NK::Switch: {
+                // Evaluate the selector once, then dispatch to the matching
+                // case label.  Bodies follow in source order, so C fallthrough
+                // works without extra jumps; break targets the shared end.
+                const int tmp = temp_addr("switch." + std::to_string(++switch_tmp));
+                ex(s->a);
+                emit(fmt("ST ER0, %d", tmp));
+                const std::string end = new_label();
+                std::vector<std::string> labels;
+                std::string default_label = end;
+                for (const NodeP& c : s->list) {
+                    labels.push_back(new_label());
+                    if (c->k == NK::Case && c->sval == "default")
+                        default_label = labels.back();
+                }
+                for (size_t i = 0; i < s->list.size(); i++) {
+                    const NodeP& c = s->list[i];
+                    if (c->sval == "default") continue;
+                    emit(fmt("L ER0, %d", tmp));
+                    const_(2, c->value);
+                    emit("CMP R0, R2");
+                    emit("CMPC R1, R3");
+                    emit("JEQ " + labels[i]);
+                }
+                emit("B " + default_label);
+                const std::string cont = loops.empty() ? std::string() : loops.back().first;
+                loops.push_back({cont, end});
+                for (size_t i = 0; i < s->list.size(); i++) {
+                    label(labels[i]);
+                    for (const NodeP& st : s->list[i]->list) stmt(st);
+                }
+                loops.pop_back();
+                label(end);
+                return;
+            }
             case NK::Return:
                 if (s->a) ex(s->a);
                 else const_(0, 0);
@@ -3146,6 +3503,7 @@ CwizResult compile_cwiz(const std::string& src, const Target& target) {
     std::map<std::string, long long> predef;
     for (auto& kv : key_consts(target.name)) predef[kv.first] = kv.second;
     predef["_ROWS"] = target.rows;
+    predef["_ROW_OFF"] = target.row_off;
 
     Analyzed an = Analyzer(merged, target, predef).run();
     Codegen cg(an);

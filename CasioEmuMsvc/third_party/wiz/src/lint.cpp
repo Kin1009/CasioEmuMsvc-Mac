@@ -686,7 +686,9 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
             std::string name = t.substr(s, p - s);
             if (!name.empty() && !known_directives.count(name)) {
                 std::vector<std::string> candidates(known_directives.begin(), known_directives.end());
-                std::string hint = did_you_mean(name, candidates);
+                std::string hit = closest_match(name, candidates);
+                std::string hint =
+                    hit.empty() ? std::string() : "did you mean '#" + hit + "'?";
                 add(out, severity_of("preproc/unknown-directive"), (int)i + 1, (int)s + 1,
                     (int)p + 1, "preproc/unknown-directive",
                     "unknown directive '#" + name + "'", hint);

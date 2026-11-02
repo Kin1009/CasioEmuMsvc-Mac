@@ -76,6 +76,16 @@ static const std::map<std::string, std::pair<int, int>> BUILTINS = {
     {"render", {0, 0}}, {"renderStatus", {0, 0}}, {"_rpeek", {1, 1}}, {"exit", {0, 0}},
 };
 
+static const std::map<std::string, const char*> BUILTIN_SIGS = {
+    {"pixel", "pixel(x, y, c = 1)"}, {"clear", "clear()"},
+    {"clearRender", "clearRender()"}, {"key", "key()"},
+    {"delay", "delay(n)"},           {"peek", "peek(addr)"},
+    {"poke", "poke(addr, value)"},   {"_hspan", "_hspan(x0, x1, y, c)"},
+    {"key_down", "key_down(k)"},     {"key_hit", "key_hit(k)"},
+    {"buffered", "buffered(on)"},    {"flip", "flip()"},
+    {"render", "render()"},          {"renderStatus", "renderStatus()"},
+    {"_rpeek", "_rpeek(addr)"},      {"exit", "exit()"}};
+
 static const std::set<std::string> KEYWORDS = {
     "def", "if", "elif", "else", "while", "for", "in", "range", "return", "break",
     "continue", "pass", "global", "and", "or", "not", "True", "False", "const", "rom", "rom8"};
@@ -93,6 +103,41 @@ static const std::vector<std::pair<std::string, std::string>> PRELUDE = {
     {"rand",
      "\n_seed = 12345\ndef srand(s):\n    global _seed\n    _seed = s\ndef rand(n):\n"
      "    global _seed\n    _seed = _seed * 25173 + 13849\n    return ((_seed >> 1) & 0x7FFF) % n\n"},
+    {"strings",
+     "\ndef strlen(s):\n    n = 0\n    while _rpeek(s + n) != 0:\n        n += 1\n    return n\n"
+     "\ndef strcmp(a, b):\n    while True:\n        ca = _rpeek(a)\n        cb = _rpeek(b)\n"
+     "        if ca != cb:\n            return ca - cb\n        if ca == 0:\n            return 0\n"
+     "        a += 1\n        b += 1\n"
+     "\ndef strcpy(dst, src):\n    i = 0\n    while True:\n        c = _rpeek(src + i)\n"
+     "        poke(dst + i, c)\n        if c == 0:\n            break\n        i += 1\n    return dst\n"
+     "\ndef atoi(s):\n    n = 0\n    neg = 0\n    c = _rpeek(s)\n    if c == 45:\n"
+     "        neg = 1\n        s += 1\n        c = _rpeek(s)\n"
+     "    while c >= 48 and c <= 57:\n        n = n * 10 + (c - 48)\n        s += 1\n"
+     "        c = _rpeek(s)\n    if neg:\n        return 0 - n\n    return n\n"
+     "\ndef itoa(buf, n, base):\n    if n == -32768:\n        poke(buf, 45)\n        poke(buf + 1, 51)\n"
+     "        poke(buf + 2, 50)\n        poke(buf + 3, 55)\n        poke(buf + 4, 54)\n"
+     "        poke(buf + 5, 56)\n        poke(buf + 6, 0)\n        return buf\n"
+     "    pos = 0\n    neg = 0\n    if n < 0:\n        neg = 1\n        n = 0 - n\n"
+     "    if n == 0:\n        poke(buf, 48)\n        poke(buf + 1, 0)\n        return buf\n"
+     "    d = n\n    while d > 0:\n        r = d % base\n        d = d / base\n"
+     "        if r < 10:\n            poke(buf + 7 + pos, 48 + r)\n"
+     "        else:\n            poke(buf + 7 + pos, 87 + r)\n        pos += 1\n"
+     "    if neg:\n        poke(buf + 7 + pos, 45)\n        pos += 1\n"
+     "    i = 0\n    while i < pos:\n        poke(buf + i, peek(buf + 7 + pos - 1 - i))\n"
+     "        i += 1\n    poke(buf + pos, 0)\n    return buf\n"},
+    {"getpixel",
+     "\ndef getpixel(x, y):\n    if x < 0 or x > 191 or y < 0 or y >= @ROWS@:\n        return 0\n"
+     "    a = SB2 + (y + @ROW_OFF@) * 32 + (x >> 3)\n"
+     "    if peek(a) & (128 >> (x & 7)):\n        return 1\n    return 0\n"},
+    {"rects",
+     "\ndef clear_rect(x, y, w, h, c=0):\n    j = 0\n    while j < h:\n        i = 0\n"
+     "        while i < w:\n            pixel(x + i, y + j, c)\n            i += 1\n        j += 1\n"
+     "\ndef invert_rect(x, y, w, h):\n    j = 0\n    while j < h:\n        i = 0\n"
+     "        while i < w:\n            pixel(x + i, y + j, not getpixel(x + i, y + j))\n"
+     "            i += 1\n        j += 1\n"
+     "\ndef copy_rect(x, y, w, h, x2, y2):\n    j = 0\n    while j < h:\n        i = 0\n"
+     "        while i < w:\n            pixel(x2 + i, y2 + j, getpixel(x + i, y + j))\n"
+     "            i += 1\n        j += 1\n"},
     {"memoryRead",
      "\ndef memoryRead(addr, len):\n    if len == 1:\n        return peek(addr)\n"
      "    if len == 2:\n        return peek(addr) + (peek(addr + 1) << 8)\n    return 0\n"},
@@ -1209,6 +1254,7 @@ std::vector<NodeP> Compiler::add_prelude(std::vector<NodeP> prog,
         if (kv.first == "vn_f4") text = prelude_vn_f4();
         text = replace_all(text, "@ROWS@", std::to_string(target.rows));
         text = replace_all(text, "@LAST@", std::to_string(target.rows - 1));
+        text = replace_all(text, "@ROW_OFF@", std::to_string(target.row_off));
         if (target.rom_seg == 0) text = replace_all(text, "_rpeek(", "peek(");
         auto sp = Parser(lex(text), &consts).program();
         snippets.push_back({kv.first, sp});
@@ -1690,13 +1736,17 @@ void Compiler::call(const NodeP& e) {
     auto bit = BUILTINS.find(name);
     if (bit != BUILTINS.end()) {
         int lo = bit->second.first, hi = bit->second.second;
-        if (!((int)e->args.size() >= lo && (int)e->args.size() <= hi))
-            throw WizError(fmt("%s() takes %d-%d arguments, got %d", name.c_str(), lo, hi,
-                               (int)e->args.size()),
-                           e->line, 0,
-                           lo == hi ? fmt("pass exactly %d argument(s)", lo)
-                                    : fmt("pass %d-%d argument(s)", lo, hi),
-                           "sema.argument-count");
+        if (!((int)e->args.size() >= lo && (int)e->args.size() <= hi)) {
+            auto sig = BUILTIN_SIGS.find(name);
+            std::string expected = sig == BUILTIN_SIGS.end() ? name + "()" : sig->second;
+            std::string arity = lo == hi ? fmt("%d argument%s", lo, lo == 1 ? "" : "s")
+                                         : fmt("%d-%d arguments", lo, hi);
+            std::string hint = lo == hi ? fmt("pass exactly %d argument(s): ", lo)
+                                        : fmt("pass %d-%d argument(s): ", lo, hi);
+            throw WizError(fmt("%s() takes %s, got %d (expected %s)", name.c_str(),
+                               arity.c_str(), (int)e->args.size(), expected.c_str()),
+                           e->line, 0, hint + expected, "sema.argument-count");
+        }
         for (auto& a : e->args) {
             ex(a);
             emit("PUSH ER0");

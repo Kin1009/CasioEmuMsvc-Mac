@@ -693,7 +693,9 @@ private:
             static const std::vector<std::string> known = {
                 "if", "ifdef", "ifndef", "elif", "else", "endif", "define", "undef",
                 "pragma", "error", "include", "for", "cwapp", "org", "binary", "slot"};
-            std::string hint = did_you_mean(name, known);
+            std::string hit = closest_match(name, known);
+            std::string hint =
+                hit.empty() ? std::string() : "did you mean '#" + hit + "'?";
             throw CwizError("unknown directive '#" + name + "'", line, 0, hint,
                             "preproc.unknown-directive");
         }

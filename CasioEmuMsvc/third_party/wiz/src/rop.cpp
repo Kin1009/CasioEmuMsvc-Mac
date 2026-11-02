@@ -733,6 +733,7 @@ struct Emitter {
     std::map<std::string, uint32_t> alloc;
     uint32_t next_alloc = 0xE800;
     std::map<std::string, size_t> labels;
+    std::set<std::string> explicit_labels;  // source labels, for duplicate detection
     std::vector<std::pair<size_t, std::string>> patches;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
     std::map<size_t, std::string> str_text;   // pointer position -> source text
@@ -1358,7 +1359,14 @@ struct Emitter {
                 return;
             }
             case Stmt::Goto: jump_label(s->name, "goto " + s->name); return;
-            case Stmt::Label: labels[s->name] = out.size(); log += "; " + s->name + "\n"; return;
+            case Stmt::Label:
+                if (!explicit_labels.insert(s->name).second) {
+                    report_error("duplicate label '" + s->name + "'", "E107");
+                    return;
+                }
+                labels[s->name] = out.size();
+                log += "; " + s->name + "\n";
+                return;
             case Stmt::Asm:
                 for (auto& l : s->asm_lines) {
                     log += "  ; asm " + l + "\n";
@@ -1580,6 +1588,18 @@ struct Emitter {
                 has_sfr_setup = has_sfr_setup || n == "setsfr";
             }
         }
+        // Names must be unique: a second global would silently share the first
+        // one's address, and a second function would shadow the first body.
+        {
+            std::set<std::string> seen_globals;
+            for (const auto& g : prog.globals)
+                if (!seen_globals.insert(g.name).second)
+                    report_error("duplicate global '" + g.name + "'", "E109");
+            std::set<std::string> seen_funcs;
+            for (const auto& f : prog.funcs)
+                if (!f.name.empty() && !seen_funcs.insert(f.name).second)
+                    report_error("duplicate function '" + f.name + "'", "E110");
+        }
         // This is the exact hdcompiler/RAC preamble.  setlr_pc is a different
         // gadget and does not reproduce the working RAC chain's startup.
         // The first function starts at offset 0, so its label goes before the
@@ -1639,7 +1659,11 @@ struct Emitter {
         // patch gotos
         for (auto& p : patches) {
             auto it = labels.find(p.second);
-            if (it == labels.end()) { log += "  ; warning: label " + p.second + " not found\n"; continue; }
+            if (it == labels.end()) {
+                report_error("undefined label '" + p.second + "' (used by goto or keytable)",
+                             "E108");
+                continue;
+            }
             uint32_t target = home + (uint32_t)it->second;
             // "sp = er6, pop er8" (and the other branch gadgets) load PC from
             // the stored word after pre-incrementing the stack pointer, so a
@@ -1720,12 +1744,22 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
     std::string out;
     std::istringstream in(src);
     std::string line;
+    int lineno = 0;
     while (std::getline(in, line)) {
+        ++lineno;
         size_t i = line.find_first_not_of(" \t");
         if (i != std::string::npos && line[i] == '#') {
             std::istringstream ls(line.substr(i + 1));
             std::string d; ls >> d;
             std::string dlow = lower(d);
+            static const std::vector<std::string> known = {
+                "rop", "for", "org", "launcher", "pad", "nopad"};
+            if (dlow != "rop" && !contains(known, dlow)) {
+                std::string hit = closest_match(dlow, known);
+                std::string hint = hit.empty() ? std::string() : " (did you mean '#" + hit + "'?)";
+                throw std::runtime_error(fmt("line %d: unknown ROP directive '#%s'%s",
+                                             lineno, d.c_str(), hint.c_str()));
+            }
             if (dlow == "for") {
                 std::string m; ls >> m;
                 std::string ml = lower(m);

@@ -470,3 +470,43 @@ __wipe_l:
     BNE __wipe_l
 __wipe_h:
     B __wipe_h
+
+; reset(): jump to the stock reset stub at 0:A1CE.
+_RESET_ADDR EQU 0A1CEH
+__reset:
+    B _RESET_ADDR
+
+; recover(): wipe RAM except the DBD0..DBDF integrity span, then reset.
+; Clears D16C..DBCF, DBE0..FFFF, then D000..D16B last. Register-only.
+__recover:
+    MOV R0, #6CH
+    MOV R1, #0D1H
+    MOV R2, #64H
+    MOV R3, #0AH
+__rec1:
+    MOV R4, #0
+    ST R4, [ER0]
+    ADD ER0, #1
+    ADD ER2, #-1
+    BNE __rec1
+    MOV R0, #0E0H
+    MOV R1, #0DBH
+    MOV R2, #20H
+    MOV R3, #24H
+__rec2:
+    MOV R4, #0
+    ST R4, [ER0]
+    ADD ER0, #1
+    ADD ER2, #-1
+    BNE __rec2
+    MOV R0, #0
+    MOV R1, #0D0H
+    MOV R2, #6CH
+    MOV R3, #01H
+__rec3:
+    MOV R4, #0
+    ST R4, [ER0]
+    ADD ER0, #1
+    ADD ER2, #-1
+    BNE __rec3
+    B __reset
