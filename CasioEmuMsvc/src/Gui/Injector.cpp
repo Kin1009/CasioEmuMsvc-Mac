@@ -25,7 +25,7 @@
 #include <string>
 #include <thread>
 
-Injector::Injector() : UIWindow("Rop"), needsReload(false), isReloading(false), isShuttingDown(false) {
+Injector::Injector() : UIWindow("Payload"), needsReload(false), isReloading(false), isShuttingDown(false) {
 	injectors.push_back(InjectorData());
 	injectionFilePath = ThemeManager::Instance().Settings().injectionFilePath;
 	InitCustomInjectionsFile();
