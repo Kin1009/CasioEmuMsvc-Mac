@@ -18,6 +18,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace casioemu {
@@ -117,6 +118,14 @@ namespace casioemu {
 		std::unordered_map<SDL_Keycode, size_t> keyboard_map;
 		std::unordered_map<SDL_Keycode, size_t> held_keyboard_keys;
 		size_t keyboard_button_holds[BUTTON_SLOT_COUNT]{};
+		// Fingers currently down, keyed by SDL_FingerID.  Button state alone is
+		// not enough: a finger that slides off its button before lifting leaves
+		// that button "pressed" until the next release, so only this set can
+		// answer "are any fingers still on the glass?".
+		std::unordered_set<SDL_FingerID> active_fingers;
+		// Set during Initialise() only when Return had to be aliased to Space
+		// because the model has no explicit Return key binding.
+		bool return_alias_active = false;
 
 		bool p0, p1, p146;
 
@@ -145,6 +154,7 @@ namespace casioemu {
 		void StartInject();
 		void StoreKeyLog();
 		void ReleaseAll();
+		void ReleaseAllIfNoInputHeld();
 		void RecalculateKI();
 		void RecalculateGhost();
 		void RecalculateEmuInput(); // Declaration for new function
@@ -180,6 +190,7 @@ namespace casioemu {
 		}
 		void ReleaseKeyboardKeys() {
 			held_keyboard_keys.clear();
+			active_fingers.clear();
 			bool released = false;
 			for (size_t index = 0; index < std::size(buttons); ++index) {
 				if (keyboard_button_holds[index] == 0)
@@ -195,6 +206,7 @@ namespace casioemu {
 					RecalculateEmuInput();
 			}
 		}
+		bool ReturnAliasActive() const override { return return_alias_active; }
 		void* QueryInterface(const char* name) override {
 			if (strcmp(name, typeid(IKeyboardAutomation).name()) == 0) {
 				return (IKeyboardAutomation*)this;
@@ -534,7 +546,9 @@ namespace casioemu {
 	init_kbd: {
 		keyboard_map.clear();
 		held_keyboard_keys.clear();
+		active_fingers.clear();
 		std::fill(std::begin(keyboard_button_holds), std::end(keyboard_button_holds), 0);
+		return_alias_active = false;
 		for (auto& button : buttons)
 			button = {};
 
@@ -618,10 +632,13 @@ namespace casioemu {
 	}
 	// Space is the conventional host binding for the calculator's EXE key.
 	// Treat both Enter keys as aliases when a model does not define them itself.
-	if (keyboard_map.find(SDLK_RETURN) == keyboard_map.end()) {
-		auto exe_key = keyboard_map.find(SDLK_SPACE);
-		if (exe_key != keyboard_map.end())
-			keyboard_map[SDLK_RETURN] = exe_key->second;
+	// Return is only aliased when the model truly has no Return binding; the
+	// flag is the single decision point and lets the UI advertise the alias.
+	return_alias_active = keyboard_map.find(SDLK_RETURN) == keyboard_map.end() &&
+		keyboard_map.find(SDLK_SPACE) != keyboard_map.end();
+	if (return_alias_active) {
+		keyboard_map[SDLK_RETURN] = keyboard_map[SDLK_SPACE];
+		SDL_Log("[Keyboard][Info] No explicit Return binding; Return aliases to Space (EXE)");
 	}
 	if (keyboard_map.find(SDLK_KP_ENTER) == keyboard_map.end()) {
 		auto exe_key = keyboard_map.find(SDLK_SPACE);
@@ -737,6 +754,7 @@ void Keyboard::Reset() {
 		switch (event.type) {
 		case SDL_FINGERDOWN: {
 			// SDL_Log("Finger down: ID %lld at %f, %f", event.tfinger.fingerId, event.tfinger.x, event.tfinger.y);
+			active_fingers.insert(event.tfinger.fingerId);
 			int window_w, window_h;
 			SDL_GetWindowSize(emulator.window, &window_w, &window_h);
 			PressAt(event.tfinger.x * window_w, event.tfinger.y * window_h, false, event.tfinger.fingerId);
@@ -746,6 +764,11 @@ void Keyboard::Reset() {
 			int window_w, window_h;
 			SDL_GetWindowSize(emulator.window, &window_w, &window_h);
 			ReleaseAt(event.tfinger.x * window_w, event.tfinger.y * window_h, event.tfinger.fingerId);
+			active_fingers.erase(event.tfinger.fingerId);
+			// A finger that slid off its button before lifting leaves the button
+			// pressed.  Once the last finger is up and no host key is down, run
+			// the same global reconciliation the mouse path uses.
+			ReleaseAllIfNoInputHeld();
 		} break;
 		case SDL_WINDOWEVENT:
 			if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
@@ -794,10 +817,11 @@ void Keyboard::Reset() {
 						RecalculateEmuInput(); // New function to update emu input state
 				}
 				else if (!AnyFingerPressing()) {
-					// If no fingers are pressing anything, and a mouse up occurs,
-					// it might be a general release action.
-					// This is debatable. For now, to minimize impact, only ReleaseAll if no fingers are active.
-					// ReleaseAll(); // Original behavior - potentially problematic with multi-touch
+					// Mouse released away from every button (or a finger that
+					// slid off before lifting).  Restore the global release that
+					// was disabled for multi-touch, but only when no host key is
+					// down so keyboard holds survive.
+					ReleaseAllIfNoInputHeld();
 				}
 			}
 			// Right mouse up does nothing to button.pressed state typically
@@ -1366,6 +1390,22 @@ void Keyboard::Uninitialise() {
 			}
 		}
 	}
+	void Keyboard::ReleaseAllIfNoInputHeld() {
+		// Only reconcile when no fingers are on the glass AND no host key is
+		// down.  That protects single-key and multi-key keyboard holds
+		// (keyboard_button_holds counts host keys per calculator key): a mouse
+		// or finger release can never tear down a key that is still held.
+		if (!active_fingers.empty() || !held_keyboard_keys.empty())
+			return;
+
+		// No host key remains down, so any nonzero hold counter is stale (for
+		// example a KEYUP that arrived while the window was unfocused).  Reset
+		// it, otherwise the next keydown would see a phantom second holder and
+		// skip PressButton().
+		std::fill(std::begin(keyboard_button_holds), std::end(keyboard_button_holds), 0);
+		ReleaseAll();
+	}
+
 	Peripheral* CreateKeyboard(Emulator& emu) {
 		return new Keyboard(emu);
 	}

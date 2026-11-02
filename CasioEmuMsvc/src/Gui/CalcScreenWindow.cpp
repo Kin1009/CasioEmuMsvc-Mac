@@ -9,6 +9,7 @@
 #include "WizToolchain.h"
 
 #include "Chipset/Chipset.hpp"
+#include "Peripheral/Keyboard.hpp"
 #include "Peripheral/Screen.hpp"
 
 #include <SDL.h>
@@ -177,6 +178,18 @@ private:
 		if (m_emu && m_emu->GetPaused()) {
 			ImGui::SameLine();
 			ImGui::TextDisabled("(paused)");
+		}
+		if (m_emu) {
+			auto* keyboard = m_emu->chipset.QueryInterface<casioemu::IKeyboardAutomation>();
+			if (keyboard && keyboard->ReturnAliasActive()) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("Ret=Exe");
+				if (ImGui::IsItemHovered()) {
+					ImGui::BeginTooltip();
+					ImGui::TextUnformatted("Return acts as EXE because this model has no explicit Return key binding.");
+					ImGui::EndTooltip();
+				}
+			}
 		}
 	}
 

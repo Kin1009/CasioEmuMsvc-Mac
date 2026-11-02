@@ -18,5 +18,8 @@ namespace casioemu {
 		/// Bind and drive buttons through SDL keycode semantics for headless web input.
 		virtual void BindKeycode(int keycode, uint8_t code) = 0;
 		virtual void HandleKeycode(int keycode, bool pressed) = 0;
+		/// True when Return is aliased to the model's EXE (Space) key because
+		/// the model defines no explicit Return binding.
+		virtual bool ReturnAliasActive() const { return false; }
 	};
 } // namespace casioemu
