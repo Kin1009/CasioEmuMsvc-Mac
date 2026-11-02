@@ -60,19 +60,28 @@ public:
 		}
 		ImGui::SetNextWindowSize(inital_size, ImGuiCond_FirstUseEver);
 		const bool was_open = open;
+		const bool is_calculator = name && std::strcmp(name, "Calculator") == 0;
 #ifdef CASIOEMU_CORE_WEB
-		if (ImGui::Begin(name, nullptr, flags)) {
+		const bool visible = ImGui::Begin(name, nullptr, flags);
 #else
-		if (ImGui::Begin(name, &open, flags)) {
+		const bool visible = ImGui::Begin(name, &open, flags);
 #endif
-			if (name && std::strcmp(name, "Calculator") == 0)
+		if (visible) {
+			if (is_calculator)
 				calculator_panel_focused = ImGui::IsWindowFocused();
 			RenderCore();
+		}
+		else if (is_calculator) {
+			// Docked but not the selected tab, collapsed, or just closed:
+			// RenderCore() did not run, so refresh the flag here instead of
+			// letting a stale "focused" value from an earlier frame survive.
+			calculator_panel_focused = false;
 		}
 		ImGui::End();
 		// Closing the Calculator tab means "reboot the calculator", not "hide
 		// the only way to see the model".  Reopen it on the main menu.
-		if (was_open && !open && name && std::strcmp(name, "Calculator") == 0) {
+		if (was_open && !open && is_calculator) {
+			calculator_panel_focused = false;
 			open = true;
 			bring_to_front_requested = true;
 			if (m_emu)

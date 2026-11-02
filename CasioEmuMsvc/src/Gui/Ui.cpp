@@ -267,10 +267,28 @@ static void RenderDebuggerGuiWindows() {
 	top_bar_size = 0;
 }
 
+// True while a Calculator panel exists and is open.  Keyboard routing follows
+// the focused state that UIWindow::Render computes from ImGui; this helper only
+// answers "is there still a Calculator to be focused?".
+static bool HasOpenCalculatorPanel() {
+	for (auto* win : windows) {
+		if (win && win->name && std::strcmp(win->name, "Calculator") == 0)
+			return win->open;
+	}
+	return false;
+}
+
 void gui_loop() {
 	if (!m_emu->Running())
 		return;
-	calculator_panel_focused = false;
+
+	// Do not reset the focus flag at the top of every frame: the SDL event
+	// loop runs after gui_loop() and must use the value computed by the most
+	// recent Calculator render.  It is cleared only when the panel is gone
+	// (or closing); the render path below clears it when the panel is not the
+	// active dock tab.
+	if (!HasOpenCalculatorPanel())
+		calculator_panel_focused = false;
 
 	ImGuiIO& io = ImGui::GetIO();
 
