@@ -416,3 +416,6 @@ app/src/main/assets/
 # plugin example build products
 /examples/plugins/*/lib/
 /examples/plugins/**/*.plugin
+
+# local planning notes
+/docs/plan.md
