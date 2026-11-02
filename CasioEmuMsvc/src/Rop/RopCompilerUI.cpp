@@ -46,7 +46,7 @@ public:
 	using CompileCallback = std::function<CompileResult(const std::string&)>;
 
 	explicit LibCompilerImGuiWindow(CompileCallback cb = nullptr)
-		: UIWindow("Rop Compiler"), compileCallback_(std::move(cb)) {
+		: UIWindow("Injection"), compileCallback_(std::move(cb)) {
 		setupTextEditor();
 		setupMemoryEditor();
 		editor_.SetText(
