@@ -104,13 +104,19 @@ void Diag::warning(const std::string& msg, const std::string& file, int line, in
     std::string head = loc.empty() ? bold(tool, tty) : bold(loc, tty);
     std::fprintf(stderr, "%s: %s %s\n", head.c_str(), paint("warning:", style::WARNING, tty).c_str(),
                  msg.c_str());
-    if (!src.empty() && col >= 1) {
+    if (!src.empty()) {
+        std::string text = rstrip(src, "\n");
         int width = line >= 1 ? (int)std::to_string(line).size() : 1;
-        std::string caret((size_t)(col - 1), ' ');
-        caret += "^";
-        std::string pad((size_t)(width + 3), ' ');
-        std::fprintf(stderr, "%s%s %s\n", pad.c_str(), dim("|", tty).c_str(),
-                     paint(caret, style::CARET, tty).c_str());
+        std::string gut = line >= 1 ? std::to_string(line) : std::string((size_t)width, ' ');
+        while ((int)gut.size() < width) gut = " " + gut;
+        std::fprintf(stderr, "   %s %s\n", dim(gut, tty).c_str(), text.c_str());
+        if (col >= 1) {
+            std::string caret((size_t)(col - 1), ' ');
+            caret += "^";
+            std::string pad((size_t)(width + 3), ' ');
+            std::fprintf(stderr, "%s%s %s\n", pad.c_str(), dim("|", tty).c_str(),
+                         paint(caret, style::CARET, tty).c_str());
+        }
     }
 }
 

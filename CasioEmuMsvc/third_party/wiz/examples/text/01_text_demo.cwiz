@@ -1,0 +1,10 @@
+// text/01_text_demo.cwiz — text output with the native 6x8 CW font.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    clear();
+    print(4, 8, "TEXT DEMO");
+    print(4, 20, "Score: 99");
+    print(4, 32, "Hello, Wiz!");
+    render();
+    wait_key();
+}

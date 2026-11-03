@@ -1,0 +1,65 @@
+// rop/08_key_asm.cwiz — getkey written by hand with raw asm {} blocks.
+//
+// The scanner still uses the raw KI/KO word, but the slot is kept at a fixed
+// scratch address (E8E8) so the raw chain can reload it with a plain gadget.
+// NOTE: an asm literal is byte order. "0xE8E8" emits E8 E8; a non-symmetric
+// address would need its two bytes swapped (D816 -> "0x16D8").
+// keytable() dispatches on ER0 afterwards, exactly like the high-level API.
+//
+//   0x0480 = Up, 0x0840 = Down, 0x0440 = Left, 0x0880 = Right
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    print(0x30, 0x01, "PRESS A KEY");
+    render();
+loop:
+    asm {
+        // slot = 0x0000, so a released key matches no table entry
+        "pop xr0";
+        "0xE8E8";
+        "0x0000";
+        "setlr";
+        "[er0]=er2,rt";
+        // er0 = adr(slot); getkey; er0 = [slot]
+        "pop er0";
+        "0xE8E8";
+        "setlr";
+        "getkey";
+        "setlr";                 // getkey left LR inside itself; re-arm it
+        "pop er0";
+        "0xE8E8";
+        "er0=[er0],pop xr8,rt";
+        "0x30303030";
+    }
+    keytable(0x0480, up,
+             0x0840, down,
+             0x0440, left,
+             0x0880, right,
+             0x0000, loop);
+up:
+    screen_del();
+    print(0x30, 0x11, "UP");
+    render();
+    goto loop;
+down:
+    screen_del();
+    print(0x30, 0x11, "DOWN");
+    render();
+    goto loop;
+left:
+    screen_del();
+    print(0x30, 0x11, "LEFT");
+    render();
+    goto loop;
+right:
+    screen_del();
+    print(0x30, 0x11, "RIGHT");
+    render();
+    goto loop;
+}

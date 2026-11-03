@@ -1,0 +1,23 @@
+// Cycle the fx-580VN X status icons one at a time. Press AC to stop.
+// Each update touches the compact status range only (renderStatus, 23 bytes).
+#for 580
+
+rom int icons[20] = {
+    SHIFT, ALPHA, M, VAR_STO, MATH_INP, DEG, RAD, GRA, FIX, SCI,
+    ENG, IMAG, ANGL, SIMP, LEFT, DOWN, UP, RIGHT, PAUSE, SUN_CHRG
+};
+
+void main() {
+    int i;
+    while (1) {
+        for (i = 0; i < 20; i = i + 1) {
+            setStatus(icons[i], HIGH);
+            renderStatus();
+            delay(0x20);
+            setStatus(icons[i], LOW);
+            renderStatus();
+            delay(0x10);
+            if (key_hit(K_AC)) { return; }
+        }
+    }
+}

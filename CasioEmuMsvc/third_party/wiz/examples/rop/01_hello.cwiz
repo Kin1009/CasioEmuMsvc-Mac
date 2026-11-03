@@ -1,0 +1,14 @@
+// rop/01_hello.cwiz — smallest ROP payload.
+// Prints "HELLO ROP" on line 1.
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    print(0x30, 0x01, "HELLO ROP");
+    render();
+}

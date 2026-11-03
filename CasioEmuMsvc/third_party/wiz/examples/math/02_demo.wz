@@ -1,0 +1,45 @@
+# Fibonacci / factorial demo: shows n, fib(n) and n! on screen.
+# UP increases n, DOWN decreases it. A running counter shows how many presses happened.
+
+n = 5
+presses = 0
+
+
+def fact(x):
+    r = 1
+    for i in range(1, x + 1):
+        r = r * i
+    return r
+
+
+def fib(x):
+    if x < 2:
+        return x
+    return fib(x - 1) + fib(x - 2)
+
+
+def draw():
+    clear()
+    print(4, 11, "n = ", n)
+    print(4, 21, "fib = ", fib(n))
+    print(4, 31, "n! = ", fact(n))
+    print(4, 41, "presses: ", presses)
+
+
+def main():
+    global n, presses
+    buffered(1)          # compatibility no-op: drawing already targets SB2
+    while True:
+        if key_hit(K_UP):
+            n += 1
+            if n > 7:
+                n = 7
+            presses += 1
+        if key_hit(K_DOWN):
+            n -= 1
+            if n < 1:
+                n = 1
+            presses += 1
+        draw()
+        flip()
+        delay(3)

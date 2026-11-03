@@ -1,0 +1,13 @@
+// cwapp/01_cwapp.cwiz — full patched ROM build (580 only).
+// #for 580 selects the target; #cwapp switches to the app-patch flavour.
+#for 580
+#cwapp
+#org 0x25000
+
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    clear();
+    text(20, 8, "Patch demo");
+    render();
+    wait_key();
+}

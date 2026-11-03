@@ -1,0 +1,11 @@
+// text/02_cw_font.cwiz — native ClassWiz CW Display font at native 1x.
+// Uses 11 px advance, 13-row cell (12 px cap + 1 descender), no scaling.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    clear();
+    print_cw(2, 2, "ClassWiz Font");
+    text_cw(2, 18, "Native 1x display");
+    num_cw(2, 34, 12345);
+    render();
+    wait_key();
+}

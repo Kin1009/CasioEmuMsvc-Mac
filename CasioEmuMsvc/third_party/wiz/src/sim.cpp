@@ -459,16 +459,15 @@ bool U8::f_group(int w, int nxt) {
     if ((w & 0x00FF) == 0x00CE) {
         int bits = n;
         if (bits & 1) push_bytes({ea & 0xFF, ea >> 8});
+        if (bits & 4) push_bytes({psw & 0xFF});
+        if (bits & 2) push_bytes({nxt & 0xFF, (nxt >> 8) & 0xFF, csr & 0xFF, 0});
         if (bits & 8) push_bytes({lr & 0xFF, lr >> 8, lcsr, 0});
         pc = nxt;
         return true;
     }
     if ((w & 0x00FF) == 0x008E) {
         int bits = n;
-        if (bits & 1) {
-            auto b = pop_bytes(2);
-            ea = b[0] | (b[1] << 8);
-        }
+        // Reverse of the PUSH order: LR, PC, PSW, EA.
         if (bits & 8) {
             auto b = pop_bytes(4);
             lr = b[0] | (b[1] << 8);
@@ -485,6 +484,14 @@ bool U8::f_group(int w, int nxt) {
                 csr = lcsr;
             }
             return true;
+        }
+        if (bits & 4) {
+            auto b = pop_bytes(1);
+            psw = b[0];
+        }
+        if (bits & 1) {
+            auto b = pop_bytes(2);
+            ea = b[0] | (b[1] << 8);
         }
         pc = nxt;
         return true;

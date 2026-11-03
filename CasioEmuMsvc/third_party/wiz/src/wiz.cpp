@@ -2114,15 +2114,33 @@ private:
         return nullptr;
     }
 
+    int alloc_bytes(int bytes, const std::string& what, int line) {
+        int a = next_addr;
+        bool moved;
+        do {
+            moved = false;
+            for (const auto& [lo, hi] : target.reserved_ram) {
+                const int end = a + bytes - 1;
+                if (bytes > 0 && a <= hi && end >= lo) {
+                    a = hi + 1;
+                    moved = true;
+                    break;
+                }
+            }
+        } while (moved);
+        next_addr = a + bytes;
+        if (next_addr > var_limit)
+            throw WizError("out of RAM for " + what, line, 0,
+                           "use smaller arrays, fewer globals, or move data into rom/rom8",
+                           "memory.out-of-ram");
+        return a;
+    }
+
     int alloc(const std::string& qname) {
         auto it = vars.find(qname);
         if (it == vars.end()) {
-            if (next_addr + 2 > var_limit)
-                throw WizError("out of RAM for variables", 0, 0,
-                               "use smaller arrays, fewer globals, or move data into rom/rom8",
-                               "memory.out-of-ram");
-            vars[qname] = next_addr;
-            next_addr += 2;
+            int a = alloc_bytes(2, "variables", 0);
+            vars[qname] = a;
         }
         return vars[qname];
     }
@@ -2288,10 +2306,9 @@ void Compiler::declare(const NodeP& d) {
     if (d->k == "arr") {
         if (find_arr(d->name) || find_rom(d->name) || find_func(d->name))
             throw WizError(fmt("'%s' already defined", d->name.c_str()), d->line);
-        if (next_addr + 2 * (int)d->data.size() > var_limit)
-            throw WizError(fmt("out of RAM for array '%s'", d->name.c_str()), d->line);
-        arrays.push_back({d->name, ArrEntry{next_addr, (int)d->data.size(), d->data}});
-        next_addr += 2 * (int)d->data.size();
+        int addr = alloc_bytes(2 * (int)d->data.size(), fmt("array '%s'", d->name.c_str()),
+                               d->line);
+        arrays.push_back({d->name, ArrEntry{addr, (int)d->data.size(), d->data}});
     } else {
         if (find_arr(d->name) || find_rom(d->name) || find_func(d->name))
             throw WizError(fmt("'%s' already defined", d->name.c_str()), d->line);
@@ -2888,34 +2905,29 @@ std::string Compiler::compile(const std::string& src) {
 // ------------------------------------------------------------------ entry
 static std::vector<std::string> find_k_names(const std::string& s) {
     std::vector<std::string> out;
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s.compare(i, 2, "K_") == 0) {
-            size_t j = i;
-            while (j < s.size() &&
-                   (std::isupper((unsigned char)s[j]) || std::isdigit((unsigned char)s[j]) || s[j] == '_'))
-                j++;
-            if (j - i > 2) out.push_back(s.substr(i, j - i));
-            i = j - 1;
-        }
+    std::vector<Tok> toks;
+    try {
+        toks = lex(s);
+    } catch (...) {
+        return out;
     }
+    for (const Tok& t : toks)
+        if (t.kind == "name" && t.s.rfind("K_", 0) == 0) out.push_back(t.s);
     return out;
 }
 
 static std::vector<std::string> const_k_names(const std::string& s) {
     std::vector<std::string> out;
-    size_t p = 0;
-    while ((p = s.find("const", p)) != std::string::npos) {
-        size_t j = p + 5;
-        while (j < s.size() && (s[j] == ' ' || s[j] == '\t')) j++;
-        if (s.compare(j, 2, "K_") == 0) {
-            size_t k = j;
-            while (k < s.size() &&
-                   (std::isupper((unsigned char)s[k]) || std::isdigit((unsigned char)s[k]) || s[k] == '_'))
-                k++;
-            out.push_back(s.substr(j, k - j));
-        }
-        p += 5;
+    std::vector<Tok> toks;
+    try {
+        toks = lex(s);
+    } catch (...) {
+        return out;
     }
+    for (size_t i = 0; i + 1 < toks.size(); i++)
+        if (toks[i].kind == "kw" && toks[i].s == "const" && toks[i + 1].kind == "name" &&
+            toks[i + 1].s.rfind("K_", 0) == 0)
+            out.push_back(toks[i + 1].s);
     return out;
 }
 

@@ -1,0 +1,49 @@
+# A broad Wiz tour: ROM arrays, helpers, arithmetic, graphics, sprites,
+# native CW Display text, key edges, status icons, and explicit rendering.
+const SAMPLE_COUNT = 5
+rom samples = [3, 5, 8, 13, 21]
+rom8 badge = [0x3C, 0x42, 0xA5, 0x81, 0xA5, 0x99, 0x42, 0x3C]
+
+def sum_samples():
+    total = 0
+    for i in range(0, SAMPLE_COUNT):
+        total += samples[i]
+    return total
+
+def draw_scene(cursor, total, frame):
+    clear()
+    rect(0, 0, 192, 64)
+    text(5, 4, "Wiz / CWiz showcase")
+    print(5, 15, "ROM sum: ", total)
+    line(5, 29, 186, 29)
+    circle(28, 45, 8)
+    fillrect(48, 39, 22, 13)
+    pixel(81, 45, 1)
+    sprite(96, 37, 8, 8, badge)
+    text_cw(112, 37, "CW font")
+    print_cw(112, 51, "frame ", frame)
+    pixel(cursor, 31, 1)
+    if frame & 1:
+        setStatus(SHIFT, HIGH)
+    else:
+        setStatus(SHIFT, LOW)
+    render()
+    renderStatus()
+
+def main():
+    cursor = 8
+    frame = 0
+    total = sum_samples()
+    while True:
+        draw_scene(cursor, total, frame)
+        if key_hit(K_LEFT):
+            cursor -= 2
+        if key_hit(K_RIGHT):
+            cursor += 2
+        cursor = clamp(cursor, 1, 190)
+        frame += 1
+        if key_hit(K_AC):
+            break
+        delay(3)
+    setStatus(SHIFT, LOW)
+    renderStatus()

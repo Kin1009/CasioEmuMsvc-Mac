@@ -10,7 +10,7 @@ for the smaller status-icon region. Nothing appears until the relevant render ca
 |---|---|---|
 | **hello** | `hello/01_hello.cwiz`, `hello/01_hello.wz` | Smallest visible program. |
 | **shapes** | `shapes/02_shapes.cwiz` | Drawing primitives (`rect`, `fillrect`, `circle`, `disc`, `line`). |
-| **text** | `text/01_text_demo.cwiz` | Native 6x8 CW font (`print`, `text`). |
+| **text** | `text/01_text_demo.cwiz` | Original Wiz 6x8 ASCII font (`print`, `text`); the CW Display font is 11x13 (`*_cw`). |
 | **text** | `text/02_cw_font.cwiz`, `text/03_cw_font.cwiz` | ClassWiz CW Display font at 1x (`print_cw`, `text_cw`, `num_cw`). |
 | **vietnamese** | `vietnamese/01_compile_time.cwiz` … `04_mixed_accented.cwiz` | Vietnamese on the CW Display: `__normalized__`, runtime `normalizeText()`, explicit F4 bytes, mixed ASCII. |
 | **input** | `input/01_keys.cwiz`, `input/02_pong.wz` | Key echo; Pong game (`flip()` per frame). |

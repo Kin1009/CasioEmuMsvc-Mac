@@ -75,6 +75,10 @@ inline bool parse_cli(int argc, char** argv, const std::vector<CliOption>& opts,
                 continue;
             }
             if (has_inline) {
+                if (!found->allowed.empty() && !contains(found->allowed, inline_val)) {
+                    error = "invalid value '" + inline_val + "' for option '" + flag + "'";
+                    return false;
+                }
                 out.values[found->name] = inline_val;
                 continue;
             }

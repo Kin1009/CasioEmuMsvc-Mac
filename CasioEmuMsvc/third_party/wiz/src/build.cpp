@@ -188,26 +188,24 @@ BuildResult build_source(const std::string& src, const std::string& target,
 BuildResult build_cwiz(const std::string& src, const std::string& target,
                        const std::string& path) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
-    // Handle #binary directive for full firmware image mode (fwnx)
-    std::string binary_dir = (path.find('/') != std::string::npos) ? path.substr(0, path.find_last_of('/')) : "";
-    std::string binary_path;
-    size_t bp = src.find("#binary");
-    if (bp != std::string::npos) {
-        std::string rest = src.substr(bp + 8);
-        size_t q1 = rest.find('"');
-        if (q1 != std::string::npos) {
-            size_t q2 = rest.find('"', q1 + 1);
-            if (q2 != std::string::npos) binary_path = strip(rest.substr(q1 + 1, q2 - q1 - 1));
-        }
-    }
-    if (!binary_path.empty() && tg.name == "fwnx") {
-        std::string binary_path_fixed = binary_path;
-        if (!binary_path_fixed.empty() && binary_path_fixed[0] != '/' && binary_path_fixed.find("/") != std::string::npos) {
-            binary_path_fixed = binary_dir + "/" + binary_path_fixed;
+    // CWiz is the language with preprocessor directives; Wiz uses `#` for comments.
+    CwizPreprocessInfo pp = preprocess_cwiz_info(src, path, tg.name);
+    if (!pp.binary_path.empty()) {
+        if (tg.name != "fwnx")
+            throw CompileError("#binary is only valid for the fwnx target", 0, 0,
+                               "build with --target fwnx, or remove #binary",
+                               "build.binary-target");
+        std::string binary_path = pp.binary_path;
+        if (binary_path[0] != '/') {
+            std::string dir = path.find_last_of('/') == std::string::npos
+                                  ? std::string(".")
+                                  : path.substr(0, path.find_last_of('/'));
+            binary_path = dir + "/" + binary_path;
         }
         bool ok = false;
-        std::vector<uint8_t> bin_data = read_binary_file(binary_path_fixed, &ok);
-        if (!ok) throw std::runtime_error("#binary file not found: " + binary_path_fixed);
+        std::vector<uint8_t> bin_data = read_binary_file(binary_path, &ok);
+        if (!ok) throw CompileError("#binary file not found: " + binary_path, 0, 0,
+                                    "place the image next to the source", "build.binary");
         std::string asm_body = "; firmware ROM binary image (reconstructed)\n";
         for (size_t i = 0; i < bin_data.size(); i += 8) {
             std::string line = "DB ";
@@ -223,11 +221,9 @@ BuildResult build_cwiz(const std::string& src, const std::string& target,
         res.variables = {};
         res.syms = {};
         res.cwapp = false;
-        res.slot = 2;
+        res.slot = pp.slot;
         return res;
     }
-    // CWiz is the language with preprocessor directives; Wiz uses `#` for comments.
-    CwizPreprocessInfo pp = preprocess_cwiz_info(src, path, tg.name);
     std::string selected = select_sections(pp.text, tg);
     CwizResult r = compile_cwiz(selected, tg);
     std::map<std::string, int> vars;

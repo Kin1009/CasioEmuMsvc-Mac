@@ -25,7 +25,7 @@ const std::string DEFAULT_TARGET = [] {
     return std::string(e && *e ? e : "cwii");
 }();
 
-static const char* const MODELS = "580, 880, fwnx";
+static const char* const MODELS = "580, 880, cwapp, fwnx";
 
 std::optional<std::string> canonical(const std::string& name) {
     std::string key;
@@ -189,7 +189,10 @@ std::string select_sections(const std::string& src, const Target& target) {
         for (const auto& n : sl.names) {
             if (n == "all") continue;
             auto c = canonical(n);
-            if (c && !contains(declared, *c)) declared.push_back(*c);
+            if (!c)
+                throw SectionError(fmt("line %d: unknown target '%s' (use %s, all)", sl.line,
+                                       n.c_str(), MODELS));
+            if (!contains(declared, *c)) declared.push_back(*c);
         }
     }
     bool has_all = false;

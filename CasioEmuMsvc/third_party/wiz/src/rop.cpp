@@ -2039,11 +2039,34 @@ std::string hex_bytes(const std::vector<uint8_t>& bytes) {
 bool source_is_rop(const std::string& source) {
     std::istringstream in(source);
     std::string line;
+    int depth = 0;
+    bool active = true;
+    bool found = false;
     while (std::getline(in, line)) {
-        size_t i = line.find_first_not_of(" \t");
-        if (i != std::string::npos && line.compare(i, 4, "#rop") == 0) return true;
+        std::string t = strip(line);
+        if (t.rfind("#if", 0) == 0) {
+            bool cond = true;
+            std::string rest = strip(t.substr(3));
+            if (rest == "0") cond = false;
+            active = active && cond;
+            depth++;
+            continue;
+        }
+        if (t.rfind("#else", 0) == 0) { active = !active; continue; }
+        if (t.rfind("#elif", 0) == 0) { active = true; continue; }
+        if (t.rfind("#endif", 0) == 0) {
+            if (depth > 0) depth--;
+            active = true;
+            continue;
+        }
+        if (!active) continue;
+        if (t == "#rop" || t.rfind("#rop ", 0) == 0 || t.rfind("#rop\t", 0) == 0) {
+            // Exact directive token: "#rop is not a thing" is not a marker.
+            std::string tail = strip(t.substr(4));
+            if (tail.empty() || tail.rfind("//", 0) == 0) found = true;
+        }
     }
-    return false;
+    return found;
 }
 
 RopResult build_rop(const std::string& source, const std::string& model, const std::string& language) {

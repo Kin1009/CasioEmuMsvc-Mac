@@ -1,0 +1,14 @@
+// rop/02_line.cwiz — draw diagonal + label.
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    line(0, 0, 191, 62);
+    print(0x30, 0x01, "ROP LINE");
+    render();
+}

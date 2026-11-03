@@ -207,7 +207,8 @@ static int bracket_ereg(const std::string& tok) {
     if ((inner[0] != 'e' && inner[0] != 'E') || (inner[1] != 'r' && inner[1] != 'R')) return -1;
     std::string d = inner.substr(2);
     for (char c : d) if (!std::isdigit((unsigned char)c)) return -1;
-    return std::atoi(d.c_str());
+    int n = std::atoi(d.c_str());
+    return n < 16 ? n : -1;
 }
 
 // Match "<expr>[ERn]" -> (expr, n); returns false if no match
@@ -223,7 +224,7 @@ static bool expr_bracket_ereg(const std::string& tok, std::string& expr, int& n)
     for (char c : d) if (!std::isdigit((unsigned char)c)) return false;
     expr = tok.substr(0, open);
     n = std::atoi(d.c_str());
-    return true;
+    return n < 16;
 }
 
 // Match "R<n>.<bit>" -> (n, bit); returns false otherwise

@@ -1,0 +1,15 @@
+// text/03_cw_font.cwiz — native ClassWiz CW Display text at 1x (11x13).
+// Works on both the fx-580VN X and fx-880BTG.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800).
+// Build: build/wizc examples/text/03_cw_font.cwiz --target 580
+//        build/wizc examples/text/03_cw_font.cwiz --target 880
+
+void main() {
+    clear();
+    text_cw(2, 2, "ClassWiz CW");
+    print_cw(2, 16, "abc 0123");
+    print_cw(2, 30, "score ", 99);
+    num_cw(2, 44, -12345);
+    render();
+    wait_key();
+}

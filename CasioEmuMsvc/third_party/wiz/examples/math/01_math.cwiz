@@ -1,0 +1,12 @@
+// math/01_math.cwiz — arithmetic demo with clamp.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    int a = 7;
+    int b = 3;
+    clear();
+    print(4, 8, "a = ", a, "  b = ", b);
+    print(4, 24, "sum = ", a + b);
+    print(4, 40, "prod = ", a * b);
+    render();
+    wait_key();
+}

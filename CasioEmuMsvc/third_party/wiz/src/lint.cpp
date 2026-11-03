@@ -630,7 +630,7 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
                                         const std::string& target,
                                         int line_limit) {
     std::vector<LintDiagnostic> out;
-    const bool cwiz = ends_with(file_name, ".cwiz");
+    const bool cwiz = language_of(file_name, "") == "cwiz";
     const std::vector<Line> lines = split_lines(source, cwiz);
     std::set<int> compile_error_lines;
 

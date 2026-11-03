@@ -3888,9 +3888,27 @@ private:
     }
 
     void mark_recursion() {
+        // A function is recursive when it can reach itself through any chain
+        // of calls, not only through a direct self-call.
+        std::function<bool(const std::string&, const std::string&, std::set<std::string>&)> reaches =
+            [&](const std::string& at, const std::string& target, std::set<std::string>& seen) {
+                if (at == target) return true;
+                if (!seen.insert(at).second) return false;
+                auto it = call_graph.find(at);
+                if (it == call_graph.end()) return false;
+                for (const std::string& nx : it->second)
+                    if (reaches(nx, target, seen)) return true;
+                return false;
+            };
         for (auto& kv : an.funcs) {
             auto it = call_graph.find(kv.first);
-            if (it != call_graph.end() && it->second.count(kv.first)) kv.second->recursive = true;
+            if (it == call_graph.end()) continue;
+            std::set<std::string> seen;
+            for (const std::string& callee : it->second)
+                if (reaches(callee, kv.first, seen)) {
+                    kv.second->recursive = true;
+                    break;
+                }
         }
     }
 };
@@ -4057,8 +4075,8 @@ private:
             if ((a < 0) != (b < 0)) q = -q;
             return wrap16(op == "/" ? q : a - q * b);
         }
-        if (op == "<<") return wrap16(a << (b & 15));
-        if (op == ">>") return wrap16(a >> (b & 15));
+        if (op == "<<") return (b >= 0 && b <= 15) ? wrap16(a << (b & 15)) : 0;
+        if (op == ">>") return (b >= 0 && b <= 15) ? wrap16(a >> (b & 15)) : 0;
         return 0;
     }
 

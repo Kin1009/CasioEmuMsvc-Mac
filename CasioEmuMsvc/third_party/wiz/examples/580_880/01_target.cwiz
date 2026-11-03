@@ -1,0 +1,9 @@
+// 01_target.cwiz — works unchanged for 580 or 880.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    clear();
+    text(20, 8, "580 / 880");
+    print(20, 24, "Target OK");
+    render();
+    wait_key();
+}

@@ -1,8 +1,7 @@
-# 01_hello - the smallest Wiz program that does something visible.
-# Build: build/wizc examples/hello/01_hello.wz
-
+# hello/01_hello.wz — Wiz version.
+# Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
 def main():
     clear()
-    text(8, 8, "Hello, Wiz!")
-    text(8, 24, "press any key")
-    wait_key()
+    print(8, 8, "Hello, Wiz!")
+    print(8, 24, "fx-580VN X / 880BTG")
+    render()

@@ -1,0 +1,16 @@
+// shapes/02_shapes.cwiz — drawing primitives demo.
+// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
+void main() {
+    clear();
+    // rect(x, y, w, h) using four line_draw calls
+    rect(4, 4, 60, 30);
+    // fillrect fills a solid rectangle
+    fillrect(70, 4, 40, 14);
+    // circle and disc
+    circle(140, 26, 18);
+    disc(170, 26, 10);
+    // custom line
+    line(4, 56, 188, 40);
+    text(70, 48, "shapes");
+    render();
+}

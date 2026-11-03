@@ -1,0 +1,10 @@
+# A Wiz-syntax ROP payload; it emits the same RAC chain as 01_hello.cwiz.
+#rop
+for 580
+#org 0xE9E0
+#launcher common
+
+def main():
+    screen_del()
+    print(0x30, 0x01, "HELLO WIZ ROP")
+    render()

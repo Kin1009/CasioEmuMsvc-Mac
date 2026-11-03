@@ -1,0 +1,16 @@
+# Cycle the fx-880BTG status icons one at a time. Press AC to stop.
+# The 880 has a different icon layout; unsupported 580-only names are omitted.
+rom icons = [SHIFT, MATH_INP, DEG, RAD, GRA, FIX, SCI, ENG, IMAG, ANGL, SIMP, VERIFY, LEFT, DOWN, UP, RIGHT, PAUSE, SUN_CHRG]
+
+def main():
+    i = 0
+    while True:
+        for i in range(0, 18):
+            setStatus(icons[i], HIGH)
+            renderStatus()
+            delay(0x20)
+            setStatus(icons[i], LOW)
+            renderStatus()
+            delay(0x10)
+            if key_hit(K_AC):
+                return
