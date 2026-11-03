@@ -38,6 +38,11 @@ struct AppearanceSettings {
 // Window visibility that used to live in ThemeSettings::hiddenTabs.
 struct UiSettings {
 	std::vector<std::string> hiddenTabs;
+	// Persisted tool options (checkboxes must survive a restart).
+	bool displayAddress = true;
+	bool displayHex = false;
+	bool showImPComplex = true;
+	bool alwaysShowImP = false;
 };
 
 struct SidebarSettings {

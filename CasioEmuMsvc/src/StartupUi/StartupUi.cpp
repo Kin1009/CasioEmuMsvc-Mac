@@ -1787,7 +1787,8 @@ namespace casioemu {
 
 		void RenderModelRow(Model& model, int& id) {
 			ImGui::PushID(id++);
-			ImGui::SetCursorPosX(10.0f);
+			ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + 20.0f,
+				ImGui::GetCursorScreenPos().y));
 			const bool selected = selected_path == model.path;
 			ImGui::PushStyleColor(ImGuiCol_Header, ThemeManager::Instance().Colors().selection);
 			ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ThemeManager::Instance().Colors().hover);
@@ -1816,17 +1817,18 @@ namespace casioemu {
 		void RenderStartupSidebar(const plugin::ThemePalette& palette, float width, float height) {
 			ImGui::PushStyleColor(ImGuiCol_ChildBg, palette.surface);
 			ImGui::BeginChild("##startup_sidebar", ImVec2(width, height), ImGuiChildFlags_None);
+			ImGui::Indent(16.0f);
 			ImDrawList* draw = ImGui::GetWindowDrawList();
 			const ImVec2 start = ImGui::GetWindowPos();
 			draw->AddRectFilled(start, ImVec2(start.x + width, start.y + 22.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.titleBar));
-			ImGui::SetCursorPos(ImVec2(12.0f, 3.0f));
+			ImGui::SetCursorPos(ImVec2(20.0f, 3.0f));
 			ImGui::TextDisabled("%s", "MODELS");
-			ImGui::SetCursorPos(ImVec2(10.0f, 28.0f));
-			ImGui::SetNextItemWidth(width - 20.0f);
+			ImGui::SetCursorPos(ImVec2(16.0f, 28.0f));
+			ImGui::SetNextItemWidth(width - 32.0f);
 			ImGui::InputTextWithHint("##model_search", "Search models", search_txt, sizeof(search_txt));
-			ImGui::SetCursorPosX(10.0f);
-			ImGui::SetNextItemWidth(width - 20.0f);
+			ImGui::SetCursorPosX(16.0f);
+			ImGui::SetNextItemWidth(width - 32.0f);
 			const char* filter_label = strcmp(current_filter, "##") == 0 ? "All types" : current_filter;
 			if (ImGui::BeginCombo("##model_filter", filter_label)) {
 				std::vector<const char*> items = { "##", "ES", "ESP", "ESP2nd", "CWX", "CWII", "Fx5800p" };
@@ -1842,6 +1844,7 @@ namespace casioemu {
 				ImGui::TextDisabled("Scanning models...");
 			}
 			else {
+				ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + 20.0f, ImGui::GetCursorScreenPos().y));
 				ImGui::TextDisabled("RECENT");
 				bool any = false;
 				for (const auto& path : recently_used) {
@@ -1851,10 +1854,17 @@ namespace casioemu {
 					any = true;
 					RenderModelRow(*iter, id);
 				}
-				if (!any) ImGui::TextDisabled("No recent models");
+				if (!any) { ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + 20.0f, ImGui::GetCursorScreenPos().y)); ImGui::TextDisabled("No recent models"); }
 				ImGui::Spacing();
+				ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + 20.0f, ImGui::GetCursorScreenPos().y));
 				ImGui::TextDisabled("ALL MODELS");
 				for (auto& model : models) {
+					// Do not repeat a recent model in the all-models list on the
+					// same screen.
+					const bool is_recent = std::find(recently_used.begin(), recently_used.end(),
+						model.path.string()) != recently_used.end();
+					if (is_recent)
+						continue;
 					const bool matches_filter = strcmp(current_filter, "##") == 0 || current_filter == model.type;
 					const bool matches_search = stristr(model.name.c_str(), search_txt) != nullptr ||
 						stristr(model.version.c_str(), search_txt) != nullptr;
@@ -1862,6 +1872,7 @@ namespace casioemu {
 						RenderModelRow(model, id);
 				}
 			}
+			ImGui::Unindent(16.0f);
 			ImGui::EndChild();
 			ImGui::PopStyleColor();
 		}
@@ -1896,8 +1907,6 @@ namespace casioemu {
 				else if (!models.empty()) LaunchModel(models.front());
 			});
 			ImGui::SetCursorPosX(36.0f);
-			link("Open Model...", [&] { ImportRomPackage(); });
-			ImGui::SetCursorPosX(36.0f);
 			link("Open Folder...", [&] {
 				SystemDialogs::OpenFolderDialog([](std::filesystem::path folder) {
 					auto& data = casioemu::settings::SettingsStore::Instance().Data();
@@ -1905,8 +1914,6 @@ namespace casioemu {
 					casioemu::settings::SettingsStore::Instance().Save();
 				});
 			});
-			ImGui::SetCursorPosX(36.0f);
-			link("Online Models", [&] { show_online_popup = true; });
 			ImGui::Dummy(ImVec2(0, 14));
 			ImGui::SetCursorPosX(36.0f);
 			ImGui::TextDisabled("Recent");

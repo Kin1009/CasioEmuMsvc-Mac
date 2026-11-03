@@ -247,6 +247,46 @@ public:
 		AddLog(Sev::Note, "Wiz toolchain " WIZ_VERSION " - see the Wiz repository for the language reference.");
 	}
 
+	bool OpenEditorDocument(const std::string& path, const std::string& text) override {
+		const std::string name = std::filesystem::path(path).filename().string();
+		std::snprintf(file_name_, sizeof(file_name_), "%s", name.c_str());
+		editor_.SetText(text);
+		editor_.SetErrorMarkers({});
+		diags_.clear();
+		log_.clear();
+		return true;
+	}
+
+	void SetEditorTarget(const std::string& target) override {
+		for (int index = 0; index < static_cast<int>(sizeof(kTargets) / sizeof(kTargets[0])); ++index) {
+			if (target == kTargets[index].name) {
+				target_idx_ = index;
+				return;
+			}
+		}
+	}
+
+	void SetEditorLanguage(const std::string& language) override {
+		if (language == "wiz")
+			lang_idx_ = 1;
+		else if (language == "cwiz")
+			lang_idx_ = 2;
+		else
+			lang_idx_ = 0;
+	}
+
+	void BuildEditorDocument(bool run) override {
+		DoBuild(run);
+	}
+
+	void PreprocessEditorDocument() override {
+		DoPreprocess();
+	}
+
+	void LintEditorDocument() override {
+		RunLint();
+	}
+
 	void RenderCore() override {
 		PickTargetFromModel();
 		if (g_shellBuildRequest) {

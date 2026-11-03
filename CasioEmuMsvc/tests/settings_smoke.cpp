@@ -74,6 +74,10 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
 	data.workspace.recentFiles = { "/tmp/a.wz", "/tmp/b.wz" };
 	data.plugins.enabled = { "com.example.theme" };
 	data.ui.hiddenTabs = { "Variables", "Watch" };
+	data.ui.displayAddress = false;
+	data.ui.displayHex = true;
+	data.ui.showImPComplex = false;
+	data.ui.alwaysShowImP = true;
 	data.calculator.scale = 9.0f; // Normalize must resync it to appearance.uiScale.
 
 	std::string error;
@@ -95,6 +99,10 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
 	Check(store.Data().workspace.recentFiles.size() == 2, "recent files persist");
 	Check(store.Data().plugins.enabled.size() == 1, "plugin list persists");
 	Check(store.Data().ui.hiddenTabs.size() == 2, "hidden tabs persist");
+	Check(!store.Data().ui.displayAddress, "Display Address checkbox persists");
+	Check(store.Data().ui.displayHex, "Display Hex checkbox persists");
+	Check(!store.Data().ui.showImPComplex, "Show ImP checkbox persists");
+	Check(store.Data().ui.alwaysShowImP, "Always Show ImP checkbox persists");
 }
 
 void TestMalformedDocument(const std::filesystem::path& root) {

@@ -99,6 +99,14 @@ public:
 		bring_to_front_requested = true;
 	}
 	virtual void RenderCore() = 0;
+	// Optional integration hooks used by the shell's file editor and build
+	// overlay.  Default no-ops keep every existing tool unchanged.
+	virtual bool OpenEditorDocument(const std::string& /*path*/, const std::string& /*text*/) { return false; }
+	virtual void SetEditorTarget(const std::string& /*target*/) {}
+	virtual void SetEditorLanguage(const std::string& /*language*/) {}
+	virtual void BuildEditorDocument(bool /*run*/) {}
+	virtual void PreprocessEditorDocument() {}
+	virtual void LintEditorDocument() {}
 	// Optional: navigate the window to a specific memory address. No-op by default.
 	virtual void GotoMemoryAddress(uint32_t /*addr*/) {}
 	virtual ~UIWindow() {}
@@ -141,6 +149,39 @@ namespace UIHelpers {
 		ImGui::TextUnformatted(label);
 		ImGui::Separator();
 		ImGui::Spacing();
+	}
+
+	// Width of a checkbox including its square and the label.
+	inline float CheckboxWidth(const char* label) {
+		const ImGuiStyle& style = ImGui::GetStyle();
+		return ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f;
+	}
+
+	// Place a checkbox on the current row, or wrap to a new row when it would
+	// be clipped.  `first` suppresses SameLine() for the leading item.
+	inline bool CheckboxFlow(const char* label, bool* value, bool first) {
+		const float width = CheckboxWidth(label);
+		if (!first) {
+			if (ImGui::GetContentRegionAvail().x < width + ImGui::GetStyle().ItemSpacing.x)
+				ImGui::NewLine();
+			else
+				ImGui::SameLine();
+		}
+		return ImGui::Checkbox(label, value);
+	}
+
+	// SameLine() only when the upcoming widget fits; otherwise wrap.
+	inline bool SameLineOrWrap(float width) {
+		if (ImGui::GetContentRegionAvail().x < width + ImGui::GetStyle().ItemSpacing.x) {
+			ImGui::NewLine();
+			return false;
+		}
+		ImGui::SameLine();
+		return true;
+	}
+
+	inline float ButtonWidth(const char* label) {
+		return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
 	}
 
 	// Colored status badge

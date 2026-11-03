@@ -283,8 +283,13 @@ LoadStatus SettingsStore::Load(std::string* error) {
 			a.seedColor = ColorAt(*appearance, "seedColor", a.seedColor);
 		}
 
-		if (const json* ui = ObjectAt(document, "ui"))
+		if (const json* ui = ObjectAt(document, "ui")) {
 			parsed.ui.hiddenTabs = StringArrayAt(*ui, "hiddenTabs");
+			parsed.ui.displayAddress = BoolAt(*ui, "displayAddress", parsed.ui.displayAddress);
+			parsed.ui.displayHex = BoolAt(*ui, "displayHex", parsed.ui.displayHex);
+			parsed.ui.showImPComplex = BoolAt(*ui, "showImPComplex", parsed.ui.showImPComplex);
+			parsed.ui.alwaysShowImP = BoolAt(*ui, "alwaysShowImP", parsed.ui.alwaysShowImP);
+		}
 
 		if (const json* shell = ObjectAt(document, "shell")) {
 			if (const json* sidebar = ObjectAt(*shell, "sidebar")) {
@@ -418,6 +423,10 @@ bool SettingsStore::Save(std::string* error) {
 
 	json ui = json::object();
 	ui["hiddenTabs"] = StringArrayToJson(m_data.ui.hiddenTabs);
+	ui["displayAddress"] = m_data.ui.displayAddress;
+	ui["displayHex"] = m_data.ui.displayHex;
+	ui["showImPComplex"] = m_data.ui.showImPComplex;
+	ui["alwaysShowImP"] = m_data.ui.alwaysShowImP;
 	document["ui"] = ui;
 
 	json shell = json::object();

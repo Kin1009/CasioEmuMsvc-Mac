@@ -56,6 +56,7 @@ bool Terminal::Start(const std::string& workingDirectory) {
 
 	const char* shell_env = std::getenv("SHELL");
 	std::string shell = (shell_env && *shell_env) ? shell_env : kDefaultShell;
+	const std::string shell_base = std::filesystem::path(shell).filename().string();
 
 	struct winsize size {};
 	size.ws_col = static_cast<unsigned short>(m_columns);
@@ -76,8 +77,16 @@ bool Terminal::Start(const std::string& workingDirectory) {
 		}
 		setenv("TERM", "xterm-256color", 1);
 		setenv("COLORTERM", "truecolor", 1);
-		execl(shell.c_str(), shell.c_str(), "-l", nullptr);
-		execl("/bin/zsh", "zsh", "-l", nullptr);
+		setenv("PROMPT", "%1~ %# ", 1);
+		setenv("RPROMPT", "", 1);
+		const std::string& base = shell_base;
+		if (base == "zsh")
+			execl(shell.c_str(), shell.c_str(), "-f", "-l", nullptr);
+		else if (base == "bash")
+			execl(shell.c_str(), shell.c_str(), "--noprofile", "--norc", "-i", nullptr);
+		else
+			execl(shell.c_str(), shell.c_str(), nullptr);
+		execl("/bin/zsh", "zsh", "-f", "-l", nullptr);
 		execl("/bin/sh", "sh", nullptr);
 		_exit(127);
 	}
@@ -95,7 +104,14 @@ bool Terminal::Start(const std::string& workingDirectory) {
 	m_cursorY = 0;
 	m_scrollOffset = 0;
 
-	const char* banner = "\x1b[38;5;244mCasioEmuMsvc terminal \xe2\x80\x94 zsh in the workspace. Ctrl+C interrupts, Ctrl+D exits.\x1b[0m\r\n";
+	// Keep the prompt short and deterministic: the user's full path plus a
+	// git segment was long enough to wrap and contained stray status markers.
+	// Startup rc files are skipped above, so this assignment is not overridden.
+	if (shell_base == "zsh")
+		SendString("PROMPT='%1~ %# '; RPROMPT=''; clear\r");
+	else
+		SendString("PS1='\\w \\$ '; clear\r");
+	const char* banner = "\x1b[38;5;244mCasioEmuMsvc terminal - shell in the workspace. Ctrl+C interrupts, Ctrl+D exits.\x1b[0m\r\n";
 	ParseInput(banner, std::strlen(banner));
 	return true;
 }

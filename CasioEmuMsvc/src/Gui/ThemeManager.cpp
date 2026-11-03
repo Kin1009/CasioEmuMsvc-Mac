@@ -67,17 +67,29 @@ std::string JoinHiddenTabs(const std::vector<std::string>& names) {
 }
 
 void ApplyDefaultLayoutMetrics(ImGuiStyle& style) {
-	style.WindowRounding = 8.0f;
-	style.ChildRounding = 8.0f;
-	style.PopupRounding = 8.0f;
-	style.FrameRounding = 6.0f;
-	style.TabRounding = 6.0f;
-	style.GrabRounding = 6.0f;
-	style.ScrollbarRounding = 6.0f;
-	style.ScrollbarSize = 12.0f;
-	style.WindowPadding = ImVec2(10.0f, 10.0f);
+	style.WindowRounding = 6.0f;
+	style.ChildRounding = 6.0f;
+	style.PopupRounding = 6.0f;
+	style.FrameRounding = 4.0f;
+	style.TabRounding = 4.0f;
+	style.GrabRounding = 4.0f;
+	style.ScrollbarRounding = 4.0f;
+	style.ScrollbarSize = 10.0f;
+	style.GrabMinSize = 10.0f;
+	style.WindowPadding = ImVec2(8.0f, 8.0f);
 	style.FramePadding = ImVec2(8.0f, 4.0f);
 	style.ItemSpacing = ImVec2(8.0f, 6.0f);
+	style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+	style.CellPadding = ImVec2(8.0f, 3.0f);
+	style.IndentSpacing = 16.0f;
+	style.WindowBorderSize = 1.0f;
+	style.ChildBorderSize = 1.0f;
+	style.PopupBorderSize = 1.0f;
+	style.FrameBorderSize = 0.0f;
+	style.TabBarBorderSize = 1.0f;
+	style.SeparatorTextBorderSize = 1.0f;
+	style.SeparatorTextPadding = ImVec2(12.0f, 4.0f);
+	style.DisabledAlpha = 0.55f;
 }
 
 bool FloatEquals(float lhs, float rhs) {

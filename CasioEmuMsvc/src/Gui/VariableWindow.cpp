@@ -2,6 +2,7 @@
 #include "CwiiHelp.h"
 #include "Models.h"
 #include "Ui.hpp"
+#include "Settings/Settings.h"
 #include "imgui/imgui.h"
 #include <string>
 std::string to_hex(unsigned int num) {
@@ -35,6 +36,15 @@ void VariableWindow::RenderCore() {
 	static bool showhex = false;
 	static bool showimg_auto = true;
 	static bool showimg_f = false;
+	static bool options_loaded = false;
+	if (!options_loaded) {
+		auto& ui = casioemu::settings::SettingsStore::Instance().Data().ui;
+		showaddr = ui.displayAddress;
+		showhex = ui.displayHex;
+		showimg_auto = ui.showImPComplex;
+		showimg_f = ui.alwaysShowImP;
+		options_loaded = true;
+	}
 
 	bool is_in_im = (*(base_addr + casioemu::GetModeOffset(m_emu->hardware_id)) & 0xFF) == 0xC4;
 	bool s_im = showimg_f ? 1 : (showimg_auto ? is_in_im : 0);
@@ -148,11 +158,20 @@ void VariableWindow::RenderCore() {
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	ImGui::Checkbox("VarWindow.ShowAddrOpt"_lc, &showaddr);
-	ImGui::SameLine();
-	ImGui::Checkbox("VarWindow.ShowHexOpt"_lc, &showhex);
-	ImGui::SameLine();
-	ImGui::Checkbox("VarWindow.ShowImPWhenComplex"_lc, &showimg_auto);
-	ImGui::SameLine();
-	ImGui::Checkbox("VarWindow.AlwaysShowImP"_lc, &showimg_f);
+	bool changed = false;
+	changed |= ImGui::Checkbox("VarWindow.ShowAddrOpt"_lc, &showaddr);
+	changed |= UIHelpers::CheckboxFlow("VarWindow.ShowHexOpt"_lc, &showhex, false);
+	// The ImP options are longer; give them their own row so labels never clip.
+	ImGui::NewLine();
+	changed |= ImGui::Checkbox("VarWindow.ShowImPWhenComplex"_lc, &showimg_auto);
+	changed |= UIHelpers::CheckboxFlow("VarWindow.AlwaysShowImP"_lc, &showimg_f, false);
+	if (changed) {
+		auto& ui = casioemu::settings::SettingsStore::Instance().Data().ui;
+		ui.displayAddress = showaddr;
+		ui.displayHex = showhex;
+		ui.showImPComplex = showimg_auto;
+		ui.alwaysShowImP = showimg_f;
+		std::string error;
+		casioemu::settings::SettingsStore::Instance().Save(&error);
+	}
 }

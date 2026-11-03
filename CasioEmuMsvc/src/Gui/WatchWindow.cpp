@@ -293,13 +293,13 @@ void WatchWindow::RenderCore() {
 			static_cast<unsigned long long>(debug.cycle_count));
 		if (ImGui::Checkbox("Trace", &eps_trace_enabled))
 			chipset.epscpu->EnableTrace(eps_trace_enabled);
-		ImGui::SameLine();
+		UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("Capacity").x + 100.0f);
 		ImGui::SetNextItemWidth(100.0f);
 		if (ImGui::InputInt("Capacity", &eps_trace_capacity, 256, 1024)) {
 			eps_trace_capacity = std::clamp(eps_trace_capacity, 0, 65536);
 			chipset.epscpu->SetTraceCapacity(static_cast<size_t>(eps_trace_capacity));
 		}
-		ImGui::SameLine();
+		UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("Clear trace"));
 		if (ImGui::Button("Clear trace"))
 			chipset.epscpu->ClearTrace();
 	}

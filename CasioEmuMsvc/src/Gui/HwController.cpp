@@ -23,12 +23,12 @@ void HwController::RenderCore() {
 	if (ImGui::Button("ScreenshotBtn"_lc)) {
 		m_emu->screenshot_requested.store(true);
 	}
-	ImGui::SameLine();
+	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("PopUpScreenBtn"_lc));
 	if (ImGui::Button("PopUpScreenBtn"_lc)) {
 		m_emu->mirroring_requested.store(true);
 	}
-	ImGui::SameLine();
 	const bool recording = m_emu->recording_active.load();
+	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth(recording ? "RecordStopBtn"_lc : "RecordStartBtn"_lc));
 	if (UIHelpers::ButtonWithShortcut(recording ? "RecordStopBtn"_lc : "RecordStartBtn"_lc, "Ctrl+F12")) {
 		if (recording) {
 			m_emu->recording_stop_requested.store(true);
@@ -38,12 +38,13 @@ void HwController::RenderCore() {
 		}
 	}
 	if (recording) {
-		ImGui::SameLine();
+		UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("RecordStatus"_lc).x + 80.0f);
 		ImGui::Text("RecordStatus"_lc, m_emu->recording_frame_count.load());
 	}
 	int capture_scale = std::max(1, m_emu->capture_scale.load());
 	bool capture_scale_changed = false;
 	ImGui::PushID("HwController.CaptureScale");
+	ImGui::NewLine();
 	if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
 		capture_scale--;
 		capture_scale_changed = true;
@@ -53,13 +54,13 @@ void HwController::RenderCore() {
 	if (ImGui::InputInt("##Value", &capture_scale, 0, 0)) {
 		capture_scale_changed = true;
 	}
-	ImGui::SameLine();
+	UIHelpers::SameLineOrWrap(ImGui::GetFrameHeight());
 	if (ImGui::Button("+", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
 		capture_scale++;
 		capture_scale_changed = true;
 	}
 	ImGui::PopID();
-	ImGui::SameLine();
+	UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("HwController.CaptureScale"_lc).x);
 	ImGui::TextUnformatted("HwController.CaptureScale"_lc);
 	if (capture_scale_changed) {
 		m_emu->capture_scale.store(std::max(1, capture_scale));

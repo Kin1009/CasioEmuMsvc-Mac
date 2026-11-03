@@ -479,7 +479,7 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 		}
 	}
 
-	ImGui::SameLine();
+	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("Rop.ReloadCustomInjects"_lc));
 	if (ImGui::Button("Rop.ReloadCustomInjects"_lc)) {
 		if (!isReloading.load() && !isShuttingDown.load()) {
 			std::string currentFilePath = ThemeManager::Instance().Settings().injectionFilePath;
