@@ -74,6 +74,7 @@ static const std::map<std::string, std::pair<int, int>> BUILTINS = {
     {"peek", {1, 1}}, {"poke", {2, 2}}, {"_hspan", {4, 4}},
     {"key_down", {1, 1}}, {"key_hit", {1, 1}}, {"buffered", {1, 1}}, {"flip", {0, 0}},
     {"render", {0, 0}}, {"renderStatus", {0, 0}}, {"_rpeek", {1, 1}}, {"exit", {0, 0}},
+    {"ticks", {0, 0}}, {"delay_ms", {1, 1}}, {"_hpeek", {1, 1}}, {"_hpoke", {2, 2}},
 };
 
 static const std::map<std::string, const char*> BUILTIN_SIGS = {
@@ -84,7 +85,9 @@ static const std::map<std::string, const char*> BUILTIN_SIGS = {
     {"key_down", "key_down(k)"},     {"key_hit", "key_hit(k)"},
     {"buffered", "buffered(on)"},    {"flip", "flip()"},
     {"render", "render()"},          {"renderStatus", "renderStatus()"},
-    {"_rpeek", "_rpeek(addr)"},      {"exit", "exit()"}};
+    {"_rpeek", "_rpeek(addr)"},      {"exit", "exit()"},
+    {"ticks", "ticks()"},            {"delay_ms", "delay_ms(ms)"},
+    {"_hpeek", "_hpeek(addr)"},      {"_hpoke", "_hpoke(addr, value)"}};
 
 static const std::set<std::string> KEYWORDS = {
     "def", "if", "elif", "else", "while", "for", "in", "range", "return", "break",
@@ -150,13 +153,15 @@ static const std::vector<std::pair<std::string, std::string>> PRELUDE = {
      "\ndef wait_key():\n    while key() != -1:\n        pass\n    while True:\n        k = key()\n"
      "        if k != -1:\n            return k\n"},
     {"hline",
-     "\ndef hline(x0, x1, y, c=1):\n    if y < 0 or y > @LAST@:\n        return 0\n    if x0 < 0:\n"
-     "        x0 = 0\n    if x1 > 192:\n        x1 = 192\n    if x0 >= x1:\n        return 0\n"
-     "    _hspan(x0, x1, y, c != 0)\n"},
+     "\n_clip_x0 = 0\n_clip_x1 = 192\n_clip_y0 = 0\n_clip_y1 = @ROWS@\n"
+     "\ndef hline(x0, x1, y, c=1):\n    if y < _clip_y0 or y >= _clip_y1:\n        return 0\n"
+     "    if x0 < _clip_x0:\n        x0 = _clip_x0\n    if x1 > _clip_x1:\n        x1 = _clip_x1\n"
+     "    if x0 >= x1:\n        return 0\n    _hspan(x0, x1, y, c != 0)\n"},
     {"vline",
-     "\ndef vline(x, y0, y1, c=1):\n    if x < 0 or x > 191:\n        return 0\n    if y0 < 0:\n"
-     "        y0 = 0\n    if y1 > @ROWS@:\n        y1 = @ROWS@\n    for y in range(y0, y1):\n"
-     "        pixel(x, y, c)\n"},
+     "\n_clip_x0 = 0\n_clip_x1 = 192\n_clip_y0 = 0\n_clip_y1 = @ROWS@\n"
+     "\ndef vline(x, y0, y1, c=1):\n    if x < _clip_x0 or x >= _clip_x1:\n        return 0\n"
+     "    if y0 < _clip_y0:\n        y0 = _clip_y0\n    if y1 > _clip_y1:\n        y1 = _clip_y1\n"
+     "    for y in range(y0, y1):\n        pixel(x, y, c)\n"},
     {"rect",
      "\ndef rect(x, y, w, h, c=1):\n    hline(x, x + w, y, c)\n    hline(x, x + w, y + h - 1, c)\n"
      "    vline(x, y, y + h, c)\n    vline(x + w - 1, y, y + h, c)\n"},
@@ -246,6 +251,944 @@ static const std::vector<std::pair<std::string, std::string>> PRELUDE = {
      "\ndef sprite(x, y, w, h, d):\n    bw = (w + 7) >> 3\n    for r in range(0, h):\n"
      "        for k in range(0, w):\n            b = _rpeek(d + r * bw + (k >> 3))\n"
      "            if b & (128 >> (k & 7)):\n                pixel(x + k, y + r)\n"},
+    {"ellipse", R"(
+def ellipse(cx, cy, rx, ry, c=1):
+    x = rx
+    y = 0
+    rx2 = rx * rx
+    ry2 = ry * ry
+    dx2 = ry2 * (1 - rx - rx)
+    dy2 = rx2
+    err2 = 0
+    sx2 = ry2 * rx
+    sy2 = 0
+    while sx2 >= sy2:
+        pixel(cx + x, cy + y, c)
+        pixel(cx - x, cy + y, c)
+        pixel(cx - x, cy - y, c)
+        pixel(cx + x, cy - y, c)
+        sy2 += rx2
+        err2 += dy2
+        dy2 += rx2 + rx2
+        y += 1
+        if err2 + err2 + dx2 > 0:
+            sx2 -= ry2
+            err2 += dx2
+            dx2 += ry2 + ry2
+            x -= 1
+    x = 0
+    y = ry
+    dx2 = ry2
+    dy2 = rx2 * (1 - ry - ry)
+    err2 = 0
+    sy2 = rx2 * ry
+    sx2 = 0
+    while sx2 <= sy2:
+        pixel(cx + x, cy + y, c)
+        pixel(cx - x, cy + y, c)
+        pixel(cx - x, cy - y, c)
+        pixel(cx + x, cy - y, c)
+        sx2 += ry2
+        err2 += dx2
+        dx2 += ry2 + ry2
+        x += 1
+        if err2 + err2 + dy2 > 0:
+            sy2 -= rx2
+            err2 += dy2
+            dy2 += rx2 + rx2
+            y -= 1
+)"},
+    {"fillellipse", R"(
+def fillellipse(cx, cy, rx, ry, c=1):
+    ry2 = ry * ry
+    rx2 = rx * rx
+    for j in range(0 - ry, ry + 1):
+        w = rx2 - rx2 * j * j / ry2
+        if w < 0:
+            w = 0
+        xw = 0
+        while xw * xw <= w:
+            xw += 1
+        hline(cx - xw, cx + xw, cy + j, c)
+)"},
+    {"tri", R"(
+def tri(x0, y0, x1, y1, x2, y2, c=1):
+    line(x0, y0, x1, y1, c)
+    line(x1, y1, x2, y2, c)
+    line(x2, y2, x0, y0, c)
+)"},
+    {"filltri", R"(
+def filltri(x0, y0, x1, y1, x2, y2, c=1):
+    ax = x0
+    ay = y0
+    bx = x1
+    by = y1
+    ex = x2
+    ey = y2
+    tm = 0
+    if ay > by:
+        tm = ax
+        ax = bx
+        bx = tm
+        tm = ay
+        ay = by
+        by = tm
+    if ay > ey:
+        tm = ax
+        ax = ex
+        ex = tm
+        tm = ay
+        ay = ey
+        ey = tm
+    if by > ey:
+        tm = bx
+        bx = ex
+        ex = tm
+        tm = by
+        by = ey
+        ey = tm
+    h = ey - ay
+    if h == 0:
+        return 0
+    for y in range(ay, ey + 1):
+        xa = ax + (ex - ax) * (y - ay) / h
+        if y < by:
+            xb = ax + (bx - ax) * (y - ay) / (by - ay + 1)
+        else:
+            xb = bx + (ex - bx) * (y - by) / (ey - by + 1)
+        if xa > xb:
+            tm = xa
+            xa = xb
+            xb = tm
+        hline(xa, xb + 1, y, c)
+)"},
+    {"roundrect", R"(
+def roundrect(x, y, w, h, r, c=1):
+    hline(x + r, x + w - r, y, c)
+    hline(x + r, x + w - r, y + h - 1, c)
+    vline(x, y + r, y + h - r, c)
+    vline(x + w - 1, y + r, y + h - r, c)
+    cx0 = x + r
+    cy0 = y + r
+    cx1 = x + w - 1 - r
+    cy1 = y + h - 1 - r
+    xc = r
+    yc = 0
+    er2 = 1 - r
+    while xc >= yc:
+        pixel(cx1 + xc, cy1 + yc, c)
+        pixel(cx1 + yc, cy1 + xc, c)
+        pixel(cx0 - yc, cy1 + xc, c)
+        pixel(cx0 - xc, cy1 + yc, c)
+        pixel(cx0 - xc, cy0 - yc, c)
+        pixel(cx0 - yc, cy0 - xc, c)
+        pixel(cx1 + yc, cy0 - xc, c)
+        pixel(cx1 + xc, cy0 - yc, c)
+        yc += 1
+        if er2 < 0:
+            er2 += yc + yc + 1
+        else:
+            xc -= 1
+            er2 += (yc - xc) * 2 + 1
+)"},
+    {"clip", R"(
+_clip_x0 = 0
+_clip_x1 = 192
+_clip_y0 = 0
+_clip_y1 = @ROWS@
+def clip(x=0, y=0, w=192, h=64):
+    x1 = x + w
+    y1 = y + h
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    if x1 > 192:
+        x1 = 192
+    if y1 > @ROWS@:
+        y1 = @ROWS@
+    _clip_x0 = x
+    _clip_x1 = x1
+    _clip_y0 = y
+    _clip_y1 = y1
+)"},
+    {"charz", R"(
+def charz(x, y, c, h, w):
+    if c < 32 or c > 126:
+        c = 63
+    base = (c - 32) * 8
+    sr = 0
+    er = 0
+    for r in range(0, h):
+        bits = _font[base + sr]
+        sc = 0
+        ec = 0
+        m = 128
+        for k in range(0, w):
+            pixel(x + k, y + r, (bits & m) != 0)
+            ec += 6
+            while ec >= w:
+                ec -= w
+                sc += 1
+                m = m >> 1
+        er += 8
+        while er >= h:
+            er -= h
+            sr += 1
+)"},
+    {"textz", R"(
+def textz(x, y, h, w, s):
+    c = _rpeek(s)
+    while c != 0:
+        charz(x, y, c, h, w)
+        x += w
+        s += 1
+        c = _rpeek(s)
+    return x
+)"},
+    {"numz", R"(
+def numz(x, y, h, w, n):
+    if n == -32768:
+        return textz(x, y, h, w, "-32768")
+    if n < 0:
+        charz(x, y, 45, h, w)
+        x += w
+        n = 0 - n
+    d = 10000
+    shown = 0
+    while d > 0:
+        q = n / d
+        n = n - q * d
+        if q > 0 or shown or d == 1:
+            charz(x, y, 48 + q, h, w)
+            x += w
+            shown = 1
+        d = d / 10
+    return x
+)"},
+    {"draw", R"(
+def _hexv(c):
+    if c > 57:
+        return (c | 32) - 87
+    return c - 48
+def draw(x, y, h, w, s):
+    bw = (w + 7) >> 3
+    for r in range(0, h):
+        for k in range(0, w):
+            i = (r * bw + (k >> 3)) * 2 + ((k & 4) >> 2)
+            if _hexv(_rpeek(s + i)) & (8 >> (k & 3)):
+                pixel(x + k, y + r)
+)"},
+    {"elapsed", R"(
+def elapsed(t):
+    return ticks() - t
+)"},
+    {"rtc", R"(
+def _dec(b):
+    return ((b >> 4) & 15) * 10 + (b & 15)
+def _bcd(v):
+    return ((v / 10) << 4) | (v % 10)
+def second():
+    return _dec(peek(0xF0C0))
+def minute():
+    return _dec(peek(0xF0C1))
+def hour():
+    return _dec(peek(0xF0C2))
+def day():
+    return peek(0xF0C3)
+def weekday():
+    return peek(0xF0C4)
+def month():
+    return peek(0xF0C5)
+def year():
+    return peek(0xF0C6) + 2026
+_rtc = [0, 0, 0, 0, 0, 0, 0]
+def _snap():
+    _rtc[0] = hour()
+    _rtc[1] = minute()
+    _rtc[2] = second()
+    _rtc[3] = day()
+    _rtc[4] = weekday()
+    _rtc[5] = month()
+    _rtc[6] = year()
+def rtc_read():
+    _snap()
+    while True:
+        a0 = _rtc[0]
+        a1 = _rtc[1]
+        a2 = _rtc[2]
+        a3 = _rtc[3]
+        a4 = _rtc[4]
+        a5 = _rtc[5]
+        a6 = _rtc[6]
+        _snap()
+        if a0 == _rtc[0] and a1 == _rtc[1] and a2 == _rtc[2] and a3 == _rtc[3] and a4 == _rtc[4] and a5 == _rtc[5] and a6 == _rtc[6]:
+            return
+def rtc_alive():
+    rtc_enable()
+    a = second()
+    t = ticks()
+    while elapsed(t) < 20000:
+        if second() != a:
+            return 1
+    return 0
+def set_hours(h):
+    poke(0xF0C2, _bcd(h))
+def set_minutes(m):
+    poke(0xF0C1, _bcd(m))
+def set_seconds(s):
+    poke(0xF0C0, _bcd(s))
+def set_day(d):
+    poke(0xF0C3, d)
+def set_month(mo):
+    poke(0xF0C5, mo)
+def set_year(y):
+    poke(0xF0C6, y - 2026)
+def set_time(h, m, s):
+    poke(0xF0C0, _bcd(s))
+    poke(0xF0C1, _bcd(m))
+    poke(0xF0C2, _bcd(h))
+def _weekday(y, mo, d):
+    if mo < 3:
+        mo += 12
+        y -= 1
+    k = y % 100
+    j = y / 100
+    h = (d + (13 * (mo + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7
+    return (h + 6) % 7
+def set_date(y, mo, d):
+    poke(0xF0C6, y - 2026)
+    poke(0xF0C5, mo)
+    poke(0xF0C3, d)
+    poke(0xF0C4, _weekday(y, mo, d))
+def rtc_enable():
+    poke(0xF0C7, 1)
+def rtc_disable():
+    poke(0xF0C7, 0)
+def rtc_reset():
+    rtc_disable()
+    poke(0xF0C0, 0)
+    poke(0xF0C1, 0)
+    poke(0xF0C2, 0)
+    poke(0xF0C3, 1)
+    poke(0xF0C4, 1)
+    poke(0xF0C5, 1)
+    poke(0xF0C6, 0)
+def draw_time(x, y):
+    rtc_read()
+    num(x, y, _rtc[0] / 10)
+    num(x + 8, y, _rtc[0] % 10)
+    text(x + 18, y, ":")
+    num(x + 26, y, _rtc[1] / 10)
+    num(x + 34, y, _rtc[1] % 10)
+    text(x + 44, y, ":")
+    num(x + 52, y, _rtc[2] / 10)
+    num(x + 60, y, _rtc[2] % 10)
+def draw_date(x, y):
+    rtc_read()
+    num(x, y, _rtc[3] / 10)
+    num(x + 8, y, _rtc[3] % 10)
+    text(x + 18, y, "/")
+    num(x + 26, y, _rtc[5] / 10)
+    num(x + 34, y, _rtc[5] % 10)
+    text(x + 44, y, "/")
+    num(x + 52, y, _rtc[6] % 100 / 10)
+    num(x + 60, y, _rtc[6] % 10)
+)"},
+    {"getc", R"(
+def getc():
+    return wait_key()
+)"},
+    {"input_num", R"(
+def _dig(k):
+    if k == K_0:
+        return 0
+    elif k == K_1:
+        return 1
+    elif k == K_2:
+        return 2
+    elif k == K_3:
+        return 3
+    elif k == K_4:
+        return 4
+    elif k == K_5:
+        return 5
+    elif k == K_6:
+        return 6
+    elif k == K_7:
+        return 7
+    elif k == K_8:
+        return 8
+    elif k == K_9:
+        return 9
+    return -1
+def input_num(x, y, default=0):
+    n5 = default
+    sg5 = 0
+    if n5 < 0:
+        sg5 = 1
+        n5 = 0 - n5
+        if n5 < 0:
+            n5 = 32767
+    edit5 = 0
+    m5 = peek(0xE800)
+    while True:
+        clear_rect(x, y, 80, 10)
+        if sg5 and n5 != 0:
+            char(x, y, 45)
+            num(x + 6, y, n5)
+        else:
+            num(x, y, n5)
+        if m5:
+            flip()
+        k5 = wait_key()
+        if k5 == K_AC:
+            return -32768
+        if k5 == K_EXE:
+            if sg5:
+                return 0 - n5
+            return n5
+        if k5 == K_MINUS or k5 == K_NEG:
+            sg5 = 1 - sg5
+            edit5 = 1
+        elif k5 == K_DEL:
+            n5 = n5 / 10
+            edit5 = 1
+        else:
+            d5 = _dig(k5)
+            if d5 >= 0:
+                if edit5 == 0 or n5 == 0:
+                    n5 = d5
+                elif n5 < 3276:
+                    n5 = n5 * 10 + d5
+                elif n5 == 3276 and d5 < 8:
+                    n5 = n5 * 10 + d5
+                edit5 = 1
+)"},
+    {"sprite_rot", R"(
+def _sprite_px(sx, sy, pw, ph, data, rot, flipx, flipy):
+    bw = (pw + 7) / 8
+    for py in range(0, ph):
+        for px in range(0, pw):
+            byte_idx = py * bw + px / 8
+            bit_pos = 7 - (px & 7)
+            bval = _rpeek(data + byte_idx)
+            if (bval >> bit_pos) & 1:
+                rx = px
+                ry = py
+                if flipx:
+                    rx = pw - 1 - px
+                if flipy:
+                    ry = ph - 1 - py
+                if rot == 0:
+                    pixel(sx + rx, sy + ry)
+                elif rot == 1:
+                    pixel(sx + ph - 1 - ry, sy + rx)
+                elif rot == 2:
+                    pixel(sx + pw - 1 - rx, sy + ph - 1 - ry)
+                elif rot == 3:
+                    pixel(sx + ry, sy + pw - 1 - rx)
+def sprite_rot(x, y, pw, ph, data, w=1, h=1, rot=0):
+    fpw = pw
+    fph = ph
+    fx = 0
+    fy = 0
+    if fpw < 0:
+        fx = 1
+        fpw = 0 - fpw
+    if fph < 0:
+        fy = 1
+        fph = 0 - fph
+    _sprite_px(x, y, fpw, fph, data, rot, fx, fy)
+)"},
+    {"getc_tap", R"(
+_gc_pend = 0
+def getc_tap():
+    global _gc_pend
+    if _gc_pend:
+        c7 = _gc_pend
+        _gc_pend = 0
+        return c7
+    last_k = -1
+    tap_n = 0
+    tap_t = 0
+    while True:
+        k6 = key()
+        if k6 == K_AC:
+            return -32768
+        if k6 == K_EXE or k6 == K_DEL:
+            if last_k != -1:
+                _gc_pend = -2
+                if k6 == K_DEL:
+                    _gc_pend = -3
+                return _tap_char(last_k, tap_n)
+            if k6 == K_EXE:
+                return -2
+            return -3
+        if k6 != -1 and k6 != last_k:
+            if last_k != -1:
+                return _tap_char(last_k, tap_n)
+            last_k = k6
+            tap_n = 0
+            tap_t = ticks()
+        elif k6 == last_k:
+            if ticks() - tap_t > 800:
+                tap_n += 1
+                tap_t = ticks()
+        elif k6 == -1 and last_k != -1:
+            if ticks() - tap_t > 6400:
+                c6 = _tap_char(last_k, tap_n)
+                last_k = -1
+                tap_n = 0
+                return c6
+def _tap_char(k, n):
+    if k == K_1:
+        return 46 + n % 4
+    if k == K_2:
+        return 65 + n % 3
+    if k == K_3:
+        return 68 + n % 3
+    if k == K_4:
+        return 71 + n % 3
+    if k == K_5:
+        return 74 + n % 3
+    if k == K_6:
+        return 77 + n % 3
+    if k == K_7:
+        return 80 + n % 4
+    if k == K_8:
+        return 84 + n % 3
+    if k == K_9:
+        return 87 + n % 4
+    if k == K_0:
+        return 32
+    return 63
+)"},
+    {"input_tap", R"(
+def input_tap(bptr, max_len, x, y):
+    pos6 = 0
+    m6 = peek(0xE800)
+    poke(bptr, 0)
+    while key() != -1:
+        pass
+    while True:
+        c6 = getc_tap()
+        if c6 == -32768:
+            return -1
+        if c6 == -2:
+            return pos6
+        if c6 == -3:
+            if pos6 > 0:
+                pos6 -= 1
+                poke(bptr + pos6, 0)
+        elif pos6 < max_len - 1:
+            poke(bptr + pos6, c6)
+            pos6 += 1
+            poke(bptr + pos6, 0)
+        clear_rect(x, y, 120, 10)
+        text(x, y, bptr)
+        if m6:
+            flip()
+)"},
+    {"word", R"(
+def _rdw(a):
+    return peek(a) + peek(a + 1) * 256
+def _wrw(a, v):
+    poke(a, v & 255)
+    poke(a + 1, (v >> 8) & 255)
+)"},
+    {"alloc", R"(
+def alloc(n):
+    if n < 1:
+        return 0
+    need = n
+    if need & 1:
+        need += 1
+    need += 2
+    p = _rdw(0xE818)
+    hi = _rdw(0xE81A)
+    while p < hi:
+        h = _rdw(p)
+        sz = h & 0x7FFF
+        if h < 0 and sz >= need:
+            if sz - need >= 4:
+                _wrw(p, need)
+                _wrw(p + need, (sz - need) | 0x8000)
+            else:
+                _wrw(p, sz)
+            return p + 2
+        p += sz
+    return 0
+)"},
+    {"free", R"(
+def _merge():
+    q = _rdw(0xE818)
+    hi = _rdw(0xE81A)
+    while q < hi:
+        h = _rdw(q)
+        if h < 0:
+            sz = h & 0x7FFF
+            n2 = q + sz
+            while n2 < hi:
+                h2 = _rdw(n2)
+                if h2 >= 0:
+                    break
+                sz += h2 & 0x7FFF
+                n2 = q + sz
+            _wrw(q, sz | 0x8000)
+            q += sz
+        else:
+            q += h
+    return 0
+def free(p):
+    if p == 0:
+        return 0
+    _wrw(p - 2, _rdw(p - 2) - 32768)
+    _merge()
+    return 0
+)"},
+    {"file", R"(
+def _cpy(_dst, _src, n):
+    for i in range(0, n):
+        poke(_dst + i, peek(_src + i))
+    return 0
+def _feq(_nm, _node):
+    k = 0
+    while k < 12:
+        c = _rpeek(_nm + k)
+        if c != peek(_node + k):
+            return 0
+        if c == 0:
+            return 1
+        k += 1
+    return 1
+def _fnode(_nm):
+    p = _rdw(0xE81C)
+    while p != 0:
+        if _feq(_nm, p):
+            return p
+        p = _rdw(p + 12)
+    return 0
+def _fsnew(_nm):
+    _node = alloc(18)
+    if _node == 0:
+        return 0
+    k = 0
+    while k < 12:
+        poke(_node + k, 0)
+        k += 1
+    k = 0
+    while k < 12:
+        c = _rpeek(_nm + k)
+        if c == 0:
+            break
+        poke(_node + k, c)
+        k += 1
+    if k == 12:
+        free(_node)
+        return 0
+    _wrw(_node + 12, _rdw(0xE81C))
+    _wrw(0xE81C, _node)
+    _wrw(_node + 14, 0)
+    _wrw(_node + 16, 0)
+    return _node
+def f_save(_nm, _buf, n):
+    if n < 0:
+        return 0
+    _node = _fnode(_nm)
+    if _node == 0:
+        _node = _fsnew(_nm)
+        if _node == 0:
+            return 0
+    _old = _rdw(_node + 14)
+    if _old != 0:
+        free(_old)
+    _wrw(_node + 14, 0)
+    _wrw(_node + 16, 0)
+    if n == 0:
+        return 1
+    _data = alloc(n)
+    if _data == 0:
+        return 0
+    _cpy(_data, _buf, n)
+    _wrw(_node + 14, _data)
+    _wrw(_node + 16, n)
+    return 1
+def f_load(_nm, _buf, mx):
+    _node = _fnode(_nm)
+    if _node == 0:
+        return -1
+    n = _rdw(_node + 16)
+    if n > mx:
+        n = mx
+    _data = _rdw(_node + 14)
+    if _data != 0 and n > 0:
+        _cpy(_buf, _data, n)
+    return n
+def f_exists(_nm):
+    if _fnode(_nm) != 0:
+        return 1
+    return 0
+def f_remove(_nm):
+    _prev = 0
+    p = _rdw(0xE81C)
+    while p != 0:
+        if _feq(_nm, p):
+            _nxt = _rdw(p + 12)
+            if _prev == 0:
+                _wrw(0xE81C, _nxt)
+            else:
+                _wrw(_prev + 12, _nxt)
+            d = _rdw(p + 14)
+            if d != 0:
+                free(d)
+            free(p)
+            return 1
+        _prev = p
+        p = _rdw(p + 12)
+    return 0
+)"},
+    {"input_pad", R"(
+_pad_cs = "abcdefghijklmnopqrstuvwxyz0123456789.,?!"
+_pad_up = 0
+def _pad_ch(r, c):
+    global _pad_up
+    ch = _rpeek(_pad_cs + r * 10 + c)
+    if _pad_up and ch >= 97 and ch <= 122:
+        ch = ch - 32
+    return ch
+def _pdig(k):
+    if k == K_0:
+        return 48
+    elif k == K_1:
+        return 49
+    elif k == K_2:
+        return 50
+    elif k == K_3:
+        return 51
+    elif k == K_4:
+        return 52
+    elif k == K_5:
+        return 53
+    elif k == K_6:
+        return 54
+    elif k == K_7:
+        return 55
+    elif k == K_8:
+        return 56
+    elif k == K_9:
+        return 57
+    return 0
+def _pad_draw_grid():
+    clear_rect(0, 10, 192, 53)
+    hline(0, 192, 10)
+    hline(0, 192, 21)
+    hline(0, 192, 32)
+    hline(0, 192, 43)
+    hline(0, 192, 54)
+    hline(0, 192, 62)
+    c = 0
+    while c <= 10:
+        vline(1 + c * 19, 10, 54)
+        c += 1
+    r = 0
+    while r < 4:
+        c = 0
+        while c < 10:
+            char(7 + c * 19, 11 + r * 11, _pad_ch(r, c))
+            c += 1
+        r += 1
+    vline(1, 54, 63)
+    vline(30, 54, 63)
+    vline(131, 54, 63)
+    vline(162, 54, 63)
+    vline(191, 54, 63)
+    if _pad_up:
+        text(4, 55, "AA")
+    else:
+        text(4, 55, "Aa")
+    text(55, 55, "SPACE")
+    text(134, 55, "DEL")
+    text(165, 55, "OK")
+def _pad_sel(r, c):
+    if r < 4:
+        invert_rect(2 + c * 19, 11 + r * 11, 18, 10)
+    else:
+        if c == 0:
+            invert_rect(2, 55, 28, 8)
+        elif c == 1:
+            invert_rect(31, 55, 100, 8)
+        elif c == 2:
+            invert_rect(132, 55, 29, 8)
+        else:
+            invert_rect(163, 55, 28, 8)
+def _pad_redraw_letters():
+    r = 0
+    while r < 2:
+        c = 0
+        while c < 10:
+            clear_rect(2 + c * 19, 11 + r * 11, 18, 10)
+            char(7 + c * 19, 11 + r * 11, _pad_ch(r, c))
+            c += 1
+        r += 1
+    clear_rect(2, 55, 28, 8)
+    if _pad_up:
+        text(4, 55, "AA")
+    else:
+        text(4, 55, "Aa")
+def _pad_field(b, n, x, fw, m):
+    clear_rect(x + 1, 1, fw - 2, 8)
+    text(x + 2, 1, b)
+    char(x + 2 + n * 6, 1, 95)
+    if m:
+        flip()
+def input_pad(bptr, max_len, x, y):
+    global _pad_up
+    _pad_up = 0
+    pad_r = 0
+    pad_c = 0
+    pos7 = 0
+    m7 = peek(0xE800)
+    fw7 = max_len * 6 + 8
+    if fw7 > 190:
+        fw7 = 190
+    poke(bptr, 0)
+    while key() != -1:
+        pass
+    clear()
+    rect(x, 0, fw7, 10)
+    _pad_draw_grid()
+    _pad_field(bptr, 0, x, fw7, 0)
+    _pad_sel(0, 0)
+    if m7:
+        flip()
+    while True:
+        k7 = wait_key()
+        if k7 == K_AC:
+            return -1
+        if k7 == K_ANS:
+            return pos7
+        asc8 = _pdig(k7)
+        if asc8 > 0:
+            if pos7 < max_len - 1:
+                poke(bptr + pos7, asc8)
+                pos7 += 1
+                poke(bptr + pos7, 0)
+                _pad_field(bptr, pos7, x, fw7, m7)
+        if k7 == K_DOT:
+            if pos7 < max_len - 1:
+                poke(bptr + pos7, 46)
+                pos7 += 1
+                poke(bptr + pos7, 0)
+                _pad_field(bptr, pos7, x, fw7, m7)
+        if k7 == K_DEL:
+            if pos7 > 0:
+                _pad_sel(pad_r, pad_c)
+                pos7 -= 1
+                poke(bptr + pos7, 0)
+                _pad_field(bptr, pos7, x, fw7, m7)
+                _pad_sel(pad_r, pad_c)
+        if k7 == K_EXE:
+            if pad_r < 4:
+                if pos7 < max_len - 1:
+                    poke(bptr + pos7, _pad_ch(pad_r, pad_c))
+                    pos7 += 1
+                    poke(bptr + pos7, 0)
+                    _pad_field(bptr, pos7, x, fw7, m7)
+            else:
+                if pad_c == 0:
+                    _pad_sel(pad_r, pad_c)
+                    _pad_up = 1 - _pad_up
+                    _pad_redraw_letters()
+                    _pad_sel(pad_r, pad_c)
+                    if m7:
+                        flip()
+                elif pad_c == 1:
+                    if pos7 < max_len - 1:
+                        poke(bptr + pos7, 32)
+                        pos7 += 1
+                        poke(bptr + pos7, 0)
+                        _pad_field(bptr, pos7, x, fw7, m7)
+                elif pad_c == 2:
+                    if pos7 > 0:
+                        pos7 -= 1
+                        poke(bptr + pos7, 0)
+                        _pad_field(bptr, pos7, x, fw7, m7)
+                else:
+                    return pos7
+        if k7 == K_UP:
+            _pad_sel(pad_r, pad_c)
+            if pad_r == 0:
+                pad_r = 4
+                if pad_c >= 7:
+                    pad_c = 3
+                elif pad_c >= 3:
+                    pad_c = 2
+                elif pad_c >= 1:
+                    pad_c = 1
+                else:
+                    pad_c = 0
+            elif pad_r == 4:
+                pad_r = 3
+                if pad_c == 0:
+                    pad_c = 0
+                elif pad_c == 1:
+                    pad_c = 4
+                elif pad_c == 2:
+                    pad_c = 7
+                else:
+                    pad_c = 9
+            else:
+                pad_r -= 1
+            _pad_sel(pad_r, pad_c)
+            if m7:
+                flip()
+        if k7 == K_DOWN:
+            _pad_sel(pad_r, pad_c)
+            if pad_r == 3:
+                pad_r = 4
+                if pad_c >= 7:
+                    pad_c = 3
+                elif pad_c >= 4:
+                    pad_c = 2
+                elif pad_c >= 1:
+                    pad_c = 1
+                else:
+                    pad_c = 0
+            elif pad_r == 4:
+                pad_r = 0
+                if pad_c == 0:
+                    pad_c = 0
+                elif pad_c == 1:
+                    pad_c = 4
+                elif pad_c == 2:
+                    pad_c = 7
+                else:
+                    pad_c = 9
+            else:
+                pad_r += 1
+            _pad_sel(pad_r, pad_c)
+            if m7:
+                flip()
+        if k7 == K_LEFT:
+            _pad_sel(pad_r, pad_c)
+            if pad_r < 4:
+                pad_c = (pad_c + 9) % 10
+            else:
+                pad_c = (pad_c + 3) % 4
+            _pad_sel(pad_r, pad_c)
+            if m7:
+                flip()
+        if k7 == K_RIGHT:
+            _pad_sel(pad_r, pad_c)
+            if pad_r < 4:
+                pad_c = (pad_c + 1) % 10
+            else:
+                pad_c = (pad_c + 1) % 4
+            _pad_sel(pad_r, pad_c)
+            if m7:
+                flip()
+)"},
 };
 
 static std::string prelude_font() {

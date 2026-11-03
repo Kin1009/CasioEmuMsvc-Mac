@@ -19,6 +19,8 @@ private:
 };
 
 extern "C" void fPluginLoad(PluginApi* api) {
-	api->RegisterPlugin("com.casioemu.tab.notes", "Session Notes", "1.0.0", "CasioEmuMsvc", "Example native tab");
+	(void)api->RegisterPlugin("com.casioemu.tab.notes", "Session Notes", "1.0.0", "CasioEmuMsvc", "Example native tab");
 	api->AddWindow(new NotesWindow());
 }
+
+PLUGIN_EXPORT_ABI();

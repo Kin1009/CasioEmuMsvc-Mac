@@ -18,6 +18,10 @@
 #include "Ext/RomPackage.h"
 #include "Ext/SysDialog.h"
 #include "ModelConfig.h"
+#include "Shell/Shell.h"
+
+bool g_shellBuildRequest = false;
+bool g_shellBuildRunRequest = false;
 
 #include <SDL.h>
 
@@ -245,6 +249,12 @@ public:
 
 	void RenderCore() override {
 		PickTargetFromModel();
+		if (g_shellBuildRequest) {
+			const bool run = g_shellBuildRunRequest;
+			g_shellBuildRequest = false;
+			g_shellBuildRunRequest = false;
+			DoBuild(run);
+		}
 		// Remember the model's real ROM before any Build & Run can replace
 		// ModelDefinition.rom_path with a generated session image.
 		if (stock_rom_path_.empty() && m_emu)
@@ -360,6 +370,12 @@ private:
 
 	void AddLog(Sev sev, const std::string& text) {
 		log_.push_back({sev, text});
+		if (sev == Sev::Error)
+			casioemu::shell::AppendDiagnostic(casioemu::shell::LogSeverity::Error, text);
+		else if (sev == Sev::Warning)
+			casioemu::shell::AppendDiagnostic(casioemu::shell::LogSeverity::Warning, text);
+		else
+			casioemu::shell::AppendOutput(text);
 	}
 
 	// Compile once; a failure comes back as a single diagnostic.
@@ -417,6 +433,7 @@ private:
 			if (diag.line > 0)
 				editor_.SetErrorMarkers({ {diag.line, diag.msg} });
 			AddLog(Sev::Error, wiz::fmt("%s: %s", SevName(diag.sev), diag.msg.c_str()));
+			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
 
@@ -427,6 +444,7 @@ private:
 		for (const std::string& note : wiz::last_notes())
 			AddLog(Sev::Note, note);
 		ReportStats();
+		casioemu::shell::NotifyBuildFinished(true);
 		if (run_after) {
 			if (target == "cwapp" && Is580())
 				PatchCurrentROM();
@@ -481,10 +499,12 @@ private:
 		if (!rop.ok) {
 			AddLog(Sev::Error, rop.error);
 			diags_.push_back({Sev::Error, -1, -1, rop.error});
+			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
 		if (rop.bytes.empty()) {
 			AddLog(Sev::Error, "the payload is empty");
+			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
 

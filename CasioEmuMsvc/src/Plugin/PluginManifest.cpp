@@ -255,11 +255,23 @@ ManifestResult ParseManifest(const std::string& jsonText) {
 		return Fail("manifest.version", "version must be semver (MAJOR.MINOR.PATCH)");
 
 	GetString(document, "author", manifest.author, false, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 	GetString(document, "description", manifest.description, false, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 	GetString(document, "homepage", manifest.homepage, false, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 	GetString(document, "min_host", manifest.minHost, false, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 	GetString(document, "entry_point", manifest.entryPoint, true, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 	GetString(document, "native_entry", manifest.nativeEntry, false, error);
+	if (!error.empty())
+		return Fail("manifest.field", error);
 
 	if (manifest.description.size() > 500)
 		return Fail("manifest.field", "description must be at most 500 characters");
@@ -331,8 +343,9 @@ ManifestResult ParseManifest(const std::string& jsonText) {
 		if (!document["api_version"].is_number_integer())
 			return Fail("manifest.field", "api_version must be an integer");
 		manifest.apiVersion = document["api_version"].get<int>();
-		if (manifest.apiVersion < 1 || manifest.apiVersion > kHostApiVersion)
-			return Fail("manifest.field", "unsupported api_version " + std::to_string(manifest.apiVersion));
+		if (manifest.apiVersion < kHostApiMinVersion || manifest.apiVersion > kHostApiVersion)
+			return Fail("manifest.field", "unsupported api_version " + std::to_string(manifest.apiVersion) +
+				" (host supports " + std::to_string(kHostApiMinVersion) + ".." + std::to_string(kHostApiVersion) + ")");
 	}
 
 	const bool native_type = manifest.type == PluginType::Tab || manifest.type == PluginType::Tool;

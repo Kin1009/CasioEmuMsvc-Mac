@@ -1,19 +1,20 @@
 #include "PluginRegistry.h"
 
-// The host shares UIWindow with the plugin SDK.  Define _NO_FUND_API before
-// including PluginApi.h so the header does not declare its own UIWindow; the
-// canonical definition lives in Gui/Ui.hpp.
-#define _NO_FUND_API
-#include "PluginApi.h"
+// The registry is deliberately GUI-free: everything the shell owns (theme,
+// windows, settings, file dialog, PluginApi factory) is reached through
+// PluginHost, so this file also links into the headless test harness.
+#include "PluginHost.h"
+#include "PluginHostApi.h"
+#include "PluginLayout.h"
 #include "PluginMan.h"
-#include "ThemeTokens.h"
-#include "ThemeManager.h"
-#include "Ui.hpp"
+#include "PluginNative.h"
+#include "PluginPayloads.h"
+#include "PluginPermissions.h"
+#include "PluginResources.h"
 
 #include "../../../McpPlugin/json.hpp"
 
 #include <imgui.h>
-#include <SDL.h>
 
 #include <algorithm>
 #include <cctype>
@@ -24,8 +25,6 @@
 #include <sstream>
 #include <system_error>
 
-extern PluginApi* g_pluginapi;
-
 namespace casioemu::plugin {
 namespace {
 
@@ -33,13 +32,10 @@ using json = nlohmann::json;
 
 constexpr const char* kTrustFileName = "plugin-trust.json";
 
+using PluginLoadFn = void (*)(PluginApi*);
+
 std::filesystem::path ExecutableDir() {
-	char* base = SDL_GetBasePath();
-	if (!base)
-		return std::filesystem::current_path();
-	std::filesystem::path path(base);
-	SDL_free(base);
-	return path;
+	return Host().ExecutableDir();
 }
 
 bool IsPortableBuild() {
@@ -59,10 +55,6 @@ bool ReadTextFile(const std::filesystem::path& path, std::string& out, std::stri
 	return true;
 }
 
-bool SamePermissions(const std::vector<std::string>& lhs, const std::vector<std::string>& rhs) {
-	return lhs == rhs;
-}
-
 std::string JoinPermissions(const std::vector<std::string>& permissions) {
 	std::string result;
 	for (const auto& permission : permissions) {
@@ -71,6 +63,21 @@ std::string JoinPermissions(const std::vector<std::string>& permissions) {
 		result += permission;
 	}
 	return result;
+}
+
+bool HasPluginExtension(const std::filesystem::path& path) {
+	std::string extension = path.extension().string();
+	std::transform(extension.begin(), extension.end(), extension.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return extension == ".plugin";
+}
+
+std::string TrustReason(const TrustEvaluation& evaluation) {
+	if (evaluation.permissionsChanged)
+		return "permissions changed";
+	if (evaluation.hashChanged)
+		return "package hash changed";
+	return "not trusted yet";
 }
 
 } // namespace
@@ -119,6 +126,11 @@ void PluginRegistry::Initialize() {
 	if (m_initialized)
 		return;
 	m_initialized = true;
+	static bool exit_hook_registered = false;
+	if (!exit_hook_registered) {
+		exit_hook_registered = true;
+		std::atexit(&PluginRegistry::AtExit);
+	}
 	LoadTrust();
 	m_entries.clear();
 
@@ -135,119 +147,38 @@ void PluginRegistry::Initialize() {
 }
 
 void PluginRegistry::Shutdown() {
+	ShutdownInternal(true);
+}
+
+void PluginRegistry::ShutdownInternal(bool remove_windows) {
 	for (auto& entry : m_entries) {
-		if (entry.handle) {
-			dlclose(entry.handle);
-			entry.handle = nullptr;
-			entry.loaded = false;
-		}
+		if (entry.removed || !entry.loaded)
+			continue;
+		UnloadEntry(entry, remove_windows);
 	}
 	m_entries.clear();
-	m_trust.clear();
+	m_trust.Records().clear();
+	m_activeThemeId.clear();
+	m_activeThemeDocument.clear();
 	m_initialized = false;
 }
 
+void PluginRegistry::AtExit() {
+	if (Instance().m_initialized)
+		Instance().ShutdownInternal(false);
+}
+
 void PluginRegistry::LoadTrust() {
-	m_trust.clear();
-	const std::filesystem::path path = SettingsDir() / kTrustFileName;
-	std::ifstream file(path, std::ios::binary);
-	if (!file)
-		return;
-	try {
-		json document;
-		file >> document;
-		if (!document.is_object() || document.value("schema", 0) != 1)
-			return;
-		if (!document.contains("records") || !document["records"].is_array())
-			return;
-		for (const auto& item : document["records"]) {
-			if (!item.is_object())
-				continue;
-			TrustRecord record;
-			record.id = item.value("id", "");
-			record.version = item.value("version", "");
-			record.sha256 = item.value("sha256", "");
-			record.enabled = item.value("enabled", true);
-			record.blocked = item.value("blocked", false);
-			if (item.contains("permissions") && item["permissions"].is_array()) {
-				for (const auto& permission : item["permissions"]) {
-					if (permission.is_string())
-						record.permissions.push_back(permission.get<std::string>());
-				}
-			}
-			if (!record.id.empty())
-				m_trust.push_back(std::move(record));
-		}
-	}
-	catch (const json::exception& error) {
-		LogLine(std::string("[WARN] Cannot read plugin trust store: ") + error.what());
-	}
+	m_trust.Records().clear();
+	std::string error;
+	if (!m_trust.Load(SettingsDir() / kTrustFileName, &error) && !error.empty())
+		LogLine("[WARN] Cannot read plugin trust store: " + error);
 }
 
-void PluginRegistry::SaveTrust() const {
-	std::error_code ec;
-	std::filesystem::create_directories(SettingsDir(), ec);
-	const std::filesystem::path path = SettingsDir() / kTrustFileName;
-	const std::filesystem::path temp = path.string() + ".tmp";
-	json document;
-	document["schema"] = 1;
-	document["records"] = json::array();
-	for (const auto& record : m_trust) {
-		json item;
-		item["id"] = record.id;
-		item["version"] = record.version;
-		item["sha256"] = record.sha256;
-		item["permissions"] = record.permissions;
-		item["enabled"] = record.enabled;
-		item["blocked"] = record.blocked;
-		document["records"].push_back(std::move(item));
-	}
-	std::ofstream file(temp, std::ios::binary | std::ios::trunc);
-	if (!file)
-		return;
-	file << document.dump(2);
-	file.close();
-	std::filesystem::rename(temp, path, ec);
-	if (ec) {
-		std::filesystem::remove(path, ec);
-		std::filesystem::rename(temp, path, ec);
-	}
-}
-
-PluginRegistry::TrustRecord* PluginRegistry::FindTrust(const std::string& id) {
-	for (auto& record : m_trust) {
-		if (record.id == id)
-			return &record;
-	}
-	return nullptr;
-}
-
-const PluginRegistry::TrustRecord* PluginRegistry::FindTrust(const std::string& id) const {
-	for (const auto& record : m_trust) {
-		if (record.id == id)
-			return &record;
-	}
-	return nullptr;
-}
-
-void PluginRegistry::UpsertTrust(const PluginEntry& entry, bool blocked) {
-	TrustRecord* record = FindTrust(entry.Id());
-	if (!record) {
-		m_trust.push_back({});
-		record = &m_trust.back();
-	}
-	record->id = entry.Id();
-	record->version = entry.Version();
-	record->sha256 = entry.package.sha256;
-	record->permissions = entry.package.manifest.permissions;
-	record->enabled = entry.enabled;
-	record->blocked = blocked;
-}
-
-void PluginRegistry::RemoveTrust(const std::string& id) {
-	m_trust.erase(std::remove_if(m_trust.begin(), m_trust.end(), [&](const TrustRecord& record) {
-		return record.id == id;
-	}), m_trust.end());
+void PluginRegistry::SaveTrust() {
+	std::string error;
+	if (!m_trust.Save(SettingsDir() / kTrustFileName, &error))
+		LogLine("[ERROR] Cannot write plugin trust store: " + error);
 }
 
 void PluginRegistry::ScanDirectory(const std::filesystem::path& directory) {
@@ -261,9 +192,7 @@ void PluginRegistry::ScanDirectory(const std::filesystem::path& directory) {
 			break;
 		if (!item.is_regular_file(ec))
 			continue;
-		std::string extension = item.path().extension().string();
-		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		if (extension != ".plugin")
+		if (!HasPluginExtension(item.path()))
 			continue;
 		AddPackage(item.path());
 	}
@@ -301,46 +230,121 @@ void PluginRegistry::ApplyTrustAndLoad(PluginEntry& entry) {
 		return;
 
 	const Manifest& manifest = entry.package.manifest;
-	const TrustRecord* record = FindTrust(manifest.id);
-	const bool native = manifest.IsNative();
-	const bool hash_changed = record && record->sha256 != entry.package.sha256;
-	const bool permissions_changed = record && !SamePermissions(record->permissions, manifest.permissions);
+	const TrustRecord* record = m_trust.Find(manifest.id);
+	const TrustEvaluation evaluation = EvaluateTrust(record, manifest.IsNative(),
+		entry.package.sha256, manifest.permissions);
 
-	if (record && record->blocked) {
+	entry.trustedAt = record ? record->trustedAt : std::string();
+
+	switch (evaluation.decision) {
+	case TrustDecision::Blocked:
 		entry.blocked = true;
 		entry.enabled = false;
+		entry.trusted = true;
 		entry.state = "Blocked";
-		LogLine("[WARN] Blocked plugin " + manifest.id + " (hash " + entry.package.sha256.substr(0, 12) + ")");
+		entry.error = "plugin.blocked: blocked by the trust store";
+		LogLine("[WARN] Blocked plugin " + manifest.id + " (hash " +
+			entry.package.sha256.substr(0, 12) + ")");
 		return;
-	}
-
-	if (record && !record->enabled) {
+	case TrustDecision::Disabled:
 		entry.enabled = false;
 		entry.trusted = true;
 		entry.state = "Disabled";
 		return;
-	}
-
-	if (record && !permissions_changed && !(native && hash_changed)) {
+	case TrustDecision::Trusted: {
 		entry.trusted = true;
 		entry.enabled = true;
-		if (hash_changed) {
-			UpsertTrust(entry, false);
+		if (evaluation.hashChanged) {
+			// Declarative upgrade with unchanged permissions: record the new
+			// hash in the per-hash history without prompting.
+			TrustRecord updated;
+			updated.id = manifest.id;
+			updated.version = manifest.version;
+			updated.sha256 = entry.package.sha256;
+			updated.permissions = manifest.permissions;
+			updated.enabled = true;
+			updated.blocked = false;
+			if (record)
+				updated.history = record->history;
+			m_trust.Upsert(std::move(updated));
 			SaveTrust();
-			LogLine("[INFO] Updated declarative plugin " + manifest.id + " without a new prompt");
+			entry.trustedAt = m_trust.Find(manifest.id) ? m_trust.Find(manifest.id)->trustedAt : entry.trustedAt;
+			LogLine("[INFO] Accepted new hash for " + manifest.id + " without a new prompt");
+		}
+		else {
+			LogLine("[INFO] Trusted plugin " + manifest.id + " (approved " + entry.trustedAt + ")");
 		}
 		LoadEntry(entry);
 		return;
 	}
+	case TrustDecision::NoRecord:
+	case TrustDecision::Prompt:
+		entry.pendingTrust = true;
+		entry.state = "Awaiting approval";
+		LogLine("[INFO] Plugin " + manifest.id + " is waiting for approval (" +
+			TrustReason(evaluation) + ")");
+		return;
+	}
+}
 
-	entry.pendingTrust = true;
-	entry.state = "Awaiting approval";
-	LogLine("[INFO] Plugin " + manifest.id + " is waiting for approval");
+bool PluginRegistry::RequireCapability(PluginEntry& entry, Capability capability,
+	const std::string& phase) {
+	PermissionSet permissions(entry.package.manifest.permissions);
+	if (permissions.Allows(capability))
+		return true;
+
+	std::string message = "permission denied: '" + phase + "' requires the '" +
+		std::string(CapabilityName(capability)) + "' capability (declare ";
+	const auto accepted = CapabilityPermissions(capability);
+	for (size_t i = 0; i < accepted.size(); ++i) {
+		if (i > 0)
+			message += " or ";
+		message += "'" + accepted[i] + "'";
+	}
+	message += ")";
+
+	entry.state = "Error";
+	entry.error = std::string(kPermissionDeniedCode) + ": " + message;
+	entry.error += " (declared permissions: " +
+		(entry.package.manifest.permissions.empty() ? std::string("none") :
+			JoinPermissions(entry.package.manifest.permissions)) + ")";
+	entry.limited = true;
+	const std::string name = CapabilityName(capability);
+	if (std::find(entry.deniedCapabilities.begin(), entry.deniedCapabilities.end(), name) == entry.deniedCapabilities.end())
+		entry.deniedCapabilities.push_back(name);
+	LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+	return false;
+}
+
+void PluginRegistry::ApplyDenials(PluginEntry& entry) {
+	const auto denials = TakePermissionDenials(entry.Id());
+	if (denials.empty())
+		return;
+	entry.limited = true;
+	for (const auto& denial : denials) {
+		if (std::find(entry.deniedCapabilities.begin(), entry.deniedCapabilities.end(), denial.capability) ==
+			entry.deniedCapabilities.end())
+			entry.deniedCapabilities.push_back(denial.capability);
+		const std::string message = "plugin.permission: '" + denial.api + "' requires the '" +
+			denial.capability + "' capability";
+		if (entry.error.empty())
+			entry.error = message;
+		LogLine("[WARN] " + entry.Id() + ": " + message);
+	}
+	if (entry.loaded)
+		entry.state = "Loaded (limited)";
 }
 
 void PluginRegistry::LoadEntry(PluginEntry& entry) {
 	if (entry.loaded || !entry.enabled || entry.blocked || entry.removed || !entry.package.valid)
 		return;
+	if (entry.libraryRetained) {
+		entry.state = "Restart required (hooks retained)";
+		entry.error = "plugin.lifecycle: the previous library is still mapped because it "
+			"registered emulation hooks; restart the app to load this plugin again";
+		LogLine("[WARN] " + entry.Id() + ": " + entry.error);
+		return;
+	}
 
 	if (entry.package.manifest.IsNative()) {
 		if (LoadNative(entry))
@@ -367,39 +371,73 @@ bool PluginRegistry::LoadDeclarative(PluginEntry& entry) {
 	}
 
 	if (entry.package.manifest.type == PluginType::Theme) {
-		if (!ApplyThemeDocument(text, error)) {
+		if (!RequireCapability(entry, Capability::Theme, "theme application"))
+			return false;
+		if (!Host().ApplyPluginTheme(text, error)) {
 			entry.state = "Error";
 			entry.error = error;
 			LogLine("[ERROR] " + entry.Id() + ": " + error);
 			entry.loaded = false;
 			return false;
 		}
-		g_plugin_theme_active = true;
+		m_activeThemeId = entry.Id();
+		m_activeThemeDocument = text;
+		m_themeStale = false;
 	}
 	else {
-		try {
-			const json document = json::parse(text);
-			if (!document.is_object() || document.value("schema", 0) != 1) {
+		if (entry.package.manifest.type == PluginType::Inject) {
+			if (!RequireCapability(entry, Capability::Inject, "inject payload registration"))
+				return false;
+			std::vector<InjectionPayload> payloads;
+			std::string inject_error;
+			if (!ParseInjectDocument(text, entry.Id(), payloads, inject_error)) {
 				entry.state = "Error";
-				entry.error = "declarative document must have schema 1";
+				entry.error = "inject.invalid: " + inject_error;
 				LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 				entry.loaded = false;
 				return false;
 			}
-			if (entry.package.manifest.type == PluginType::Inject && !document.contains("payloads")) {
+			RegisterPluginPayloads(entry.Id(), std::move(payloads));
+		}
+		else if (entry.package.manifest.type == PluginType::UiRevamp) {
+			if (!RequireCapability(entry, Capability::Shell, "layout application"))
+				return false;
+			LayoutActions actions;
+			std::string layout_error;
+			if (!ParseLayoutDocument(text, actions, layout_error)) {
 				entry.state = "Error";
-				entry.error = "inject plugin is missing 'payloads'";
-				LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+				entry.error = layout_error;
+				LogLine("[ERROR] " + entry.Id() + ": " + layout_error);
+				entry.loaded = false;
+				return false;
+			}
+			if (!ApplyLayout(entry, actions, layout_error)) {
+				entry.state = "Error";
+				entry.error = layout_error;
+				LogLine("[ERROR] " + entry.Id() + ": " + layout_error);
 				entry.loaded = false;
 				return false;
 			}
 		}
-		catch (const json::exception& parse_error) {
-			entry.state = "Error";
-			entry.error = parse_error.what();
-			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-			entry.loaded = false;
-			return false;
+		else {
+			// Generic declarative document validation for future types.
+			try {
+				const json document = json::parse(text);
+				if (!document.is_object() || document.value("schema", 0) != 1) {
+					entry.state = "Error";
+					entry.error = "declarative document must have schema 1";
+					LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+					entry.loaded = false;
+					return false;
+				}
+			}
+			catch (const json::exception& parse_error) {
+				entry.state = "Error";
+				entry.error = parse_error.what();
+				LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+				entry.loaded = false;
+				return false;
+			}
 		}
 	}
 
@@ -408,15 +446,19 @@ bool PluginRegistry::LoadDeclarative(PluginEntry& entry) {
 	entry.state = "Loaded";
 	entry.error.clear();
 	LogLine("[SUCCESS] Loaded " + std::string(TypeName(entry.package.manifest.type)) + " plugin " + entry.Id());
+	ApplyDenials(entry);
 	return true;
 }
 
 bool PluginRegistry::LoadNative(PluginEntry& entry) {
+	if (!RequireCapability(entry, Capability::Native, "native library loading"))
+		return false;
+
 	const std::filesystem::path library = entry.package.root / entry.package.manifest.nativeEntry;
 	std::error_code ec;
 	if (!std::filesystem::exists(library, ec)) {
 		entry.state = "Error";
-		entry.error = "native entry not found: " + library.string();
+		entry.error = std::string("native.entry: native entry not found: ") + library.string();
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
@@ -425,43 +467,82 @@ bool PluginRegistry::LoadNative(PluginEntry& entry) {
 	if (!handle) {
 		const char* reason = dlerror();
 		entry.state = "Error";
-		entry.error = reason ? reason : "dlopen failed";
+		entry.error = std::string("native.load: ") + (reason ? reason : "dlopen failed");
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
 
-	auto load = reinterpret_cast<PluginLoad>(dlsym(handle, "fPluginLoad"));
+	auto load = reinterpret_cast<PluginLoadFn>(dlsym(handle, "fPluginLoad"));
 	if (!load) {
 		dlclose(handle);
 		entry.state = "Error";
-		entry.error = "missing fPluginLoad";
+		entry.error = "native.symbol: missing fPluginLoad";
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
 
+	// ABI handshake.  Missing exports are accepted for v1/v2 packages that
+	// predate the check, but a mismatch is always fatal.
+	using ApiVersionFn = int (*)();
+	using AbiSignatureFn = unsigned long (*)();
+	unsigned long plugin_signature = 0;
+	if (auto version_fn = reinterpret_cast<ApiVersionFn>(dlsym(handle, kPluginApiVersionSymbol))) {
+		const int plugin_api = version_fn();
+		if (plugin_api > kHostApiVersion || plugin_api < kHostApiMinVersion) {
+			dlclose(handle);
+			entry.state = "Error";
+			entry.error = "native.api: plugin targets API v" + std::to_string(plugin_api) +
+				"; host supports v" + std::to_string(kHostApiMinVersion) + ".." +
+				std::to_string(kHostApiVersion);
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			return false;
+		}
+	}
+	if (auto signature_fn = reinterpret_cast<AbiSignatureFn>(dlsym(handle, kPluginAbiSignatureSymbol))) {
+		plugin_signature = signature_fn();
+		const unsigned long host_signature = HostUiWindowAbiSignature();
+		if (plugin_signature != host_signature) {
+			dlclose(handle);
+			entry.state = "Error";
+			entry.error = "native.api: UIWindow ABI mismatch (plugin " +
+				std::to_string(plugin_signature) + ", host " + std::to_string(host_signature) +
+				"); rebuild the plugin with the SDK headers in this tree";
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			return false;
+		}
+	}
+	else {
+		LogLine("[WARN] " + entry.Id() + ": no fPluginAbiSignature export; assuming legacy UIWindow layout");
+	}
+
+	PluginApi* api = Host().CreateApi(entry.Id(), entry.package.manifest);
 	try {
-		load(g_pluginapi);
+		load(api);
 	}
 	catch (const std::exception& error) {
+		Host().DestroyApi(api);
 		dlclose(handle);
 		entry.state = "Error";
-		entry.error = std::string("fPluginLoad threw: ") + error.what();
+		entry.error = std::string("native.load: fPluginLoad threw: ") + error.what();
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
 	catch (...) {
+		Host().DestroyApi(api);
 		dlclose(handle);
 		entry.state = "Error";
-		entry.error = "fPluginLoad threw an unknown exception";
+		entry.error = "native.load: fPluginLoad threw an unknown exception";
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
 
 	entry.handle = handle;
+	entry.apiContext = api;
 	entry.loaded = true;
 	entry.state = "Loaded";
 	entry.error.clear();
 	LogLine("[SUCCESS] Loaded native plugin " + entry.Id());
+	ApplyDenials(entry);
 	return true;
 }
 
@@ -471,8 +552,18 @@ void PluginRegistry::Approve(PluginEntry& entry, bool remember) {
 	entry.enabled = true;
 	entry.trusted = true;
 	if (remember) {
-		UpsertTrust(entry, false);
+		TrustRecord record;
+		record.id = entry.Id();
+		record.version = entry.Version();
+		record.sha256 = entry.package.sha256;
+		record.permissions = entry.package.manifest.permissions;
+		record.enabled = true;
+		record.blocked = false;
+		if (const TrustRecord* existing = m_trust.Find(entry.Id()))
+			record.history = existing->history;
+		m_trust.Upsert(std::move(record));
 		SaveTrust();
+		entry.trustedAt = m_trust.Find(entry.Id()) ? m_trust.Find(entry.Id())->trustedAt : CurrentUtcTimestamp();
 	}
 	LoadEntry(entry);
 }
@@ -482,7 +573,15 @@ void PluginRegistry::Reject(PluginEntry& entry) {
 	entry.pendingTrust = false;
 	entry.enabled = false;
 	entry.state = "Blocked";
-	UpsertTrust(entry, true);
+	entry.error = "plugin.blocked: blocked by the user";
+	TrustRecord record;
+	record.id = entry.Id();
+	record.version = entry.Version();
+	record.sha256 = entry.package.sha256;
+	record.permissions = entry.package.manifest.permissions;
+	record.enabled = false;
+	record.blocked = true;
+	m_trust.Upsert(std::move(record));
 	SaveTrust();
 	LogLine("[WARN] User blocked plugin " + entry.Id());
 }
@@ -498,36 +597,150 @@ void PluginRegistry::Review(const std::string& id) {
 	}
 }
 
+void PluginRegistry::HidePluginWindows(PluginEntry& entry) {
+	const auto tracked = TakePluginWindows(entry.Id());
+	for (void* pointer : tracked) {
+		Host().SetWindowOpen(pointer, false);
+		Host().RemoveWindow(pointer);
+	}
+}
+
+void PluginRegistry::ClearRuntimeState(PluginEntry& entry) {
+	entry.loaded = false;
+	entry.handle = nullptr;
+	entry.apiContext = nullptr;
+	entry.limited = false;
+	entry.deniedCapabilities.clear();
+	entry.document.clear();
+	ClearPluginPayloads(entry.Id());
+	ClearPluginResources(entry.Id());
+	if (m_activeThemeId == entry.Id()) {
+		m_activeThemeId.clear();
+		m_activeThemeDocument.clear();
+		m_themeStale = false;
+	}
+}
+
+bool PluginRegistry::Unload(const std::string& id) {
+	for (auto& entry : m_entries) {
+		if (entry.removed || entry.Id() != id)
+			continue;
+		return UnloadEntry(entry, true);
+	}
+	return false;
+}
+
+bool PluginRegistry::UnloadEntry(PluginEntry& entry, bool remove_windows) {
+	const std::string id = entry.Id();
+	if (!entry.loaded) {
+		if (!entry.libraryRetained)
+			entry.state = "Unloaded";
+		return true;
+	}
+
+	void* handle = entry.handle;
+	PluginApi* api = static_cast<PluginApi*>(entry.apiContext);
+	const bool was_theme = entry.package.valid && entry.package.manifest.type == PluginType::Theme;
+
+	// Remove windows before fPluginUnload so a plugin that deletes its own
+	// windows cannot leave dangling pointers in the host render loop.  At
+	// process exit the GUI is already torn down, so only forget the tracking
+	// entries.
+	if (remove_windows)
+		HidePluginWindows(entry);
+	else
+		(void)TakePluginWindows(entry.Id());
+
+	if (handle) {
+		const UnloadCallResult result = CallPluginUnload(handle, api);
+		if (result.had_callback && !result.threw)
+			LogLine("[INFO] Called fPluginUnload for " + id);
+		else if (result.threw)
+			LogLine("[ERROR] " + id + ": fPluginUnload threw: " + result.error);
+	}
+
+	const bool retain_library = handle && PluginHasHookRegistrations(id);
+	if (handle && !retain_library) {
+		dlclose(handle);
+		LogLine("[INFO] Unloaded native library " + id);
+	}
+	else if (retain_library) {
+		entry.libraryRetained = true;
+		LogLine("[WARN] " + id + ": fPluginUnload ran but the library stays mapped "
+			"because the plugin registered emulation hooks that cannot be unregistered");
+	}
+
+	if (api && !retain_library) {
+		Host().DestroyApi(api);
+		entry.apiContext = nullptr;
+	}
+	else if (retain_library) {
+		// Keep the facade alive: hook callbacks still reference its guards.
+		entry.apiContext = api;
+	}
+
+	entry.handle = retain_library ? handle : nullptr;
+	entry.loaded = false;
+	entry.state = retain_library ? "Unloaded (library retained: hooks)" : "Unloaded";
+	entry.error.clear();
+	if (was_theme && remove_windows)
+		Host().ResetTheme();
+	return true;
+}
+
 void PluginRegistry::SetEnabled(const std::string& id, bool enabled) {
 	for (auto& entry : m_entries) {
 		if (entry.removed || entry.Id() != id)
 			continue;
-		entry.enabled = enabled;
-		if (enabled) {
-			entry.blocked = false;
-			if (entry.trusted) {
-				LoadEntry(entry);
-			}
-			else {
-				entry.pendingTrust = true;
-				entry.state = "Awaiting approval";
-			}
-		}
-		else {
+
+		TrustRecord* existing = m_trust.Find(entry.Id());
+		if (!enabled) {
 			if (entry.IsNative() && entry.loaded) {
-				entry.state = "Disabled (restart to unload)";
+				Unload(id);
+				entry.state = entry.libraryRetained
+					? "Disabled (library retained: hooks)" : "Disabled";
 			}
 			else {
 				entry.loaded = false;
+				if (entry.package.valid && entry.package.manifest.type == PluginType::Inject)
+					ClearPluginPayloads(entry.Id());
 				entry.state = "Disabled";
 			}
-			if (entry.package.valid && entry.package.manifest.type == PluginType::Theme) {
-				g_plugin_theme_active = false;
-				ThemeManager::Instance().ApplyDefaultTheme();
+			entry.enabled = false;
+			if (entry.package.valid && entry.package.manifest.type == PluginType::Theme)
+				Host().ResetTheme();
+			if (existing) {
+				existing->enabled = false;
+				existing->trustedAt = CurrentUtcTimestamp();
+				SaveTrust();
+			}
+			return;
+		}
+
+		entry.enabled = true;
+		entry.blocked = false;
+		if (existing) {
+			existing->enabled = true;
+			SaveTrust();
+		}
+		if (entry.trusted) {
+			// Re-check the record: the package may have changed while disabled.
+			const TrustRecord* record = m_trust.Find(entry.Id());
+			const bool changed = !entry.package.valid || !record ||
+				!SamePermissionSet(record->permissions, entry.package.manifest.permissions) ||
+				(entry.IsNative() && record->sha256 != entry.package.sha256);
+			if (changed) {
+				entry.pendingTrust = true;
+				entry.state = "Awaiting approval";
+			}
+			else {
+				LoadEntry(entry);
 			}
 		}
-		UpsertTrust(entry, entry.blocked);
-		SaveTrust();
+		else {
+			entry.pendingTrust = true;
+			entry.state = "Awaiting approval";
+		}
 		return;
 	}
 }
@@ -536,24 +749,32 @@ void PluginRegistry::Remove(const std::string& id) {
 	for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
 		if (it->removed || it->Id() != id)
 			continue;
-		const bool loaded_native = it->IsNative() && it->loaded;
-		const bool was_theme = it->package.valid && it->package.manifest.type == PluginType::Theme;
-		if (loaded_native) {
-			it->removed = true;
-			it->enabled = false;
-			it->state = "Removed (restart to unload)";
+
+		PluginEntry& entry = *it;
+		const bool was_theme = entry.package.valid && entry.package.manifest.type == PluginType::Theme;
+		const bool was_loaded = entry.loaded;
+		if (was_loaded)
+			Unload(id);
+
+		const bool retained = entry.libraryRetained;
+		if (retained) {
+			entry.removed = true;
+			entry.enabled = false;
+			entry.state = "Removed (library retained: hooks)";
+			entry.package.root.clear();
 		}
 		else {
 			std::error_code ec;
-			std::filesystem::remove_all(it->package.root, ec);
+			if (!entry.package.root.empty())
+				std::filesystem::remove_all(entry.package.root, ec);
+			ClearPluginPayloads(id);
+			ClearPluginResources(id);
 			m_entries.erase(it);
 		}
-		RemoveTrust(id);
+		m_trust.Remove(id);
 		SaveTrust();
-		if (!loaded_native && was_theme) {
-			g_plugin_theme_active = false;
-			ThemeManager::Instance().ApplyDefaultTheme();
-		}
+		if (was_theme)
+			Host().ResetTheme();
 		LogLine("[INFO] Removed plugin " + id);
 		return;
 	}
@@ -563,6 +784,8 @@ void PluginRegistry::ReloadDeclarative() {
 	for (auto& entry : m_entries) {
 		if (entry.removed || !entry.loaded || entry.IsNative())
 			continue;
+		if (entry.package.manifest.type == PluginType::Inject)
+			ClearPluginPayloads(entry.Id());
 		entry.loaded = false;
 		LoadDeclarative(entry);
 	}
@@ -587,24 +810,54 @@ void PluginRegistry::OpenPluginsFolder() const {
 	std::system(("open \"" + UserPluginsDir().string() + "\" >/dev/null 2>&1").c_str());
 }
 
-void PluginRegistry::InstallFromFile(const std::filesystem::path& file) {
+bool PluginRegistry::InstallFromFile(const std::filesystem::path& file, std::string* error) {
+	const auto fail = [&](const std::string& message) {
+		LogLine("[ERROR] " + message);
+		if (error)
+			*error = message;
+		return false;
+	};
+
 	std::error_code ec;
-	if (!std::filesystem::is_regular_file(file, ec)) {
-		LogLine("[ERROR] Not a plugin file: " + file.string());
-		return;
-	}
+	if (!std::filesystem::is_regular_file(file, ec))
+		return fail("Not a plugin file: " + file.string());
+	if (!HasPluginExtension(file))
+		return fail("Not a .plugin package: " + file.filename().string());
+
 	std::filesystem::create_directories(UserPluginsDir(), ec);
 	const std::filesystem::path destination = UserPluginsDir() / file.filename();
-	if (std::filesystem::exists(destination, ec)) {
-		LogLine("[ERROR] A plugin with this filename already exists: " + destination.filename().string());
-		return;
-	}
+	if (std::filesystem::exists(destination, ec))
+		return fail("A plugin with this filename already exists: " + destination.filename().string());
+
 	std::filesystem::copy_file(file, destination, ec);
-	if (ec) {
-		LogLine("[ERROR] Cannot install plugin: " + ec.message());
-		return;
-	}
+	if (ec)
+		return fail("Cannot install plugin: " + ec.message());
+
+	const size_t before = m_entries.size();
 	AddPackage(destination);
+	if (m_entries.size() > before) {
+		PluginEntry& added = m_entries.back();
+		if (added.state == "Invalid" || added.state == "Error") {
+			const std::string message = added.error;
+			// Keep the copied file for inspection, but report the failure.
+			if (error)
+				*error = message;
+			return false;
+		}
+	}
+	LogLine("[SUCCESS] Installed " + destination.filename().string());
+	if (error)
+		error->clear();
+	return true;
+}
+
+void PluginRegistry::InstallFromDialog() {
+	std::string selected;
+	if (!Host().PickPluginFile(selected))
+		return;
+	std::string error;
+	if (!InstallFromFile(selected, &error))
+		LogLine("[ERROR] Install failed: " + error);
 }
 
 int PluginRegistry::FirstPendingIndex() const {
@@ -615,7 +868,79 @@ int PluginRegistry::FirstPendingIndex() const {
 	return -1;
 }
 
+bool PluginRegistry::ApplyLayout(PluginEntry& entry, const LayoutActions& actions, std::string& error) {
+	if (!Host().ApplyShellLayout(actions, error))
+		return false;
+
+	// Show/hide named tool windows.  Unknown names are a harmless no-op; the
+	// layout can target tools that only exist in other builds.
+	std::vector<std::string> hide = actions.hiddenTools;
+	if (actions.hasTools && !actions.toolsVisible)
+		hide.insert(hide.end(), actions.toolOrder.begin(), actions.toolOrder.end());
+	const auto open_windows = Host().Windows();
+	for (const auto& name : hide) {
+		bool found = false;
+		for (void* window : open_windows) {
+			const char* window_name = Host().WindowName(window);
+			if (window_name && name == window_name) {
+				Host().SetWindowOpen(window, false);
+				found = true;
+			}
+		}
+		if (!found)
+			LogLine("[WARN] " + entry.Id() + ": layout hides unknown tool '" + name + "'");
+	}
+
+	if (!actions.toolOrder.empty())
+		Host().ReorderWindows(actions.toolOrder);
+
+	if (actions.hasTheme) {
+		std::string theme_error;
+		if (!Host().SelectTheme(actions.theme, theme_error)) {
+			error = std::string(kLayoutUnsupportedCode) + ": unsupported action: cannot select theme '" +
+				actions.theme + "': " + theme_error;
+			return false;
+		}
+		LogLine("[INFO] " + entry.Id() + ": selected built-in theme '" + actions.theme + "'");
+	}
+
+	LogLine("[INFO] Applied declarative layout from " + entry.Id());
+	return true;
+}
+
+void PluginRegistry::PumpFrame() {
+	if (m_activeThemeDocument.empty())
+		return;
+	// The startup font rebuild (ThemeManager::ProcessFontRebuild) assigns the
+	// user's saved style after the plugin scan.  Re-apply once it has run, and
+	// again after any later font rebuild.
+	if (Host().FontRebuildPending()) {
+		m_themeStale = true;
+		return;
+	}
+	if (!m_themeStale)
+		return;
+	std::string error;
+	if (Host().ApplyPluginTheme(m_activeThemeDocument, error))
+		LogLine("[INFO] Reapplied theme plugin " + m_activeThemeId + " after font rebuild");
+	else
+		LogLine("[ERROR] " + m_activeThemeId + ": cannot reapply theme: " + error);
+	m_themeStale = false;
+}
+
+void PluginRegistry::ReapplyActiveTheme() {
+	if (m_activeThemeDocument.empty())
+		return;
+	std::string error;
+	if (Host().ApplyPluginTheme(m_activeThemeDocument, error))
+		m_themeStale = false;
+	else
+		LogLine("[ERROR] " + m_activeThemeId + ": cannot reapply theme: " + error);
+}
+
 void PluginRegistry::RenderTrustModal() {
+	PumpFrame();
+
 	if (!m_modalActive && !m_openModalRequested) {
 		const int index = FirstPendingIndex();
 		if (index >= 0) {
@@ -658,7 +983,8 @@ void PluginRegistry::RenderTrustModal() {
 		ImGui::TextUnformatted(manifest.name.c_str());
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", manifest.version.c_str());
-		ImGui::TextDisabled("%s  |  %s", manifest.id.c_str(), TypeName(manifest.type));
+		ImGui::TextDisabled("%s  |  %s  |  api v%d", manifest.id.c_str(), TypeName(manifest.type),
+			manifest.apiVersion);
 		if (!manifest.author.empty())
 			ImGui::TextDisabled("By %s", manifest.author.c_str());
 		if (!manifest.description.empty()) {
@@ -669,6 +995,12 @@ void PluginRegistry::RenderTrustModal() {
 		ImGui::Spacing();
 		ImGui::TextUnformatted("Package SHA-256");
 		ImGui::TextDisabled("%s", entry.package.sha256.c_str());
+		if (const TrustRecord* record = m_trust.Find(entry.Id())) {
+			if (!record->trustedAt.empty())
+				ImGui::TextDisabled("Approved %s  |  %zu hash(es) on record", record->trustedAt.c_str(),
+					record->history.size());
+			ImGui::TextDisabled("Previously approved: %s", record->sha256.substr(0, 16).c_str());
+		}
 
 		ImGui::Spacing();
 		ImGui::TextUnformatted("This plugin requests:");
@@ -682,14 +1014,14 @@ void PluginRegistry::RenderTrustModal() {
 
 		if (entry.IsNative()) {
 			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, UIHelpers::kColorWarning);
-			ImGui::TextWrapped("This plugin includes native code. It runs in the same process with the same access as the app; the permission list above is a declaration, not a sandbox.");
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.65f, 0.00f, 1.0f));
+			ImGui::TextWrapped("This plugin includes native code. It runs in the same process with the same access as the app; the host gates host-API calls by permission, but native code can still call the OS directly.");
 			ImGui::PopStyleColor();
 		}
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		ImGui::TextDisabled("Only allow plugins you trust. Always Allow remembers this exact version and hash.");
+		ImGui::TextDisabled("Only allow plugins you trust. Always Allow remembers this exact hash; permission changes ask again.");
 		ImGui::Spacing();
 
 		if (ImGui::Button("Always Allow", ImVec2(140, 0))) {

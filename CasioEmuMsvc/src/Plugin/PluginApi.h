@@ -8,13 +8,25 @@ namespace casioemu {
 #endif
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #ifndef CASIOEMU_HEADLESS_PLUGIN
 #include <imgui.h>
 #endif
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "DebuggerTypes.h"
+#include "PluginVersion.h"
+
+// Host API version comes from PluginVersion.h (one constant shared with the
+// manifest loader); the value is also reported by PluginApi::GetVersion().
+inline constexpr int PLUGIN_API_VERSION = casioemu::plugin::kPluginHostApiVersion;
+// Bumped whenever the layout or vtable of UIWindow below changes.  Native
+// plugins can export fPluginAbiSignature() (see PLUGIN_EXPORT_ABI) and the
+// loader rejects mismatches with native.api instead of crashing later.
+inline constexpr unsigned long kPluginUiWindowAbiRevision = 2;
 #ifdef _NO_FUND_API
 #include "Hooks.h"
 #include "Ui.hpp"
@@ -211,36 +223,65 @@ public:
 };
 
 #if !defined(_NO_FUND_API) && !defined(CASIOEMU_HEADLESS_PLUGIN)
+// This definition is ABI-identical to the host's UIWindow (Gui/Ui.hpp):
+// same member order, same virtual slot order (Render, RenderCore,
+// GotoMemoryAddress, ~UIWindow), same member functions.  The host builds with
+// _NO_FUND_API so it uses Gui/Ui.hpp directly; plugin translation units use
+// this one.  Keep the two in sync and bump kPluginUiWindowAbiRevision.
 class UIWindow {
 public:
 	UIWindow(const char* name) : name(name) {}
 	const char* name{};
 	bool open = true;
+	bool bring_to_front_requested = false;
 	ImVec2 inital_size{800, 800};
 	ImGuiWindowFlags flags{};
+
 	virtual void Render() {
+		// Settings is the recovery point for hidden tabs and must always remain available.
+		if (name && std::strcmp(name, "Settings") == 0)
+			open = true;
 		if (!open)
 			return;
+		if (bring_to_front_requested) {
+			ImGui::SetNextWindowFocus();
+			bring_to_front_requested = false;
+		}
 		ImGui::SetNextWindowSize(inital_size, ImGuiCond_FirstUseEver);
 		if (ImGui::Begin(name, &open, flags)) {
 			RenderCore();
 		}
 		ImGui::End();
 	}
-	virtual void RenderCore() = 0;
-	virtual ~UIWindow() {
+	void BringToFront() {
+		open = true;
+		bring_to_front_requested = true;
 	}
+	virtual void RenderCore() = 0;
+	// Optional: navigate the window to a specific memory address. No-op by default.
+	virtual void GotoMemoryAddress(uint32_t /*addr*/) {}
+	virtual ~UIWindow() {}
 };
 #elif defined(CASIOEMU_HEADLESS_PLUGIN)
 class UIWindow;
 #endif
 
+#if !defined(CASIOEMU_HEADLESS_PLUGIN)
+// Computed from sizeof(UIWindow) plus the ABI revision.  The host and the SDK
+// must produce the same number; PLUGIN_EXPORT_ABI embeds it in the dylib.
+inline unsigned long PluginUiWindowAbiSignature() {
+	return (static_cast<unsigned long>(sizeof(UIWindow)) << 8) ^ kPluginUiWindowAbiRevision;
+}
+#endif
+
 class PluginApi {
 public:
 	/// <summary>
-	/// Get plugin api version(currently 1)
+	/// Host API version. Current value: PLUGIN_API_VERSION (3).
+	/// v2 added the extended IDebugger breakpoint surface; v3 makes the SDK
+	/// UIWindow layout/vtable match the host and adds the permission-scoped
+	/// facade. Check this if you support several hosts.
 	/// </summary>
-	/// <returns></returns>
 	[[nodiscard]] virtual int GetVersion() = 0;
 	/// <summary>
 	/// Add a window to debugger window.
@@ -274,3 +315,21 @@ public:
 /// The plugin DLL's entry point.
 /// </summary>
 using PluginLoad = void (*)(PluginApi* api);
+
+/// <summary>
+/// Optional unload callback, looked up with dlsym("fPluginUnload") and called
+/// before the host hides the plugin's windows and closes the library.
+/// </summary>
+using PluginUnload = void (*)(PluginApi* api);
+
+/// <summary>
+/// Export the ABI handshake from a native plugin.  Put this at file scope:
+///
+///   PLUGIN_EXPORT_ABI();
+///
+/// The host calls fPluginApiVersion()/fPluginAbiSignature() during load and
+/// rejects a mismatch with native.api instead of risking a layout crash.
+/// </summary>
+#define PLUGIN_EXPORT_ABI() \
+	extern "C" int fPluginApiVersion() { return PLUGIN_API_VERSION; } \
+	extern "C" unsigned long fPluginAbiSignature() { return PluginUiWindowAbiSignature(); }

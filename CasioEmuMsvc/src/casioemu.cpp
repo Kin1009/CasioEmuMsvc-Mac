@@ -53,6 +53,10 @@
 #include <Plugin/PluginMan.h>
 #include <ThemeManager.h>
 #include "DiscordRPC.h"
+#include "Gui/Shell/Shell.h"
+#include "Gui/Shell/SessionHost.h"
+#include "Ext/MacWindow.h"
+#include "Ext/Screenshot.h"
 
 #include "TouchMouseTranslator.h"
 
@@ -263,6 +267,28 @@ int main(int argc, char* argv[]) {
 			logger::Info("[argv][Info] #%i: key '%s' already set\n", ix, key.c_str());
 	}
 	bool headless = argv_map.find("headless") != argv_map.end();
+	for (int index = 1; index < argc; ++index) {
+		const std::string argument = argv[index];
+		auto value_of = [&](const char* key) -> std::string {
+			const std::string prefix = std::string(key) + "=";
+			const std::string dashed = std::string("--") + prefix;
+			if (argument.rfind(prefix, 0) == 0)
+				return argument.substr(prefix.size());
+			if (argument.rfind(dashed, 0) == 0)
+				return argument.substr(dashed.size());
+			return {};
+		};
+		if (!value_of("shot-startup").empty())
+			setenv("CASIOEMU_SHOT_STARTUP", value_of("shot-startup").c_str(), 1);
+		if (!value_of("shot-shell").empty())
+			setenv("CASIOEMU_SHOT_SHELL", value_of("shot-shell").c_str(), 1);
+		if (!value_of("frames").empty())
+			setenv("CASIOEMU_SHOT_FRAMES", value_of("frames").c_str(), 1);
+	}
+	if (std::getenv("CASIOEMU_SHOT_STARTUP") || std::getenv("CASIOEMU_SHOT_SHELL")) {
+		setenv("SDL_VIDEODRIVER", "dummy", 1);
+		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+	}
 	int sdlFlags = SDL_INIT_VIDEO | SDL_INIT_TIMER;
 	if (SDL_Init(sdlFlags) != 0)
 		PANIC("SDL_Init failed: %s\n", SDL_GetError());
@@ -281,7 +307,7 @@ for (;;) {
 		startup_resources = std::move(selection.resources);
 		if (argv_map["model"].empty()) {
 			DiscordRPC::Shutdown();
-			return -1;
+			return std::getenv("CASIOEMU_SHOT_STARTUP") ? 0 : -1;
 		}
 	}
 
@@ -345,6 +371,10 @@ for (;;) {
 #ifdef _WIN32
 	EnableDarkTitleBar(GetSDLWindowHandle(emulator.window));
 #endif
+#ifdef __APPLE__
+	casioemu::mac::ConfigureFramelessWindow(emulator.window);
+	SDL_SetWindowTitle(emulator.window, "CasioEmuMsvc");
+#endif
 	SDL_ShowWindow(emulator.window);
 	SDL_RaiseWindow(emulator.window);
 
@@ -352,6 +382,9 @@ for (;;) {
 	LoadPlugins();
 #endif
 	while (emulator.Running()) {
+		Emulator* active_emulator = casioemu::session::Active();
+		if (!active_emulator)
+			active_emulator = &emulator;
 		SDL_Event event{};
 		DiscordRPC::Update();
 		Uint32 frame_wait_ms = 16;
@@ -401,8 +434,25 @@ for (;;) {
 			SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 			SDL_RenderFillRect(renderer, 0);
 #ifdef SINGLE_WINDOW
-			emulator.Frame();
+			casioemu::session::PrepareActiveFrame();
 			gui_loop();
+			if (const char* shot = std::getenv("CASIOEMU_SHOT_SHELL")) {
+				static int shot_frame = 0;
+				++shot_frame;
+				const int wanted = [] {
+					const char* value = std::getenv("CASIOEMU_SHOT_FRAMES");
+					return value ? std::max(1, std::atoi(value)) : 24;
+				}();
+				if (shot_frame >= wanted) {
+					const bool saved = casioemu::shot::SaveRendererPng(emulator.renderer, shot);
+					const std::string report = std::string(shot) + ".layout.txt";
+					const bool layout_ok = casioemu::shell::WriteLayoutReport(report);
+					std::printf("[shot] %s shell=%s layout=%s\n", shot,
+						saved ? "ok" : "failed", layout_ok ? "PASS" : "FAIL");
+					emulator.Shutdown();
+					break;
+				}
+			}
 
 #ifdef __ANDROID__
 			touchTranslator.RenderDebug(renderer);
@@ -443,7 +493,7 @@ for (;;) {
 		if (IsScreenMirrorWindowEvent(event)) {
 			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
 				event.key.windowID = SDL_GetWindowID(emulator.window);
-				emulator.UIEvent(event);
+				active_emulator->UIEvent(event);
 			}
 			continue;
 		}
@@ -506,7 +556,7 @@ for (;;) {
 					// SDL emits text input separately from keydown. Suppress both for
 					// the calculator target so editors cannot receive printable keys.
 					if (event.type != SDL_TEXTINPUT)
-						emulator.UIEvent(event);
+						active_emulator->UIEvent(event);
 					break;
 				}
 			}
@@ -522,16 +572,20 @@ for (;;) {
 			}
 #endif
 			if (event.type != SDL_KEYDOWN && event.type != SDL_KEYUP)
-				emulator.UIEvent(event);
+				active_emulator->UIEvent(event);
 			break;
 		default:
-			emulator.UIEvent(event);
+			active_emulator->UIEvent(event);
 			break;
 		}
 	}
 	if (bg_txt) {
 		SDL_DestroyTexture(bg_txt);
 	}
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__ANDROID__)
+	casioemu::shell::Shutdown();
+	casioemu::session::ShutdownAll();
+#endif
 #if defined(SINGLE_WINDOW) && !defined(__ANDROID__)
 	// Persist the debugger geometry. In single-window builds this window is the
 	// emulator's window as well, so the Calculator panel keeps its size/place.

@@ -45,7 +45,8 @@ std::string make_boot(const Target& target);
 // runtime.asm with the lines tagged for the other LCD type removed.
 std::string runtime_for(const Target& target);
 
-BuildResult build_source(const std::string& src, const std::string& target);
+BuildResult build_source(const std::string& src, const std::string& target,
+                         const std::string& path = "");
 
 // `path` is the file `src` came from; it is only used to resolve #include and to
 // label diagnostics. Pass "" when the source has no file.

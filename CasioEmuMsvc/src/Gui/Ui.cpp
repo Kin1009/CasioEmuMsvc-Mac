@@ -40,6 +40,8 @@
 #endif
 #include <Gui.h>
 #include <SDL.h>
+#include "Shell/Shell.h"
+#include "Shell/SessionHost.h"
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -55,6 +57,8 @@ char sentry_user_email[128] = "";
 char sentry_user_name[128] = "";
 
 char* n_ram_buffer = 0;
+ImFont* g_mono_font = nullptr;
+ImFont* g_small_font = nullptr;
 casioemu::MMU* me_mmu = 0;
 SDL_Window* window = 0;
 SDL_Renderer* renderer = 0;
@@ -186,6 +190,13 @@ static void SetupDefaultDockLayout(ImGuiID dockspace_id) {
 }
 
 static void RenderDebuggerGuiWindows() {
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__ANDROID__)
+	casioemu::shell::Render();
+#ifndef TEST_BUILD
+	casioemu::plugin::PluginRegistry::Instance().RenderTrustModal();
+#endif
+	return;
+#else
 #ifndef __ANDROID__
 	ImGuiID dockspace_id = RenderDockSpace(GetStatusBarHeight());
 	SetupDefaultDockLayout(dockspace_id);
@@ -265,6 +276,7 @@ static void RenderDebuggerGuiWindows() {
 	// hid the calculator's first row and made the window look like it had two
 	// independent tab systems.  The docked windows are the only navigation now.
 	top_bar_size = 0;
+#endif
 }
 
 // True while a Calculator panel exists and is open.  Keyboard routing follows
@@ -496,7 +508,19 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 
 	if (guiCreated)
 		*guiCreated = true;
-	return CreateDebuggerGuiWindows();
+	CodeViewer* viewer = CreateDebuggerGuiWindows();
+#ifndef __ANDROID__
+	casioemu::session::SetMainRenderer(renderer);
+	if (m_emu) {
+		casioemu::session::RegisterPrimary(m_emu, m_emu->model_path,
+			m_emu->ModelDefinition.model_name, m_emu->ModelDefinition.rom_path);
+	}
+	casioemu::shell::Initialize();
+	casioemu::shell::SetLiveSession(m_emu ? m_emu->model_path : std::string(),
+		m_emu ? m_emu->ModelDefinition.model_name : std::string(),
+		m_emu ? m_emu->ModelDefinition.rom_path : std::string());
+#endif
+	return viewer;
 }
 #endif
 
@@ -628,6 +652,9 @@ namespace UIHelpers {
 
 void gui_cleanup() {
 #ifndef CASIOEMU_CORE_WEB
+#ifndef __ANDROID__
+	casioemu::shell::Shutdown();
+#endif
 #ifndef __ANDROID__
 #ifndef SINGLE_WINDOW
 	if (window) {

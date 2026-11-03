@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "VS Code Light Modern",
+  "variant": "light",
+  "tokens": {
+    "colors": {
+      "background": "#ffffff",
+      "surface": "#f8f8f8",
+      "surfaceAlt": "#f3f3f3",
+      "foreground": "#3b3b3b",
+      "muted": "#717171",
+      "border": "#e5e5e5",
+      "borderStrong": "#cecece",
+      "accent": "#005fb8",
+      "accentHover": "#0258a8",
+      "selection": "#add6ff",
+      "hover": "#f2f2f2",
+      "error": "#e51400",
+      "warning": "#bf8803",
+      "success": "#388a34",
+      "link": "#0066bf",
+      "titleBar": "#f8f8f8",
+      "activityBar": "#f8f8f8",
+      "statusBar": "#f8f8f8",
+      "panel": "#f8f8f8",
+      "tabActive": "#ffffff",
+      "tabInactive": "#ececec"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

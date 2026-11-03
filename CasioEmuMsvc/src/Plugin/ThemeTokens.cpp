@@ -2,10 +2,11 @@
 
 #include "../../../McpPlugin/json.hpp"
 
-#include <imgui.h>
-
+#include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <fstream>
+#include <sstream>
 #include <string_view>
 
 namespace casioemu::plugin {
@@ -36,10 +37,12 @@ bool ParseHexColor(std::string_view text, ImVec4& color) {
 	return true;
 }
 
-bool ReadColor(const json& colors, const char* key, ImVec4& color, std::string& error) {
+bool ReadColor(const json& colors, const char* key, ImVec4& color, bool& present, std::string& error) {
+	present = false;
 	auto it = colors.find(key);
 	if (it == colors.end())
 		return true;
+	present = true;
 	if (!it->is_string()) {
 		error = std::string("colors.") + key + " must be a #RRGGBB or #RRGGBBAA string";
 		return false;
@@ -58,9 +61,21 @@ float NumberOr(const json& object, const char* key, float fallback) {
 	return it->get<float>();
 }
 
+bool ReadStringToken(const json& object, const char* key, std::string& out, std::string& error) {
+	auto it = object.find(key);
+	if (it == object.end())
+		return true;
+	if (!it->is_string()) {
+		error = std::string("typography.") + key + " must be a string";
+		return false;
+	}
+	out = it->get<std::string>();
+	return true;
+}
+
 } // namespace
 
-bool ApplyThemeDocument(const std::string& jsonText, std::string& error) {
+bool ParseThemeDocument(const std::string& jsonText, ThemeResult& result, std::string& error) {
 	json document;
 	try {
 		document = json::parse(jsonText);
@@ -79,21 +94,31 @@ bool ApplyThemeDocument(const std::string& jsonText, std::string& error) {
 		return false;
 	}
 
-	std::string variant = "dark";
+	result = ThemeResult{};
+
+	if (document.contains("name")) {
+		if (!document["name"].is_string()) {
+			error = "theme name must be a string";
+			return false;
+		}
+		result.name = document["name"].get<std::string>();
+	}
+
+	result.variant = "dark";
 	if (document.contains("variant")) {
 		if (!document["variant"].is_string()) {
 			error = "theme variant must be 'dark' or 'light'";
 			return false;
 		}
-		variant = document["variant"].get<std::string>();
+		result.variant = document["variant"].get<std::string>();
 	}
-	if (variant != "dark" && variant != "light") {
+	if (result.variant != "dark" && result.variant != "light") {
 		error = "theme variant must be 'dark' or 'light'";
 		return false;
 	}
 
-	ImGuiStyle style;
-	if (variant == "light")
+	ImGuiStyle& style = result.style;
+	if (result.variant == "light")
 		ImGui::StyleColorsLight(&style);
 	else
 		ImGui::StyleColorsDark(&style);
@@ -112,63 +137,136 @@ bool ApplyThemeDocument(const std::string& jsonText, std::string& error) {
 		}
 		const json& colors = *colors_it;
 		ImVec4 value;
-		if (!ReadColor(colors, "background", value, error)) return false;
-		if (colors.contains("background")) {
+		bool present = false;
+
+		if (!ReadColor(colors, "background", value, present, error)) return false;
+		if (present) {
+			result.colors.background = value;
 			style.Colors[ImGuiCol_WindowBg] = value;
 			style.Colors[ImGuiCol_PopupBg] = value;
 			style.Colors[ImGuiCol_MenuBarBg] = value;
 			style.Colors[ImGuiCol_TitleBg] = value;
 		}
-		if (!ReadColor(colors, "surface", value, error)) return false;
-		if (colors.contains("surface")) {
+		if (!ReadColor(colors, "surface", value, present, error)) return false;
+		if (present) {
+			result.colors.surface = value;
 			style.Colors[ImGuiCol_ChildBg] = value;
 			style.Colors[ImGuiCol_FrameBg] = value;
 			style.Colors[ImGuiCol_Tab] = value;
 			style.Colors[ImGuiCol_TabUnfocused] = value;
 		}
-		if (!ReadColor(colors, "surfaceAlt", value, error)) return false;
-		if (colors.contains("surfaceAlt")) {
+		if (!ReadColor(colors, "surfaceAlt", value, present, error)) return false;
+		if (present) {
+			result.colors.surfaceAlt = value;
 			style.Colors[ImGuiCol_FrameBgHovered] = value;
 			style.Colors[ImGuiCol_TabUnfocusedActive] = value;
 		}
-		if (!ReadColor(colors, "foreground", value, error)) return false;
-		if (colors.contains("foreground"))
+		if (!ReadColor(colors, "foreground", value, present, error)) return false;
+		if (present) {
+			result.colors.foreground = value;
 			style.Colors[ImGuiCol_Text] = value;
-		if (!ReadColor(colors, "muted", value, error)) return false;
-		if (colors.contains("muted"))
+		}
+		if (!ReadColor(colors, "muted", value, present, error)) return false;
+		if (present) {
+			result.colors.muted = value;
 			style.Colors[ImGuiCol_TextDisabled] = value;
-		if (!ReadColor(colors, "border", value, error)) return false;
-		if (colors.contains("border")) {
+		}
+		if (!ReadColor(colors, "border", value, present, error)) return false;
+		if (present) {
+			result.colors.border = value;
 			style.Colors[ImGuiCol_Border] = value;
 			style.Colors[ImGuiCol_Separator] = value;
 		}
-		if (!ReadColor(colors, "accent", value, error)) return false;
-		if (colors.contains("accent")) {
+		if (!ReadColor(colors, "accent", value, present, error)) return false;
+		if (present) {
+			result.colors.accent = value;
 			style.Colors[ImGuiCol_CheckMark] = value;
 			style.Colors[ImGuiCol_SliderGrab] = value;
 			style.Colors[ImGuiCol_HeaderActive] = value;
 			style.Colors[ImGuiCol_TabActive] = value;
 			style.Colors[ImGuiCol_ButtonActive] = value;
 		}
-		if (!ReadColor(colors, "accentHover", value, error)) return false;
-		if (colors.contains("accentHover")) {
+		if (!ReadColor(colors, "accentHover", value, present, error)) return false;
+		if (present) {
+			result.colors.accentHover = value;
 			style.Colors[ImGuiCol_ButtonHovered] = value;
 			style.Colors[ImGuiCol_HeaderHovered] = value;
 			style.Colors[ImGuiCol_SliderGrabActive] = value;
 			style.Colors[ImGuiCol_TabHovered] = value;
 		}
-		if (!ReadColor(colors, "selection", value, error)) return false;
-		if (colors.contains("selection")) {
+		if (!ReadColor(colors, "selection", value, present, error)) return false;
+		if (present) {
+			result.colors.selection = value;
 			style.Colors[ImGuiCol_Header] = value;
 			style.Colors[ImGuiCol_TextSelectedBg] = value;
 			style.Colors[ImGuiCol_NavHighlight] = value;
 		}
-		if (!ReadColor(colors, "hover", value, error)) return false;
-		if (colors.contains("hover")) {
+		if (!ReadColor(colors, "hover", value, present, error)) return false;
+		if (present) {
+			result.colors.hover = value;
 			style.Colors[ImGuiCol_FrameBgHovered] = value;
 			style.Colors[ImGuiCol_HeaderHovered] = value;
 			style.Colors[ImGuiCol_TabHovered] = value;
 		}
+		if (!ReadColor(colors, "error", value, present, error)) return false;
+		if (present)
+			result.colors.error = value;
+		if (!ReadColor(colors, "warning", value, present, error)) return false;
+		if (present)
+			result.colors.warning = value;
+		if (!ReadColor(colors, "success", value, present, error)) return false;
+		if (present)
+			result.colors.success = value;
+
+		// Optional shell chrome tokens.  Unknown extra keys stay forward
+		// compatible; these are simply not read.
+		const struct {
+			const char* key;
+			ImVec4* target;
+		} extras[] = {
+			{ "borderStrong", &result.colors.borderStrong },
+			{ "link", &result.colors.link },
+			{ "titleBar", &result.colors.titleBar },
+			{ "activityBar", &result.colors.activityBar },
+			{ "statusBar", &result.colors.statusBar },
+			{ "statusBarForeground", &result.colors.statusBarForeground },
+			{ "panel", &result.colors.panel },
+			{ "tabActive", &result.colors.tabActive },
+			{ "tabInactive", &result.colors.tabInactive },
+		};
+		for (const auto& extra : extras) {
+			if (!ReadColor(colors, extra.key, value, present, error)) return false;
+			if (present)
+				*extra.target = value;
+		}
+		style.Colors[ImGuiCol_TitleBg] = result.colors.titleBar;
+		style.Colors[ImGuiCol_TitleBgActive] = result.colors.titleBar;
+		style.Colors[ImGuiCol_TextLink] = result.colors.link;
+		style.Colors[ImGuiCol_Tab] = result.colors.tabInactive;
+		style.Colors[ImGuiCol_TabHovered] = result.colors.hover;
+		style.Colors[ImGuiCol_TabActive] = result.colors.tabActive;
+		style.Colors[ImGuiCol_TabSelected] = result.colors.tabActive;
+		style.Colors[ImGuiCol_TabUnfocused] = result.colors.tabInactive;
+		style.Colors[ImGuiCol_TabUnfocusedActive] = result.colors.tabActive;
+		style.Colors[ImGuiCol_TabDimmed] = result.colors.tabInactive;
+		style.Colors[ImGuiCol_TabDimmedSelected] = result.colors.tabActive;
+		style.Colors[ImGuiCol_Button] = result.colors.surfaceAlt;
+		style.Colors[ImGuiCol_ButtonHovered] = result.colors.hover;
+		style.Colors[ImGuiCol_ButtonActive] = result.colors.selection;
+		style.Colors[ImGuiCol_FrameBg] = result.colors.surfaceAlt;
+		style.Colors[ImGuiCol_FrameBgHovered] = result.colors.hover;
+		style.Colors[ImGuiCol_FrameBgActive] = result.colors.selection;
+		style.Colors[ImGuiCol_Header] = result.colors.selection;
+		style.Colors[ImGuiCol_HeaderHovered] = result.colors.hover;
+		style.Colors[ImGuiCol_HeaderActive] = result.colors.selection;
+		style.Colors[ImGuiCol_ScrollbarBg] = result.colors.background;
+		style.Colors[ImGuiCol_ScrollbarGrab] = result.colors.borderStrong;
+		style.Colors[ImGuiCol_ScrollbarGrabHovered] = result.colors.muted;
+		style.Colors[ImGuiCol_ScrollbarGrabActive] = result.colors.accent;
+		style.Colors[ImGuiCol_Separator] = result.colors.border;
+		style.Colors[ImGuiCol_TextSelectedBg] = result.colors.selection;
+		style.Colors[ImGuiCol_NavHighlight] = result.colors.accent;
+		style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.55f);
 	}
 
 	if (auto metrics_it = tokens.find("metrics"); metrics_it != tokens.end()) {
@@ -197,7 +295,39 @@ bool ApplyThemeDocument(const std::string& jsonText, std::string& error) {
 		style.FramePadding.y = NumberOr(metrics, "framePaddingY", style.FramePadding.y);
 	}
 
-	ImGui::GetStyle() = style;
+	if (auto typography_it = tokens.find("typography"); typography_it != tokens.end()) {
+		if (!typography_it->is_object()) {
+			error = "tokens.typography must be an object";
+			return false;
+		}
+		const json& typography = *typography_it;
+		if (!ReadStringToken(typography, "uiFamily", result.uiFamily, error)) return false;
+		if (!ReadStringToken(typography, "monoFamily", result.monoFamily, error)) return false;
+		// `scale` is the schema name; `uiScale` is accepted for the older
+		// PLUGIN_SPEC draft where it appeared under typography.
+		const float scale = NumberOr(typography, "scale", NumberOr(typography, "uiScale", 1.0f));
+		result.scale = std::clamp(scale, 0.8f, 2.0f);
+	}
+
+	return true;
+}
+
+bool LoadThemeFile(const std::string& path, ThemeResult& result, std::string& error) {
+	std::ifstream input(path, std::ios::binary);
+	if (!input) {
+		error = "cannot open theme file " + path;
+		return false;
+	}
+	std::ostringstream buffer;
+	buffer << input.rdbuf();
+	return ParseThemeDocument(buffer.str(), result, error);
+}
+
+bool ApplyThemeDocument(const std::string& jsonText, std::string& error) {
+	ThemeResult result;
+	if (!ParseThemeDocument(jsonText, result, error))
+		return false;
+	ImGui::GetStyle() = result.style;
 	return true;
 }
 

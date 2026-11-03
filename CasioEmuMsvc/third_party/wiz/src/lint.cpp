@@ -12,6 +12,7 @@
 
 #include "build.hpp"
 #include "common.hpp"
+#include "directives.hpp"
 #include "rop.hpp"
 #include "targets.hpp"
 
@@ -601,6 +602,8 @@ const std::vector<LintRuleInfo>& lint_rules() {
         {"preproc/unknown-target", "#for names a target the toolchain does not know"},
         {"preproc/unknown-directive", "a directive is misspelled or unsupported"},
         {"preproc/unbalanced-conditional", "#if/#endif (or #else/#elif) do not nest"},
+        {"preproc/noncanonical-directive", "a directive uses a compatibility alias or non-canonical spelling"},
+        {"preproc/noncanonical-type", "rom/rom8/__normalized__ uses a non-canonical placement"},
         {"readability/unused-variable", "a declared variable is never read"},
         {"readability/unused-parameter", "a function parameter is never used"},
         {"readability/empty-block", "a control-flow body is empty"},
@@ -664,10 +667,10 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
     }
 
     // ---------------------------------------------------------------- preprocessor
-    static const std::set<std::string> known_directives = {
-        "if", "ifdef", "ifndef", "elif", "else", "endif", "define", "undef", "pragma",
-        "error", "include", "for", "cwapp", "org", "binary", "slot", "rop", "launcher",
-        "pad", "nopad", "__asm__", "__hex__", "line"};
+    std::set<std::string> known_directives;
+    for (const auto& n : directive_names(DirectiveContext::Preprocess)) known_directives.insert(n);
+    for (const auto& n : directive_names(DirectiveContext::Rop)) known_directives.insert(n);
+    for (const char* extra : {"__asm__", "__hex__", "line"}) known_directives.insert(extra);
     std::string last_for;
     std::set<std::string> seen_for;
     bool in_cwapp = false;
@@ -692,6 +695,51 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
                 add(out, severity_of("preproc/unknown-directive"), (int)i + 1, (int)s + 1,
                     (int)p + 1, "preproc/unknown-directive",
                     "unknown directive '#" + name + "'", hint);
+            }
+            const std::string rest = trim(t.substr(p));
+            auto noncanon = [&](const std::string& msg, const std::string& how) {
+                add(out, severity_of("preproc/noncanonical-directive"), (int)i + 1,
+                    (int)s + 1, (int)t.size() + 1, "preproc/noncanonical-directive", msg, how);
+            };
+            if (name == "for" && !rest.empty()) {
+                std::string first = trim(rest.substr(0, rest.find(',')));
+                std::string canon;
+                if (canonical_target_name(first, canon) &&
+                    to_lower(first) != canon)
+                    noncanon("#for uses a compatibility target alias",
+                             "use '#for " + canon + "'");
+            } else if (name == "org") {
+                unsigned long v = 0;
+                std::string err;
+                bool bare = false;
+                if (parse_directive_number(rest, v, err, true, &bare) && bare)
+                    noncanon("#org uses a bare hexadecimal address",
+                             "use '#org " + canonical_address(v) + "'");
+            } else if (name == "pad") {
+                if (rest.size() > 2 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X'))
+                    noncanon("#pad uses a hexadecimal size", "use a decimal size, for example '#pad 256'");
+            } else if (name == "slot") {
+                if (rest.size() > 2 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X'))
+                    noncanon("#slot uses a hexadecimal number", "use a decimal slot, for example '#slot 2'");
+            } else if (name == "launcher") {
+                std::string first = trim(rest.substr(0, rest.find_first_of(" \t")));
+                const std::string l = to_lower(first);
+                if (l == "shared" || l == "chung")
+                    noncanon("#launcher uses a compatibility alias", "use '#launcher common'");
+                else if (l == "stub")
+                    noncanon("#launcher uses a compatibility alias", "use '#launcher simple'");
+                else if (!first.empty() && l != "common" && l != "simple") {
+                    unsigned long v = 0;
+                    std::string err;
+                    if (parse_directive_number(first, v, err, true))
+                        noncanon("#launcher places the simple stub with a bare address",
+                                 "use '#launcher simple " + canonical_address(v) + "'");
+                }
+            } else if (name == "include" && !rest.empty() && rest[0] == '<') {
+                add(out, severity_of("preproc/unknown-directive"), (int)i + 1, (int)s + 1,
+                    (int)t.size() + 1, "preproc/unknown-directive",
+                    "#include uses an angle-bracket path",
+                    "use #include \"file\"; this toolchain has no system include path");
             }
             if (name == "if" || name == "ifdef" || name == "ifndef") conditional_stack.push_back((int)i + 1);
             else if (name == "elif" || name == "else") {
@@ -784,6 +832,31 @@ std::vector<LintDiagnostic> lint_source(const std::string& source,
                         (int)raw.size() + 1, "preproc/slot-range",
                         "#slot needs a slot number from 1 to 12",
                         "for example '#slot 2'");
+            }
+        }
+        if (cwiz && !lines[i].directive && !lines[i].blank) {
+            const std::string code = trim(lines[i].code);
+            auto type_warn = [&](const std::string& msg, const std::string& how) {
+                add(out, severity_of("preproc/noncanonical-type"), (int)i + 1, 1,
+                    (int)raw.size() + 1, "preproc/noncanonical-type", msg, how);
+            };
+            size_t rp = code.find("rom8");
+            size_t rw = code.find("rom");
+            if (rp != std::string::npos &&
+                (rp + 4 >= code.size() || code.compare(rp + 4, 5, " char") != 0))
+                type_warn("rom8 is a byte storage qualifier",
+                          "write 'rom8 char name[N] = \"...\";'");
+            else if (rw != std::string::npos && !(rp == rw) &&
+                     (rw + 3 >= code.size() || code.compare(rw + 3, 4, " int") != 0))
+                type_warn("rom is a 16-bit word storage qualifier",
+                          "write 'rom int name[N] = { ... };'");
+            size_t np = code.find("__normalized__");
+            if (np != std::string::npos) {
+                std::string after = trim(code.substr(np + 14));
+                bool ok = after.rfind("rom8 char ", 0) == 0 || after.rfind("char ", 0) == 0;
+                if (np != 0 || !ok)
+                    type_warn("__normalized__ must be the first attribute on a char array",
+                              "write '__normalized__ rom8 char name[N] = \"...\";'");
             }
         }
     }

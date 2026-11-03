@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "Models.h"
 #include "Peripheral/BatteryBackedRAM.hpp"
+#include "Plugin/PluginPayloads.h"
 #include "Theme.h"
 #include "Ui.hpp"
 #ifdef CASIOEMU_CORE_WEB
@@ -525,6 +526,49 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 		if (currentModTime != lastModifiedTime) {
 			needsReload = true;
 			AsyncLoadCustomInjections();
+		}
+	}
+
+	// Payloads contributed by installed `inject` plugins.  The plugin loader
+	// validates address/bytes before registering, so only well-formed entries
+	// reach this list.
+	const auto plugin_payloads = casioemu::plugin::PluginPayloads();
+	if (!plugin_payloads.empty()) {
+		ImGui::Separator();
+		ImGui::TextUnformatted("Plugin payloads");
+		ImGui::TextDisabled("Registered by installed inject plugins.");
+		for (const auto& payload : plugin_payloads) {
+			ImGui::PushID(payload.id.c_str());
+			if (ImGui::CollapsingHeader(payload.name.c_str())) {
+				if (!payload.description.empty())
+					ImGui::TextWrapped("%s", payload.description.c_str());
+				ImGui::Text("Plugin: %s", payload.pluginId.c_str());
+				ImGui::Text("Address: 0x%05X  |  %zu bytes  |  target: %s%s",
+					payload.address, payload.bytes.size(), payload.target.c_str(),
+					payload.safe ? "  |  safe" : "");
+				if (ImGui::Button("Apply")) {
+					std::string error;
+					if (casioemu::plugin::ApplyPayloadBytes(payload,
+							[](void*, uint32_t address, uint8_t byte) {
+								if (!me_mmu)
+									return false;
+								me_mmu->WriteData(address, byte);
+								return true;
+							},
+							nullptr, error)) {
+						char buf[256];
+						snprintf(buf, sizeof(buf), "Injected %zu bytes at 0x%05X", payload.bytes.size(),
+							(unsigned int)payload.address);
+						SetFeedback(buf, false);
+						show_info = false;
+					}
+					else {
+						SetFeedback(error, true);
+						show_info = false;
+					}
+				}
+			}
+			ImGui::PopID();
 		}
 	}
 }

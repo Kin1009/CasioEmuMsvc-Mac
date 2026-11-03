@@ -32,6 +32,7 @@
 // BL-based display routines on the 580.
 
 #include "rop.hpp"
+#include "directives.hpp"
 #include "rop_data.hpp"
 #include "vn_f4.hpp"
 
@@ -1025,33 +1026,49 @@ struct Emitter {
             return;
         }
         if (db.model == "580") {
-            // Community pattern:
-            //     er0 = adr(a)
-            //     getkey
-            //     pop er0
-            //   a: 0x3030
-            // The slot starts as 0x3030, so a released key never matches a
-            // key table entry.  getkey is entered at 2:F5EA (BL ENTER) and its
-            // LEAVE returns through the chain.
+            // Clear the inline slot at run time before every read.  getkey /
+            // getscancode leave [ER0] unchanged when no key is down, so a
+            // compile-time zero alone would re-dispatch the previous key in a
+            // loop.  Exact block (also documented in docs/ROP.md):
+            //     setlr
+            //     pop xr0                 ; ER0 = slot address, ER2 = 0
+            //     <slot>, 0000
+            //     [er0]=er2,rt
+            //     pop er0                 ; ER0 = slot address
+            //     <slot>
+            //     getkey  (2:F5EA, BL ENTER) / getscancode (1:F24E)
+            //     setlr
+            //     pop er0                 ; load the word just written
+            //     slot: 00 00
             const std::string name = lower(s->name);
             const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
+            call("setlr");
+            call("pop xr0");
+            const size_t zero_pos = out.size();
+            out.push_back(0);
+            out.push_back(0);
+            out.push_back(0);
+            out.push_back(0);
+            call("[er0]=er2,rt");
             call("pop er0");
             const size_t addr_pos = out.size();
             out.push_back(0);
             out.push_back(0);
-            call("setlr");
             call(gc);
+            call("setlr");
             call("pop er0");
             const size_t slot_pos = out.size();
             out.push_back(0x00);
             out.push_back(0x00);
             key_slot = home + (uint32_t)slot_pos;
             has_key_slot = true;
+            out[zero_pos] = (uint8_t)(key_slot & 0xFF);
+            out[zero_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
             out[addr_pos] = (uint8_t)(key_slot & 0xFF);
             out[addr_pos + 1] = (uint8_t)((key_slot >> 8) & 0xFF);
             data_labels[slot_pos] = slot_count++ ? "keyslot_" + std::to_string(slot_count) : "keyslot";
             log += "  ; " + name + " -> inline slot [" + hex4(key_slot) +
-                   "] (zeroed before read)\n";
+                   "] (cleared before read)\n";
             return;
         }
         // 880: clear the inline slot, write KI/KO, then reload the value.
@@ -1113,11 +1130,13 @@ struct Emitter {
             // getkey() returns raw KI/KO words; accept the FCxx key IDs too so
             // tables written either way dispatch the same key.
             if (db.model == "580") {
+                // ROM table bank0 0x7B0E/0x83DA: FC1C=UP 0x0480,
+                // FC1D=DOWN 0x0840, FC1E=RIGHT 0x0880, FC1F=LEFT 0x0440.
                 switch (e.key) {
-                case 0xFC1F: e.key = 0x0480; break;   // up
-                case 0xFC1E: e.key = 0x0840; break;   // down
-                case 0xFC1C: e.key = 0x0440; break;   // left
-                case 0xFC1D: e.key = 0x0880; break;   // right
+                case 0xFC1C: e.key = 0x0480; break;   // UP
+                case 0xFC1D: e.key = 0x0840; break;   // DOWN
+                case 0xFC1E: e.key = 0x0880; break;   // RIGHT
+                case 0xFC1F: e.key = 0x0440; break;   // LEFT
                 default: break;
                 }
             }
@@ -1145,6 +1164,10 @@ struct Emitter {
         // POP PC by the time the branch target starts.  The community .rsc
         // re-arms LR and disables interrupts before the branch:
         // setlr_pc; di,rt; sp=er6,pop er8.  getkey() re-enables them.
+        // TODO(real-device): the proposal also suggests di,rt (0A05C) before
+        // sp=er6,pop er8.  Keep the current setlr-only flow until a device
+        // test confirms the interrupt state; the ea_switchcase example and
+        // earlier commits deliberately keep interrupts on.  See docs/ROP.md.
         call("setlr");
         call("sp=er6,pop er8");
         log += "  ; keytable: " + std::to_string(table.entries.size()) + " entries\n";
@@ -1724,19 +1747,34 @@ struct LauncherOpts {
     bool has_main = false;
 };
 
-uint32_t parse_number(std::string a) {
-    if (!a.empty() && a.front() == '[') a.erase(a.begin());
-    if (!a.empty() && a.back() == ']') a.pop_back();
-    if (a.rfind("0x", 0) == 0 || a.rfind("0X", 0) == 0) a = a.substr(2);
-    return (uint32_t)std::strtoul(a.c_str(), nullptr, 16);
+[[noreturn]] void directive_error(int line_no, const std::string& name,
+                                  const std::string& msg, const std::string& code) {
+    throw std::runtime_error(fmt("line %d: #%s: %s [%s]", line_no, name.c_str(), msg.c_str(),
+                                 code.c_str()));
 }
 
-uint32_t parse_length(std::string a) {
+uint32_t directive_u32(int line_no, const std::string& name, const std::string& text,
+                       bool allow_bare_hex) {
+    unsigned long v = 0;
+    std::string err;
+    if (!parse_directive_number(text, v, err, allow_bare_hex))
+        directive_error(line_no, name, err, "preproc.directive-argument");
+    if (v > 0xFFFFu)
+        directive_error(line_no, name, "value does not fit in 16 bits",
+                        "preproc.directive-argument");
+    return (uint32_t)v;
+}
+
+uint32_t parse_length(int line_no, const std::string& a) {
     const std::string l = lower(a);
     if (l == "short" || l == "small") return 1;
     if (l == "medium" || l == "mid") return 2;
     if (l == "long" || l == "large") return 3;
-    return parse_number(a) & 0xFF;
+    uint32_t v = directive_u32(line_no, "launcher", a, false);
+    if (v < 1 || v > 3)
+        directive_error(line_no, "launcher", "length must be short, medium, long, 1, 2 or 3",
+                        "preproc.directive-argument");
+    return v;
 }
 
 std::string strip_directives(std::string src, std::string& model, uint32_t& org, bool& has_org,
@@ -1749,32 +1787,64 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
         ++lineno;
         size_t i = line.find_first_not_of(" \t");
         if (i != std::string::npos && line[i] == '#') {
-            std::istringstream ls(line.substr(i + 1));
-            std::string d; ls >> d;
-            std::string dlow = lower(d);
-            static const std::vector<std::string> known = {
-                "rop", "for", "org", "launcher", "pad", "nopad"};
-            if (dlow != "rop" && !contains(known, dlow)) {
-                std::string hit = closest_match(dlow, known);
-                std::string hint = hit.empty() ? std::string() : " (did you mean '#" + hit + "'?)";
-                throw std::runtime_error(fmt("line %d: unknown ROP directive '#%s'%s",
-                                             lineno, d.c_str(), hint.c_str()));
+            std::string text = line.substr(i + 1);
+            const size_t comment = text.find("//");
+            if (comment != std::string::npos) text = text.substr(0, comment);
+            std::istringstream ls(text);
+            std::string d;
+            ls >> d;
+            const std::string dlow = lower(d);
+            const DirectiveInfo* info = find_directive(dlow, DirectiveContext::Rop);
+            if (!info) {
+                std::string hit = closest_match(dlow, directive_names(DirectiveContext::Rop));
+                std::string hint =
+                    hit.empty() ? std::string() : " (did you mean '#" + hit + "'?)";
+                directive_error(lineno, d,
+                                "unknown ROP directive '#" + d + "'" + hint,
+                                "preproc.unknown-directive");
             }
             if (dlow == "for") {
-                std::string m; ls >> m;
-                std::string ml = lower(m);
-                if (ml == "580" || ml == "580vnx" || ml == "fx-580vn" ) model = "580";
-                else if (ml == "880" || ml == "880btg") model = "880";
+                std::string m;
+                if (!(ls >> m))
+                    directive_error(lineno, d, "expected a target (580 or 880)",
+                                    "preproc.directive-argument");
+                std::string canon;
+                if (!canonical_target_name(m, canon))
+                    directive_error(lineno, d, "unknown target '" + m + "' (use 580 or 880)",
+                                    "preproc.directive-argument");
+                std::string extra;
+                if (ls >> extra)
+                    directive_error(lineno, d, "only one target is allowed in a ROP source",
+                                    "preproc.directive-argument");
+                model = canon;
             } else if (dlow == "org") {
-                std::string a; ls >> a;
-                org = parse_number(a);
+                std::string a;
+                if (!(ls >> a))
+                    directive_error(lineno, d, "expected an address",
+                                    "preproc.directive-argument");
+                org = directive_u32(lineno, d, a, true);
                 has_org = true;
+                std::string extra;
+                if (ls >> extra)
+                    directive_error(lineno, d, "unexpected text after the address",
+                                    "preproc.directive-argument");
             } else if (dlow == "pad" || dlow == "nopad") {
                 if (dlow == "nopad") {
+                    std::string extra;
+                    if (ls >> extra)
+                        directive_error(lineno, d, "#nopad takes no argument",
+                                        "preproc.directive-argument");
                     pad = 0;
                 } else {
-                    std::string a; ls >> a;
-                    if (!a.empty()) pad = (int)parse_number(a);
+                    std::string a;
+                    if (!(ls >> a))
+                        directive_error(lineno, d, "expected a size",
+                                        "preproc.directive-argument");
+                    pad = (int)directive_u32(lineno, d, a, false);
+                    std::string extra;
+                    if (ls >> extra)
+                        directive_error(lineno, d, "unexpected text after the size",
+                                        "preproc.directive-argument");
                 }
             } else if (dlow == "launcher") {
                 std::string a;
@@ -1787,22 +1857,30 @@ std::string strip_directives(std::string src, std::string& model, uint32_t& org,
                     } else if (al == "simple" || al == "stub") {
                         lopts.kind = LauncherKind::Simple;
                     } else {
-                        // Backwards compatible: `#launcher 8154` places the
-                        // simple stub at that address.
+                        // Legacy: `#launcher 8154` places the simple stub.
                         lopts.kind = LauncherKind::Simple;
-                        lopts.base = parse_number(a);
+                        lopts.base = directive_u32(lineno, d, a, true);
                         lopts.has_base = true;
                     }
                 }
                 if (lopts.kind == LauncherKind::Common) {
                     std::string v;
-                    if (ls >> v) { lopts.length = parse_length(v); lopts.has_length = true; }
-                    if (ls >> v) { lopts.backup = parse_number(v); lopts.has_backup = true; }
-                    if (ls >> v) { lopts.main = parse_number(v); lopts.has_main = true; }
+                    if (ls >> v) { lopts.length = parse_length(lineno, v); lopts.has_length = true; }
+                    if (ls >> v) { lopts.backup = directive_u32(lineno, d, v, true); lopts.has_backup = true; }
+                    if (ls >> v) { lopts.main = directive_u32(lineno, d, v, true); lopts.has_main = true; }
                 } else {
                     std::string v;
-                    if (ls >> v) { lopts.base = parse_number(v); lopts.has_base = true; }
+                    if (ls >> v) { lopts.base = directive_u32(lineno, d, v, true); lopts.has_base = true; }
                 }
+                std::string extra;
+                if (ls >> extra)
+                    directive_error(lineno, d, "unexpected text after the launcher options",
+                                    "preproc.directive-argument");
+            } else if (dlow == "rop") {
+                std::string extra;
+                if (ls >> extra)
+                    directive_error(lineno, d, "#rop takes no argument",
+                                    "preproc.directive-argument");
             }
             out += "\n";
             continue;

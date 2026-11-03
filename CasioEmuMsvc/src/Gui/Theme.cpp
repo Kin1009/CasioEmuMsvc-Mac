@@ -1,6 +1,7 @@
 #include "Theme.h"
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "FileDialog.hpp"
+#include "Settings/Settings.h"
 #ifndef CASIOEMU_CORE_WEB
 #include "SysDialog.h"
 #else
@@ -9,6 +10,8 @@
 #include "Ui.hpp"
 #include <Gui.h>
 #include <Localization.h>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vibration.h>
@@ -19,11 +22,16 @@
 extern SDL_Surface* background;
 extern SDL_Texture* bg_txt;
 
+// Settings is organised into five categories that mirror the preview plan:
+// Theme / Editor / Emulator / Plugins / System.  The JSON document is the
+// source of truth; the theme manager keeps the legacy ThemeSettings fields in
+// sync so older call sites keep working unchanged.
 class SettingsWindow : public UIWindow {
 private:
-	bool showFileDialog;
-	char tempInjectionFilePath[256];
+	bool showFileDialog = false;
+	char tempInjectionFilePath[256]{};
 	bool tabsApplied = false;
+	std::string themeError;
 
 	std::string HiddenTabsValue() const {
 		std::string hidden;
@@ -56,44 +64,147 @@ private:
 		}
 	}
 
-public:
-	SettingsWindow() : UIWindow("Settings"), showFileDialog(false) {
-		auto& settings = ThemeManager::Instance().Settings();
-		strncpy(tempInjectionFilePath, settings.injectionFilePath, sizeof(tempInjectionFilePath));
+	static void SaveNow() {
+		ThemeManager::Instance().SaveSettings();
 	}
-	std::once_flag loadFlag;
-	void RenderCore() override {
-		std::call_once(loadFlag, []() {
-			ThemeManager::Instance().LoadSettings();
-		});
-		auto& tm = ThemeManager::Instance();
-		auto& settings = tm.Settings();
-		if (!tabsApplied) {
-			ApplySavedTabVisibility(settings);
-			tabsApplied = true;
+
+	void RenderThemeTab(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		ImGui::TextWrapped("%s", "Settings.Theme.Description"_lc);
+		ImGui::Spacing();
+
+		UIHelpers::SectionHeader("Settings.Theme.Preset"_lc);
+		const auto themes = tm.AvailableThemes();
+		const std::string current = tm.CurrentThemeName();
+		std::string currentLabel = current;
+		for (const auto& info : themes) {
+			if (info.id == current) {
+				currentLabel = info.name + " (" + info.id + ")";
+				break;
+			}
 		}
+		if (tm.IsPluginThemeActive())
+			ImGui::TextColored(UIHelpers::kColorWarning, "%s", "Settings.Theme.PluginActive"_lc);
 
-		if (ImGui::BeginTabBar("##settings_pages")) {
-		if (ImGui::BeginTabItem("General")) {
-		UIHelpers::SectionHeader("Appearance");
+		ImGui::SetNextItemWidth(360.0f);
+		if (ImGui::BeginCombo("##theme_preset", currentLabel.c_str())) {
+			for (const auto& info : themes) {
+				const bool selected = info.id == current;
+				const std::string label = info.name + "##" + info.id;
+				if (ImGui::Selectable(label.c_str(), selected)) {
+					std::string error;
+					if (!tm.ApplyThemeByName(info.id, &error))
+						themeError = error;
+					else
+						themeError.clear();
+				}
+				if (selected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+		if (!themeError.empty())
+			ImGui::TextColored(UIHelpers::kColorError, "%s", themeError.c_str());
 
-		if (ImGui::Button("Ui.DarkMode"_lc)) {
+		if (ImGui::Button("Ui.DarkMode"_lc))
 			tm.SetDarkMode();
+		ImGui::SameLine();
+		if (ImGui::Button("Ui.LightMode"_lc))
+			tm.SetLightMode();
+
+		ImGui::Spacing();
+		float currentFontScale = tm.GetFontScale();
+		ImGui::SetNextItemWidth(240.0f);
+		if (ImGui::SliderFloat("Ui.Scale"_lc, &currentFontScale, 0.8f, 2.0f, "%.2f")) {
+			settings.scale = currentFontScale;
+			tm.SetFontScale(currentFontScale);
+		}
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			SaveNow();
+			tm.RequestFontRebuild();
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Ui.LightMode"_lc)) {
-			tm.SetLightMode();
+		if (ImGui::Button("Ui.ApplyScale"_lc)) {
+			tm.RequestFontRebuild();
+			SaveNow();
+		}
+		ImGui::TextDisabled("%s: %s / %s", "Settings.Theme.Typography"_lc,
+			tm.Typography().uiFamily.c_str(), tm.Typography().monoFamily.c_str());
+
+		UIHelpers::SectionHeader("Auto-Tint (MD3 Monet)");
+		if (ImGui::Checkbox("Theme.Tint"_lc, &settings.enableAutoTint))
+			SaveNow();
+		if (settings.enableAutoTint) {
+			ImVec4 seedColor = settings.seedColor;
+			if (ImGui::ColorEdit4("Theme.SeedColor"_lc, (float*)&seedColor, ImGuiColorEditFlags_NoAlpha))
+				tm.SetSeedColor(seedColor);
+			if (ImGui::Button("Theme.MD"_lc)) {
+#if !defined(TEST_BUILD) && !defined(CASIOEMU_CORE_WEB)
+				seedColor = tm.ExtractDominantColor(bg_txt, renderer);
+#endif
+				tm.SetSeedColor(seedColor);
+			}
 		}
 
+		UIHelpers::SectionHeader("Background"_lc);
+		if (ImGui::Button("UI.ChangeBg"_lc)) {
+#ifdef CASIOEMU_CORE_WEB
+			WebDebuggerQueueOpenFile("/persist/background.jpg", "background.jpg");
+#else
+			SystemDialogs::OpenFileDialog([](std::filesystem::path pth) {
+				std::filesystem::copy_file(pth, "background.jpg", std::filesystem::copy_options::overwrite_existing);
+			});
+			tm.RequestBgReload();
+#endif
+		}
+#ifdef CASIOEMU_CORE_WEB
+		int bgResult = 0;
+		if (WebDebuggerConsumeFileResult("/persist/background.jpg", &bgResult) && bgResult == 0)
+			tm.RequestBgReload();
+#endif
+
+		ImGui::Spacing();
+		if (ImGui::CollapsingHeader("Settings.Theme.Advanced"_lc)) {
+			ImGui::TextWrapped("%s", "Settings.Theme.AdvancedHint"_lc);
+			auto& base = settings.isDarkMode ? settings.igs_dark : settings.igs_light;
+			ImGuiStyle ims_backup;
+			std::memcpy(&ims_backup, &ImGui::GetStyle(), sizeof(base));
+			std::memcpy(&ImGui::GetStyle(), &base, sizeof(base));
+			ImGui::ShowStyleEditor();
+			std::memcpy(&base, &ImGui::GetStyle(), sizeof(base));
+			std::memcpy(&ImGui::GetStyle(), &ims_backup, sizeof(base));
+		}
+	}
+
+	void RenderEditorTab(ThemeManager& tm, casioemu::settings::SettingsData& data) {
+		ImGui::TextWrapped("%s", "Settings.Editor.Description"_lc);
+		ImGui::Spacing();
+		UIHelpers::SectionHeader("Settings.Editor.Text"_lc);
+		bool changed = false;
+		changed |= ImGui::Checkbox("Settings.Editor.ShowLineNumbers"_lc, &data.editor.showLineNumbers);
+		changed |= ImGui::Checkbox("Settings.Editor.WordWrap"_lc, &data.editor.wordWrap);
+		ImGui::SetNextItemWidth(200.0f);
+		changed |= ImGui::SliderFloat("Settings.Editor.FontSize"_lc, &data.editor.fontSize, 10.0f, 24.0f, "%.0f px");
+		ImGui::SetNextItemWidth(200.0f);
+		changed |= ImGui::SliderInt("Settings.Editor.TabSize"_lc, &data.editor.tabSize, 2, 8);
+		if (changed)
+			SaveNow();
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", "Settings.Editor.FutureHint"_lc);
+	}
+
+	void RenderEmulatorTab(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		ImGui::TextWrapped("%s", "Settings.Emulator.Description"_lc);
+		ImGui::Spacing();
+
+		UIHelpers::SectionHeader("Settings.Emulator.Performance"_lc);
 #ifndef __ANDROID__
-		ImGui::SameLine();
 		bool low_performance = settings.lowPerformanceMode;
 		if (ImGui::Checkbox("Ui.LowPerformanceMode"_lc, &low_performance)) {
-			{
-				casioemu::ordinary_lcd_history::UntrackedChange change;
-				settings.lowPerformanceMode = low_performance;
-			}
-			tm.SaveSettings();
+			casioemu::ordinary_lcd_history::UntrackedChange change;
+			settings.lowPerformanceMode = low_performance;
+			SaveNow();
 		}
 		if (ImGui::IsItemHovered()) {
 			ImGui::BeginTooltip();
@@ -104,22 +215,85 @@ public:
 #ifdef __ANDROID__
 		ImGui::Checkbox("Ui.DisableVibration"_lc, &setting_DisableVibration);
 #endif
+		ImGui::SetNextItemWidth(240.0f);
+		if (ImGui::SliderFloat("Settings.Emulator.Throttle"_lc, &data.emulator.backgroundThrottle, 0.05f, 1.0f, "%.2f"))
+			data.emulator.backgroundThrottle = ImClamp(data.emulator.backgroundThrottle, 0.05f, 1.0f);
+		if (ImGui::IsItemDeactivatedAfterEdit())
+			SaveNow();
+		if (ImGui::IsItemHovered()) {
+			ImGui::BeginTooltip();
+			ImGui::TextUnformatted("Settings.Emulator.ThrottleHint"_lc);
+			ImGui::EndTooltip();
+		}
 
-		float currentFontScale = tm.GetFontScale();
-		if (ImGui::SliderFloat("Ui.Scale"_lc, &currentFontScale, 0.5f, 3.0f, "%.2f")) {
-			settings.scale = currentFontScale;
-			tm.SetFontScale(currentFontScale);
+		UIHelpers::SectionHeader("Ui.InjectionFilePath"_lc);
+		ImGui::SetNextItemWidth(360.0f);
+		ImGui::InputText("##injection_file_path", tempInjectionFilePath, sizeof(tempInjectionFilePath));
+		ImGui::SameLine();
+#ifndef CASIOEMU_CORE_WEB
+		if (ImGui::Button("Ui.Browse"_lc))
+			showFileDialog = true;
+		if (showFileDialog) {
+			if (FileDialog::ShowFileOpenDialog("Select Injection File", "Text Files (*.txt){.txt},All Files (*.*){.*}",
+					tempInjectionFilePath, sizeof(tempInjectionFilePath))) {
+				showFileDialog = false;
+			}
 		}
-		if (ImGui::Button("Ui.ApplyScale"_lc)) {
+#else
+		if (ImGui::Button("Ui.Browse"_lc))
+			WebDebuggerQueueOpenFile(tempInjectionFilePath, "hc-inj.txt");
+#endif
+		if (ImGui::Button("Files.Save"_lc)) {
+			strncpy(settings.injectionFilePath, tempInjectionFilePath, sizeof(settings.injectionFilePath));
+			settings.injectionFilePath[sizeof(settings.injectionFilePath) - 1] = '\0';
+			SaveNow();
 			tm.RequestFontRebuild();
-			tm.SaveSettings();
 		}
+	}
+
+	void RenderPluginsTab(ThemeManager& tm, casioemu::settings::SettingsData& data) {
+		ImGui::TextWrapped("%s", "Settings.Plugins.Description"_lc);
+		ImGui::Spacing();
+
+		UIHelpers::SectionHeader("Settings.Plugins.Theme"_lc);
+		if (tm.IsPluginThemeActive())
+			ImGui::TextColored(UIHelpers::kColorSuccess, "%s", "Settings.Plugins.ThemeActive"_lc);
+		else
+			ImGui::TextDisabled("%s", "Settings.Plugins.ThemeInactive"_lc);
+		ImGui::Text("%s: %s", "Settings.Plugins.ActivePreset"_lc,
+			tm.CurrentThemeName().empty() ? "(none)" : tm.CurrentThemeName().c_str());
+
+		UIHelpers::SectionHeader("Settings.Plugins.Registry"_lc);
+		ImGui::Text("%s: %d", "Settings.Plugins.EnabledCount"_lc, (int)data.plugins.enabled.size());
+		ImGui::Text("%s: %d", "Settings.Plugins.DisabledCount"_lc, (int)data.plugins.disabled.size());
+		ImGui::TextDisabled("%s: %s", "Settings.Plugins.TrustStore"_lc, data.plugins.trustPath.c_str());
+
+		UIWindow* manager = nullptr;
+		for (auto* win : windows) {
+			if (win && win->name && std::strcmp(win->name, "Plugin Manager") == 0) {
+				manager = win;
+				break;
+			}
+		}
+		if (manager) {
+			if (ImGui::Button("Settings.Plugins.OpenManager"_lc))
+				manager->BringToFront();
+		}
+		else {
+			ImGui::TextDisabled("%s", "Settings.Plugins.ManagerMissing"_lc);
+		}
+		ImGui::Spacing();
+		ImGui::TextWrapped("%s", "Settings.Plugins.TrustHint"_lc);
+	}
+
+	void RenderSystemTab(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		ImGui::TextWrapped("%s", "Settings.System.Description"_lc);
+		ImGui::Spacing();
 
 		UIHelpers::SectionHeader("Language");
-
-		if (strlen(settings.language) == 0) {
+		if (strlen(settings.language) == 0)
 			strncpy(settings.language, g_local.GetCurrentLanguage().c_str(), sizeof(settings.language));
-		}
 
 		static const struct {
 			const char* code;
@@ -147,34 +321,32 @@ public:
 				break;
 			}
 		}
-		std::string currentLabel = std::string("[") + currentBadge + "] " + currentDisplayName;
-
+		const std::string currentLabel = std::string("[") + currentBadge + "] " + currentDisplayName;
 		ImGui::SetNextItemWidth(300.0f);
 		if (ImGui::BeginCombo("##language_combo", currentLabel.c_str())) {
 			for (const auto& lang : availableLanguages) {
-				std::string dispName = g_local.Get(lang.displayNameKey);
-				std::string itemLabel = std::string("[") + lang.badge + "] " + dispName;
-				bool isSelected = (currentLangStr == lang.code);
+				const std::string dispName = g_local.Get(lang.displayNameKey);
+				const std::string itemLabel = std::string("[") + lang.badge + "] " + dispName;
+				const bool isSelected = (currentLangStr == lang.code);
 				if (ImGui::Selectable(itemLabel.c_str(), isSelected)) {
 					strncpy(settings.language, lang.code, sizeof(settings.language));
+					settings.language[sizeof(settings.language) - 1] = '\0';
 					g_local.ChangeLanguage(settings.language);
 					tm.RequestFontRebuild();
-					tm.SaveSettings();
+					SaveNow();
 				}
-				if (isSelected) {
+				if (isSelected)
 					ImGui::SetItemDefaultFocus();
-				}
 			}
 			ImGui::EndCombo();
 		}
-
 		ImGui::SameLine();
 		if (ImGui::Button("Ui.ForceUpdateLang"_lc)) {
 			if (strlen(settings.language) > 0) {
-				std::string langFile = "./locales/" + std::string(settings.language) + ".lc";
-				if (std::filesystem::exists(langFile)) {
-					std::filesystem::remove(langFile);
-				}
+				const std::string langFile = "./locales/" + std::string(settings.language) + ".lc";
+				std::error_code ec;
+				if (std::filesystem::exists(langFile, ec))
+					std::filesystem::remove(langFile, ec);
 				g_local.ChangeLanguage(settings.language);
 				tm.RequestFontRebuild();
 			}
@@ -185,101 +357,21 @@ public:
 			ImGui::EndTooltip();
 		}
 
-		UIHelpers::SectionHeader("Background & Injection");
-
-		if (ImGui::Button("UI.ChangeBg"_lc)) {
-#ifdef CASIOEMU_CORE_WEB
-			WebDebuggerQueueOpenFile("/persist/background.jpg", "background.jpg");
-#else
-			SystemDialogs::OpenFileDialog([](std::filesystem::path pth) {
-				std::filesystem::copy_file(pth, "background.jpg", std::filesystem::copy_options::overwrite_existing);
-			});
-			tm.RequestBgReload();
-#endif
-		}
-#ifdef CASIOEMU_CORE_WEB
-		int bgResult = 0;
-		if (WebDebuggerConsumeFileResult("/persist/background.jpg", &bgResult) && bgResult == 0) {
-			tm.RequestBgReload();
-		}
-#endif
-
-		ImGui::Spacing();
-		ImGui::TextUnformatted("Ui.InjectionFilePath"_lc);
-		ImGui::InputText("##injection_file_path", tempInjectionFilePath, sizeof(tempInjectionFilePath));
-#ifndef CASIOEMU_CORE_WEB
-		ImGui::SameLine();
-		if (ImGui::Button("Ui.Browse"_lc)) {
-			showFileDialog = true;
-		}
-
-		if (showFileDialog) {
-			if (FileDialog::ShowFileOpenDialog("Select Injection File", "Text Files (*.txt){.txt},All Files (*.*){.*}",
-					tempInjectionFilePath, sizeof(tempInjectionFilePath))) {
-				showFileDialog = false;
-			}
-		}
-#endif
-
-		UIHelpers::SectionHeader("Auto-Tint (MD3 Monet)");
-		
-		if (ImGui::Checkbox("Theme.Tint"_lc, &settings.enableAutoTint)) {
-			tm.SaveSettings();
-		}
-
-		if (settings.enableAutoTint) {
-			ImVec4 seedColor = settings.seedColor;
-			if (ImGui::ColorEdit4("Theme.SeedColor"_lc, (float*)&seedColor, ImGuiColorEditFlags_NoAlpha)) {
-				tm.SetSeedColor(seedColor);
-			}
-			if (ImGui::Button("Theme.MD"_lc)) {
-#if !defined(TEST_BUILD) && !defined(CASIOEMU_CORE_WEB)
-				seedColor = tm.ExtractDominantColor(bg_txt, renderer);
-#endif
-				tm.SetSeedColor(seedColor);
-			}
-		}
-		
 #ifndef CASIOEMU_CORE_WEB
 		UIHelpers::SectionHeader("Integrations");
 		if (ImGui::Checkbox("Theme.EnableDiscordRPC"_lc, &settings.enableDiscordRPC)) {
-			tm.SaveSettings();
-			if (m_emu) {
+			SaveNow();
+			if (m_emu)
 				DiscordRPC::UpdatePresence(m_emu->ModelDefinition.model_name);
-			} else {
+			else
 				DiscordRPC::UpdatePresence("");
-			}
 		}
-		if (ImGui::Checkbox("Theme.EnableUpdateChecker"_lc, &settings.enableUpdateChecker)) {
-			tm.SaveSettings();
-		}
+		if (ImGui::Checkbox("Theme.EnableUpdateChecker"_lc, &settings.enableUpdateChecker))
+			SaveNow();
 #endif
 
-		UIHelpers::SectionHeader("Advanced Style Settings");
-
-		if (ImGui::CollapsingHeader("Advanced Style Editor")) {
-			// Edit the unscaled base style
-			auto& base = settings.isDarkMode ? settings.igs_dark : settings.igs_light;
-			ImGuiStyle ims_backup;
-			std::memcpy(&ims_backup, &ImGui::GetStyle(), sizeof(base));
-			std::memcpy(&ImGui::GetStyle(), &base, sizeof(base));
-			ImGui::ShowStyleEditor();
-			std::memcpy(&base, &ImGui::GetStyle(), sizeof(base));
-			std::memcpy(&ImGui::GetStyle(), &ims_backup, sizeof(base));
-		}
-
-		ImGui::Spacing();
-		if (ImGui::Button("Files.Save"_lc)) {
-			strncpy(settings.injectionFilePath, tempInjectionFilePath, sizeof(settings.injectionFilePath));
-			tm.SaveSettings();
-			tm.RequestFontRebuild();
-		}
-
-		ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("Tabs")) {
-		UIHelpers::SectionHeader("Tab visibility");
-		ImGui::TextWrapped("Choose which workspace tabs are shown. Settings is always available so hidden tabs can be restored.");
+		UIHelpers::SectionHeader("Settings.System.Tabs"_lc);
+		ImGui::TextWrapped("%s", "Settings.System.TabsHint"_lc);
 		bool tabVisibilityChanged = false;
 		for (auto* win : windows) {
 			if (!win || !win->name) continue;
@@ -298,13 +390,65 @@ public:
 		if (tabVisibilityChanged || hiddenTabs != settings.hiddenTabs) {
 			strncpy(settings.hiddenTabs, hiddenTabs.c_str(), sizeof(settings.hiddenTabs));
 			settings.hiddenTabs[sizeof(settings.hiddenTabs) - 1] = '\0';
-			tm.SaveSettings();
+			SaveNow();
 		}
-		ImGui::EndTabItem();
+
+		UIHelpers::SectionHeader("Settings.System.Storage"_lc);
+		auto& store = casioemu::settings::SettingsStore::Instance();
+		ImGui::TextDisabled("%s: %s", "Settings.System.SettingsFile"_lc, store.FilePath().string().c_str());
+		ImGui::TextDisabled("%s: %s", "Settings.System.Schema"_lc, "1");
+		if (ImGui::Button("Settings.System.SaveNow"_lc))
+			SaveNow();
+		ImGui::SameLine();
+		if (ImGui::Button("Settings.System.Reload"_lc)) {
+			tm.LoadSettings();
+			tabsApplied = false;
 		}
-		ImGui::EndTabBar();
 	}
-}
+
+public:
+	SettingsWindow() : UIWindow("Settings") {
+		auto& settings = ThemeManager::Instance().Settings();
+		strncpy(tempInjectionFilePath, settings.injectionFilePath, sizeof(tempInjectionFilePath));
+		tempInjectionFilePath[sizeof(tempInjectionFilePath) - 1] = '\0';
+	}
+
+	void RenderCore() override {
+		if (!casioemu::settings::SettingsStore::Instance().IsLoaded())
+			ThemeManager::Instance().LoadSettings();
+
+		auto& tm = ThemeManager::Instance();
+		auto& settings = tm.Settings();
+		auto& data = casioemu::settings::SettingsStore::Instance().Data();
+		if (!tabsApplied) {
+			ApplySavedTabVisibility(settings);
+			tabsApplied = true;
+		}
+
+		if (ImGui::BeginTabBar("##settings_categories")) {
+			if (ImGui::BeginTabItem("Settings.Tab.Theme"_lc)) {
+				RenderThemeTab(tm, settings, data);
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Settings.Tab.Editor"_lc)) {
+				RenderEditorTab(tm, data);
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Settings.Tab.Emulator"_lc)) {
+				RenderEmulatorTab(tm, settings, data);
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Settings.Tab.Plugins"_lc)) {
+				RenderPluginsTab(tm, data);
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Settings.Tab.System"_lc)) {
+				RenderSystemTab(tm, settings, data);
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
+		}
+	}
 };
 
 UIWindow* MakeSettingsWindow() {

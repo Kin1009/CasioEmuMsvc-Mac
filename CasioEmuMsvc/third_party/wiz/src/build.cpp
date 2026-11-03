@@ -2,6 +2,11 @@
 #include "build.hpp"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 
 #include "asm.hpp"
@@ -109,9 +114,71 @@ static BuildResult finish(const std::string& body, const std::map<std::string, i
     return res;
 }
 
-BuildResult build_source(const std::string& src, const std::string& target) {
+// `import name` / `from name import symbol` - the upstream wizimport.py
+// behaviour, implemented for the C++ driver.  Files are searched next to the
+// including file and next to the main source, with .wz/.cw/no extension.
+static std::string expand_wiz_imports(const std::string& src, const std::string& target,
+                                      const std::string& path) {
+    namespace fs = std::filesystem;
+    const std::string main_dir = path.empty() ? std::string(".")
+                                              : fs::path(path).parent_path().string();
+    std::set<std::string> seen;
+    if (!path.empty()) {
+        std::error_code ec;
+        seen.insert(fs::weakly_canonical(fs::absolute(path, ec), ec).string());
+    }
+    std::function<std::string(const std::string&, const std::string&)> expand =
+        [&](const std::string& text, const std::string& cur_dir) -> std::string {
+        std::string out;
+        std::istringstream in(text);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::string t = strip(line);
+            std::string name;
+            if (t.rfind("import ", 0) == 0) name = strip(t.substr(7));
+            else if (t.rfind("from ", 0) == 0) {
+                size_t sp = t.find(" import ");
+                if (sp != std::string::npos) name = strip(t.substr(5, sp - 5));
+            }
+            if (name.empty() || name.find_first_of(" .") != std::string::npos) {
+                out += line + "\n";
+                continue;
+            }
+            std::string found;
+            for (const std::string& dir : {cur_dir, main_dir}) {
+                for (const char* ext : {".wz", ".cw", ""}) {
+                    std::string cand = dir + "/" + name + ext;
+                    std::error_code ec;
+                    if (fs::is_regular_file(cand, ec)) { found = cand; break; }
+                }
+                if (!found.empty()) break;
+            }
+            if (found.empty())
+                throw CompileError("cannot import '" + name + "' (looked next to the source)",
+                                   0, 0, "place " + name + ".wz next to the importing file",
+                                   "wiz.import-not-found");
+            std::error_code ec;
+            std::string canon = fs::weakly_canonical(fs::absolute(found, ec), ec).string();
+            out += "\n";
+            if (seen.count(canon)) continue;
+            seen.insert(canon);
+            bool ok = false;
+            std::string sub = read_text_file(found, &ok);
+            if (!ok)
+                throw CompileError("cannot read import '" + found + "'", 0, 0, "",
+                                   "wiz.import-not-found");
+            sub = select_sections(sub, get_target(target.empty() ? DEFAULT_TARGET : target));
+            out += expand(sub, fs::path(found).parent_path().string());
+        }
+        return out;
+    };
+    return expand(src, main_dir);
+}
+
+BuildResult build_source(const std::string& src, const std::string& target,
+                         const std::string& path) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
-    std::string selected = select_sections(src, tg);
+    std::string selected = select_sections(expand_wiz_imports(src, target, path), tg);
     WizResult r = compile_to_asm(selected, tg);
     BuildResult res = finish(r.asm_body, r.variables, tg);
     res.cwapp = tg.name == "cwapp";
@@ -190,7 +257,7 @@ PathBuild build_path(const std::string& path, const std::string& target,
     if (pb.lang == "cwiz")
         pb.r = build_cwiz(text, target, path);
     else
-        pb.r = build_source(text, target);
+        pb.r = build_source(text, target, path);
     return pb;
 }
 

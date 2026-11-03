@@ -30,6 +30,8 @@ struct CwizPreprocessInfo {
     std::string text;
     bool has_cwapp = false;  // the source contains a #cwapp section
     int slot = 2;            // #slot n (1..12); 2 when the directive is absent
+    bool has_org = false;    // a #cwapp source named an origin with #org
+    unsigned long org = 0;   // that origin (the patch slot still picks the real address)
     std::string binary_path; // #binary directive file path (if any)
     std::vector<std::string> binary_asm; // DB lines emitted
 };

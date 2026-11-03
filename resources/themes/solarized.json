@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Solarized",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#002b36",
+      "surface": "#073642",
+      "surfaceAlt": "#0a4350",
+      "foreground": "#93a1a1",
+      "muted": "#839496",
+      "border": "#184956",
+      "borderStrong": "#2a6373",
+      "accent": "#268bd2",
+      "accentHover": "#2aa198",
+      "selection": "#1f5a6b",
+      "hover": "#12414c",
+      "error": "#dc322f",
+      "warning": "#b58900",
+      "success": "#859900",
+      "link": "#2aa198",
+      "titleBar": "#00212b",
+      "activityBar": "#00212b",
+      "statusBar": "#00212b",
+      "panel": "#073642",
+      "tabActive": "#073642",
+      "tabInactive": "#0a4350"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

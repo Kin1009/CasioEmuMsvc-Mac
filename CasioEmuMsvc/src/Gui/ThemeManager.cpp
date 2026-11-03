@@ -16,6 +16,7 @@
 #include <SDL.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <imgui_impl_sdlrenderer2.h>
 #include <imgui_internal.h>
@@ -35,6 +36,35 @@ constexpr const char* kDefaultInjectionFilePath = "/persist/injections.txt";
 #else
 constexpr const char* kThemeSettingsPath = "./theme.bin";
 #endif
+
+std::vector<std::string> SplitHiddenTabs(const char* value) {
+	std::vector<std::string> names;
+	std::string token;
+	for (const char* cursor = value; cursor && *cursor; ++cursor) {
+		if (*cursor == '|') {
+			if (!token.empty())
+				names.push_back(token);
+			token.clear();
+		}
+		else {
+			token.push_back(*cursor);
+		}
+	}
+	if (!token.empty())
+		names.push_back(token);
+	return names;
+}
+
+std::string JoinHiddenTabs(const std::vector<std::string>& names) {
+	std::string value;
+	for (const auto& name : names) {
+		value += "|";
+		value += name;
+	}
+	if (!value.empty())
+		value += "|";
+	return value;
+}
 
 void ApplyDefaultLayoutMetrics(ImGuiStyle& style) {
 	style.WindowRounding = 8.0f;
@@ -119,7 +149,67 @@ bool EnsureThemeStyleInitialized(ImGuiStyle& style, bool isDark) {
 // ============================================================================
 // 设置持久化
 // ============================================================================
+void ThemeManager::ApplyStoreToThemeSettings() {
+	auto& data = casioemu::settings::SettingsStore::Instance().Data();
+	auto& appearance = data.appearance;
+
+	m_settings.isDarkMode = appearance.darkMode;
+	m_settings.scale = appearance.uiScale;
+	m_settings.enableAutoTint = appearance.autoTint;
+	m_settings.seedColor = ImVec4(appearance.seedColor[0], appearance.seedColor[1], appearance.seedColor[2], appearance.seedColor[3]);
+	m_settings.lowPerformanceMode = data.emulator.lowPerformanceMode;
+	m_settings.enableDiscordRPC = data.integrations.discordRPC;
+	m_settings.enableUpdateChecker = data.integrations.updateChecker;
+
+	m_settings.windowX = data.shell.window.x;
+	m_settings.windowY = data.shell.window.y;
+	m_settings.windowW = data.shell.window.width;
+	m_settings.windowH = data.shell.window.height;
+
+	std::snprintf(m_settings.injectionFilePath, sizeof(m_settings.injectionFilePath), "%s",
+		data.calculator.injectionFilePath.empty() ? "./hc-inj.txt" : data.calculator.injectionFilePath.c_str());
+	std::snprintf(m_settings.language, sizeof(m_settings.language), "%s",
+		data.language.empty() ? "en_US" : data.language.c_str());
+	const std::string hidden = JoinHiddenTabs(data.ui.hiddenTabs);
+	std::snprintf(m_settings.hiddenTabs, sizeof(m_settings.hiddenTabs), "%s", hidden.c_str());
+}
+
+void ThemeManager::SyncThemeSettingsToStore() {
+	auto& data = casioemu::settings::SettingsStore::Instance().Data();
+
+	data.appearance.uiScale = m_settings.scale;
+	data.appearance.uiScaleOverridden = std::fabs(m_settings.scale - 1.0f) > 0.001f;
+	data.appearance.darkMode = m_settings.isDarkMode;
+	data.appearance.autoTint = m_settings.enableAutoTint;
+	data.appearance.seedColor = { m_settings.seedColor.x, m_settings.seedColor.y, m_settings.seedColor.z, m_settings.seedColor.w };
+	if (!m_themeName.empty())
+		data.appearance.theme = m_themeName;
+
+	data.calculator.scale = m_settings.scale;
+	data.calculator.injectionFilePath = m_settings.injectionFilePath;
+
+	data.emulator.lowPerformanceMode = m_settings.lowPerformanceMode;
+	data.integrations.discordRPC = m_settings.enableDiscordRPC;
+	data.integrations.updateChecker = m_settings.enableUpdateChecker;
+
+	data.shell.window.x = m_settings.windowX;
+	data.shell.window.y = m_settings.windowY;
+	data.shell.window.width = m_settings.windowW;
+	data.shell.window.height = m_settings.windowH;
+
+	data.ui.hiddenTabs = SplitHiddenTabs(m_settings.hiddenTabs);
+	data.language = m_settings.language;
+}
+
 void ThemeManager::SaveSettings() {
+	SyncThemeSettingsToStore();
+	std::string error;
+	if (!casioemu::settings::SettingsStore::Instance().Save(&error)) {
+		std::fprintf(stderr, "[ThemeManager][Warn] Failed to save settings.json: %s\n", error.c_str());
+	}
+
+	// Compatibility mirror for one release.  settings.json is authoritative;
+	// theme.bin is kept so a downgraded build still sees the last settings.
 	std::ofstream file(kThemeSettingsPath, std::ios::binary);
 	if (file.is_open()) {
 		Binary::Write(file, m_settings);
@@ -132,41 +222,84 @@ void ThemeManager::SaveSettings() {
 
 void ThemeManager::LoadSettings() {
 	casioemu::ordinary_lcd_history::UntrackedChange lcd_change;
-	std::ifstream file(kThemeSettingsPath, std::ios::binary);
-	if (file.is_open()) {
-		m_settings.Read(file);
-		file.close();
+	using casioemu::settings::LoadStatus;
+	auto& store = casioemu::settings::SettingsStore::Instance();
 
-#ifdef CASIOEMU_CORE_WEB
-		if (m_settings.injectionFilePath[0] == '\0' || m_settings.injectionFilePath[0] != '/') {
-			strncpy(m_settings.injectionFilePath, kDefaultInjectionFilePath, sizeof(m_settings.injectionFilePath));
-			m_settings.injectionFilePath[sizeof(m_settings.injectionFilePath) - 1] = '\0';
-			SaveSettings();
+	std::string error;
+	LoadStatus status = store.Load(&error);
+
+	// Read the binary theme store once.  It is the migration source and remains
+	// on disk for one release (rollback safety).
+	bool readLegacy = false;
+	casioemu::settings::LegacyThemeValues legacy;
+	{
+		std::ifstream file(kThemeSettingsPath, std::ios::binary);
+		if (file.is_open()) {
+			ThemeSettings binary;
+			binary.Read(file);
+			file.close();
+			readLegacy = true;
+			legacy.valid = true;
+			legacy.isDarkMode = binary.isDarkMode;
+			legacy.scale = binary.scale;
+			legacy.language.assign(binary.language);
+			legacy.injectionFilePath.assign(binary.injectionFilePath);
+			legacy.lowPerformanceMode = binary.lowPerformanceMode;
+			legacy.autoTint = binary.enableAutoTint;
+			legacy.seedColor = { binary.seedColor.x, binary.seedColor.y, binary.seedColor.z, binary.seedColor.w };
+			legacy.enableDiscordRPC = binary.enableDiscordRPC;
+			legacy.enableUpdateChecker = binary.enableUpdateChecker;
+			legacy.windowX = binary.windowX;
+			legacy.windowY = binary.windowY;
+			legacy.windowW = binary.windowW;
+			legacy.windowH = binary.windowH;
+			legacy.hiddenTabs.assign(binary.hiddenTabs);
 		}
-#endif
+	}
 
-		bool migratedStyle = false;
-		migratedStyle |= EnsureThemeStyleInitialized(m_settings.igs_dark, true);
-		migratedStyle |= EnsureThemeStyleInitialized(m_settings.igs_light, false);
-		if (migratedStyle) {
-			SaveSettings();
+	if (status != LoadStatus::Loaded && readLegacy) {
+		std::string migration_error;
+		if (store.MigrateFromLegacy(legacy, &migration_error)) {
+			status = LoadStatus::Loaded;
+			std::fprintf(stderr, "[ThemeManager][Info] Imported legacy theme.bin into settings.json\n");
 		}
+		else {
+			std::fprintf(stderr, "[ThemeManager][Warn] theme.bin migration failed: %s\n", migration_error.c_str());
+		}
+	}
+	else if (status == LoadStatus::Error) {
+		std::fprintf(stderr, "[ThemeManager][Warn] Using default settings: %s\n", error.c_str());
+	}
 
-		m_fontScale = m_settings.scale;
-		if (!g_plugin_theme_active) {
-			if (m_settings.isDarkMode) {
-				SetDarkMode();
+	ApplyStoreToThemeSettings();
+	m_fontScale = std::clamp(m_settings.scale, 0.8f, 2.0f);
+
+	if (!g_plugin_theme_active) {
+		std::string theme_id = store.Data().appearance.theme;
+		if (theme_id.empty())
+			theme_id = m_settings.isDarkMode ? "classic" : "classic-light";
+		std::string theme_error;
+		if (!ApplyThemeInternal(theme_id, false, &theme_error)) {
+			std::fprintf(stderr, "[ThemeManager][Warn] %s; using the legacy style\n", theme_error.c_str());
+			bool migrated_style = false;
+			migrated_style |= EnsureThemeStyleInitialized(m_settings.igs_dark, true);
+			migrated_style |= EnsureThemeStyleInitialized(m_settings.igs_light, false);
+			if (migrated_style && status == LoadStatus::Loaded) {
+				// Keep the in-memory styles coherent without rewriting the file
+				// during startup.
 			}
-			else {
-				SetLightMode();
-			}
+			if (ImGui::GetCurrentContext() != nullptr)
+				ApplyStyleForCurrentVariant();
+			else
+				m_themeStylePending = true;
 		}
-		if (strlen(m_settings.language) > 0) {
-			g_local.ChangeLanguage(m_settings.language);
-		}
-		if (ImGui::GetCurrentContext() == nullptr) {
-			m_fontRebuildRequested = true;
-		}
+	}
+
+	if (strlen(m_settings.language) > 0 && g_local.GetCurrentLanguage() != m_settings.language) {
+		g_local.ChangeLanguage(m_settings.language);
+	}
+	if (ImGui::GetCurrentContext() == nullptr) {
+		m_fontRebuildRequested = true;
 	}
 }
 
@@ -186,7 +319,7 @@ void ThemeManager::RegisterInputGlyphs(const char* utf8_text) {
 #endif
 
 void ThemeManager::SetFontScale(float scale) {
-	m_fontScale = scale;
+	m_fontScale = std::clamp(scale, 0.8f, 2.0f);
 }
 
 void ThemeManager::ProcessFontRebuild() {
@@ -198,7 +331,8 @@ void ThemeManager::ProcessFontRebuild() {
 	// texture first so the backend uploads the rebuilt glyphs on the next frame.
 	ImGui_ImplSDLRenderer2_DestroyFontsTexture();
 #endif
-	RebuildFont(m_fontScale);
+	const float effective_scale = EffectiveScale();
+	RebuildFont(effective_scale);
 	if (m_fontScale != 0) {
 		ImGuiStyle igs;
 
@@ -213,11 +347,12 @@ void ThemeManager::ProcessFontRebuild() {
 		}
 
 		// Apply scale to the unscaled base
-		igs.ScaleAllSizes(m_fontScale);
+		igs.ScaleAllSizes(effective_scale);
 		ImGui::GetStyle() = igs;
 	}
 	ImGui_ImplSDLRenderer2_DestroyDeviceObjects();
 	m_fontRebuildRequested = false;
+	m_themeStylePending = false;
 }
 
 // ============================================================================
@@ -331,32 +466,289 @@ void ThemeManager::UpdateUIScale() {
 // ============================================================================
 // 主题切换
 // ============================================================================
+void ThemeManager::ApplyStyleForCurrentVariant() {
+	if (ImGui::GetCurrentContext() == nullptr)
+		return;
+
+	if (m_settings.isDarkMode)
+		EnsureThemeStyleInitialized(m_settings.igs_dark, true);
+	else
+		EnsureThemeStyleInitialized(m_settings.igs_light, false);
+
+	const ImGuiStyle& base = m_settings.isDarkMode ? m_settings.igs_dark : m_settings.igs_light;
+	ImGuiStyle styled = base;
+	styled.ScaleAllSizes(EffectiveScale());
+	ImGui::GetStyle() = styled;
+	m_themeStylePending = false;
+}
+
+std::filesystem::path ThemeManager::ThemeDirectory() {
+	static const std::filesystem::path directory = []() {
+		const auto executable_dir = casioemu::settings::SettingsStore::ExecutableDir();
+		const std::vector<std::filesystem::path> candidates = {
+			executable_dir / "themes",
+			executable_dir / "resources" / "themes",
+			executable_dir.parent_path() / "Resources" / "themes",
+			std::filesystem::current_path() / "resources" / "themes",
+#ifdef CASIOEMU_THEMES_SOURCE_DIR
+			std::filesystem::path(CASIOEMU_THEMES_SOURCE_DIR),
+#endif
+		};
+		for (const auto& candidate : candidates) {
+			std::error_code ec;
+			if (std::filesystem::is_directory(candidate, ec))
+				return candidate;
+		}
+		return candidates.front();
+	}();
+	return directory;
+}
+
+std::vector<ThemeInfo> ThemeManager::AvailableThemes() const {
+	std::vector<ThemeInfo> themes;
+	std::error_code ec;
+	const auto directory = ThemeDirectory();
+	if (std::filesystem::is_directory(directory, ec)) {
+		for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+			if (!entry.is_regular_file() || entry.path().extension() != ".json")
+				continue;
+			std::string error;
+			casioemu::plugin::ThemeResult result;
+			if (!casioemu::plugin::LoadThemeFile(entry.path().string(), result, error))
+				continue;
+			ThemeInfo info;
+			info.id = entry.path().stem().string();
+			info.name = result.name.empty() ? info.id : result.name;
+			info.dark = result.variant != "light";
+			themes.push_back(std::move(info));
+		}
+	}
+	std::sort(themes.begin(), themes.end(), [](const ThemeInfo& lhs, const ThemeInfo& rhs) {
+		return lhs.id < rhs.id;
+	});
+	if (themes.empty()) {
+		// The preset files may be missing in a partial deployment; keep the two
+		// canonical ids selectable so the failure is visible and recoverable.
+		themes.push_back(ThemeInfo{ "vscode-dark", "VS Code Dark", true });
+		themes.push_back(ThemeInfo{ "vscode-light", "VS Code Light", false });
+	}
+	return themes;
+}
+
+namespace {
+void BuildClassicStyle(ImGuiStyle& style, bool dark, casioemu::plugin::ThemePalette& palette) {
+	if (dark) {
+		ImGui::StyleColorsDark(&style);
+		ApplyDefaultLayoutMetrics(style);
+		style.Colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.12f, 0.97f);
+		style.Colors[ImGuiCol_ChildBg] = ImVec4(0.05f, 0.05f, 0.07f, 1.0f);
+		style.Colors[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.12f, 0.97f);
+		style.Colors[ImGuiCol_Border] = ImVec4(0.18f, 0.18f, 0.24f, 1.0f);
+		style.Colors[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.12f, 0.18f, 1.0f);
+		style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.18f, 0.26f, 1.0f);
+		style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.24f, 0.24f, 0.36f, 1.0f);
+		style.Colors[ImGuiCol_TitleBg] = ImVec4(0.06f, 0.06f, 0.09f, 1.0f);
+		style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.10f, 0.10f, 0.15f, 1.0f);
+		style.Colors[ImGuiCol_MenuBarBg] = ImVec4(0.06f, 0.06f, 0.09f, 1.0f);
+		style.Colors[ImGuiCol_CheckMark] = ImVec4(0.40f, 0.50f, 0.90f, 1.0f);
+		style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.35f, 0.45f, 0.80f, 1.0f);
+		style.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.45f, 0.55f, 0.95f, 1.0f);
+		style.Colors[ImGuiCol_Button] = ImVec4(0.16f, 0.20f, 0.35f, 1.0f);
+		style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.30f, 0.50f, 1.0f);
+		style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.30f, 0.38f, 0.65f, 1.0f);
+		style.Colors[ImGuiCol_Header] = ImVec4(0.16f, 0.20f, 0.35f, 0.8f);
+		style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.24f, 0.30f, 0.50f, 0.8f);
+		style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.38f, 0.65f, 1.0f);
+		style.Colors[ImGuiCol_Tab] = ImVec4(0.12f, 0.14f, 0.22f, 1.0f);
+		style.Colors[ImGuiCol_TabHovered] = ImVec4(0.24f, 0.30f, 0.50f, 1.0f);
+		style.Colors[ImGuiCol_TabActive] = ImVec4(0.18f, 0.24f, 0.42f, 1.0f);
+		style.Colors[ImGuiCol_TabUnfocused] = ImVec4(0.08f, 0.10f, 0.15f, 1.0f);
+		style.Colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.12f, 0.16f, 0.26f, 1.0f);
+
+		palette.background = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
+		palette.surface = ImVec4(0.05f, 0.05f, 0.07f, 1.0f);
+		palette.surfaceAlt = ImVec4(0.12f, 0.12f, 0.18f, 1.0f);
+		palette.foreground = ImVec4(0.90f, 0.90f, 0.94f, 1.0f);
+		palette.muted = ImVec4(0.55f, 0.55f, 0.62f, 1.0f);
+		palette.border = ImVec4(0.18f, 0.18f, 0.24f, 1.0f);
+		palette.borderStrong = ImVec4(0.28f, 0.28f, 0.38f, 1.0f);
+		palette.accent = ImVec4(0.40f, 0.50f, 0.90f, 1.0f);
+		palette.accentHover = ImVec4(0.45f, 0.55f, 0.95f, 1.0f);
+		palette.selection = ImVec4(0.16f, 0.20f, 0.35f, 1.0f);
+		palette.hover = ImVec4(0.24f, 0.30f, 0.50f, 1.0f);
+		palette.error = ImVec4(0.95f, 0.30f, 0.30f, 1.0f);
+		palette.warning = ImVec4(0.95f, 0.80f, 0.20f, 1.0f);
+		palette.success = ImVec4(0.30f, 0.80f, 0.30f, 1.0f);
+		palette.link = palette.accent;
+		palette.titleBar = ImVec4(0.06f, 0.06f, 0.09f, 1.0f);
+		palette.activityBar = ImVec4(0.05f, 0.05f, 0.07f, 1.0f);
+		palette.statusBar = ImVec4(0.08f, 0.08f, 0.12f, 1.0f);
+		palette.statusBarForeground = palette.foreground;
+		palette.panel = ImVec4(0.05f, 0.05f, 0.07f, 1.0f);
+		palette.tabActive = ImVec4(0.18f, 0.24f, 0.42f, 1.0f);
+		palette.tabInactive = ImVec4(0.12f, 0.14f, 0.22f, 1.0f);
+	}
+	else {
+		ImGui::StyleColorsLight(&style);
+		ApplyDefaultLayoutMetrics(style);
+		palette.background = ImVec4(0.96f, 0.96f, 0.97f, 1.0f);
+		palette.surface = ImVec4(0.90f, 0.90f, 0.92f, 1.0f);
+		palette.surfaceAlt = ImVec4(0.86f, 0.86f, 0.90f, 1.0f);
+		palette.foreground = ImVec4(0.12f, 0.12f, 0.16f, 1.0f);
+		palette.muted = ImVec4(0.40f, 0.40f, 0.45f, 1.0f);
+		palette.border = ImVec4(0.78f, 0.78f, 0.82f, 1.0f);
+		palette.borderStrong = ImVec4(0.65f, 0.65f, 0.70f, 1.0f);
+		palette.accent = ImVec4(0.25f, 0.35f, 0.75f, 1.0f);
+		palette.accentHover = ImVec4(0.35f, 0.45f, 0.85f, 1.0f);
+		palette.selection = ImVec4(0.70f, 0.78f, 0.95f, 1.0f);
+		palette.hover = ImVec4(0.85f, 0.87f, 0.95f, 1.0f);
+		palette.error = ImVec4(0.80f, 0.10f, 0.10f, 1.0f);
+		palette.warning = ImVec4(0.75f, 0.55f, 0.00f, 1.0f);
+		palette.success = ImVec4(0.10f, 0.55f, 0.10f, 1.0f);
+		palette.link = palette.accent;
+		palette.titleBar = ImVec4(0.90f, 0.90f, 0.92f, 1.0f);
+		palette.activityBar = ImVec4(0.90f, 0.90f, 0.92f, 1.0f);
+		palette.statusBar = ImVec4(0.90f, 0.90f, 0.92f, 1.0f);
+		palette.statusBarForeground = palette.foreground;
+		palette.panel = ImVec4(0.94f, 0.94f, 0.95f, 1.0f);
+		palette.tabActive = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+		palette.tabInactive = ImVec4(0.86f, 0.86f, 0.90f, 1.0f);
+	}
+}
+} // namespace
+
+bool ThemeManager::ApplyThemeInternal(const std::string& themeId, bool persist, std::string* error) {
+	if (themeId.empty()) {
+		if (error)
+			*error = "theme id is empty";
+		return false;
+	}
+
+	if (themeId == "classic" || themeId == "classic-light") {
+		const bool dark = themeId == "classic";
+		ImGuiStyle style;
+		BuildClassicStyle(style, dark, m_palette);
+		m_themeName = themeId;
+		m_themeError.clear();
+		m_typography = ThemeTypography{};
+		m_settings.isDarkMode = dark;
+		if (dark)
+			m_settings.igs_dark = style;
+		else
+			m_settings.igs_light = style;
+		g_plugin_theme_active = false;
+		if (ImGui::GetCurrentContext() != nullptr) {
+			ImGuiStyle styled = style;
+			styled.ScaleAllSizes(EffectiveScale());
+			ImGui::GetStyle() = styled;
+		}
+		if (persist) {
+			auto& data = casioemu::settings::SettingsStore::Instance().Data();
+			data.appearance.theme = themeId;
+			data.appearance.themeExplicit = true;
+			data.appearance.pluginTheme.clear();
+			data.appearance.darkMode = dark;
+			SyncThemeSettingsToStore();
+			casioemu::settings::SettingsStore::Instance().Save();
+		}
+		if (error)
+			error->clear();
+		return true;
+	}
+
+	const auto path = ThemeDirectory() / (themeId + ".json");
+	casioemu::plugin::ThemeResult result;
+	std::string local_error;
+	if (!casioemu::plugin::LoadThemeFile(path.string(), result, local_error)) {
+		m_themeError = local_error;
+		if (error)
+			*error = local_error;
+		return false;
+	}
+
+	m_themeName = themeId;
+	m_themeError.clear();
+	m_typography.uiFamily = result.uiFamily;
+	m_typography.monoFamily = result.monoFamily;
+	m_typography.scale = std::clamp(result.scale, 0.8f, 2.0f);
+	m_palette = result.colors;
+
+	m_settings.isDarkMode = result.variant != "light";
+	if (m_settings.isDarkMode)
+		m_settings.igs_dark = result.style;
+	else
+		m_settings.igs_light = result.style;
+
+	// A built-in preset replaces a declarative plugin theme.
+	g_plugin_theme_active = false;
+
+	if (ImGui::GetCurrentContext() != nullptr) {
+		ImGuiStyle styled = result.style;
+		styled.ScaleAllSizes(EffectiveScale());
+		ImGui::GetStyle() = styled;
+		m_themeStylePending = false;
+	}
+	else {
+		m_themeStylePending = true;
+		m_fontRebuildRequested = true;
+	}
+
+	if (persist) {
+		auto& data = casioemu::settings::SettingsStore::Instance().Data();
+		data.appearance.theme = themeId;
+		data.appearance.themeExplicit = true;
+		data.appearance.pluginTheme.clear();
+		data.appearance.darkMode = m_settings.isDarkMode;
+		SyncThemeSettingsToStore();
+		std::string save_error;
+		if (!casioemu::settings::SettingsStore::Instance().Save(&save_error)) {
+			std::fprintf(stderr, "[ThemeManager][Warn] Failed to persist theme '%s': %s\n",
+				themeId.c_str(), save_error.c_str());
+		}
+	}
+
+	if (error)
+		error->clear();
+	return true;
+}
+
+bool ThemeManager::ApplyThemeByName(const std::string& themeId, std::string* error) {
+	return ApplyThemeInternal(themeId, true, error);
+}
+
 void ThemeManager::SetLightMode() {
+	std::string error;
+	if (ApplyThemeInternal("classic-light", false, &error)) {
+		m_settings.isDarkMode = false;
+		SaveSettings();
+		return;
+	}
 	g_plugin_theme_active = false;
 	EnsureThemeStyleInitialized(m_settings.igs_light, false);
-	if (ImGui::GetCurrentContext()) {
-		ImGuiStyle styled = m_settings.igs_light;
-		styled.ScaleAllSizes(m_fontScale);
-		ImGui::GetStyle() = styled;
-	}
+	ApplyStyleForCurrentVariant();
 	m_settings.isDarkMode = false;
 	SaveSettings();
 }
 
 
 void ThemeManager::SetDarkMode() {
+	std::string error;
+	if (ApplyThemeInternal("classic", false, &error)) {
+		m_settings.isDarkMode = true;
+		SaveSettings();
+		return;
+	}
 	g_plugin_theme_active = false;
 	EnsureThemeStyleInitialized(m_settings.igs_dark, true);
-	if (ImGui::GetCurrentContext()) {
-		ImGuiStyle styled = m_settings.igs_dark;
-		styled.ScaleAllSizes(m_fontScale);
-		ImGui::GetStyle() = styled;
-	}
+	ApplyStyleForCurrentVariant();
 	m_settings.isDarkMode = true;
 	SaveSettings();
 }
 
 void ThemeManager::ApplyDefaultTheme() {
+	if (ApplyThemeInternal("classic", true, nullptr))
+		return;
+
 	ImGui::StyleColorsDark();
 	ImGuiStyle& style = ImGui::GetStyle();
 	

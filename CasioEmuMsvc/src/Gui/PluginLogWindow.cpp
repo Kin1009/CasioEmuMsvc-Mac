@@ -29,18 +29,21 @@ void PluginLogWindow::RenderInstalled() {
 	auto& registry = casioemu::plugin::PluginRegistry::Instance();
 	auto& entries = registry.Entries();
 
+	if (ImGui::Button("Install Plugin..."))
+		registry.InstallFromDialog();
+	ImGui::SameLine();
 	if (ImGui::Button("Open Plugins Folder"))
 		registry.OpenPluginsFolder();
 	ImGui::SameLine();
 	if (ImGui::Button("Reload Declarative"))
 		registry.ReloadDeclarative();
 	ImGui::SameLine();
-	ImGui::TextDisabled("Drop a .plugin file onto the window to install it.");
+	ImGui::TextDisabled("Or copy a .plugin into the plugins folder and restart.");
 
 	ImGui::Spacing();
 	if (entries.empty()) {
 		ImGui::PushStyleColor(ImGuiCol_Text, UIHelpers::kColorMuted);
-		ImGui::TextWrapped("No plugins installed. Open the plugins folder, add a .plugin package, then restart or reload.");
+		ImGui::TextWrapped("No plugins installed. Use Install Plugin..., drop a .plugin into the plugins folder, then restart or reload.");
 		ImGui::PopStyleColor();
 		return;
 	}
@@ -78,13 +81,20 @@ void PluginLogWindow::RenderInstalled() {
 		ImGui::TableSetColumnIndex(3);
 		ImVec4 state_color = UIHelpers::kColorMuted;
 		if (entry.state == "Loaded") state_color = UIHelpers::kColorSuccess;
+		else if (entry.state == "Loaded (limited)") state_color = UIHelpers::kColorWarning;
 		else if (entry.state == "Error" || entry.state == "Invalid" || entry.blocked) state_color = UIHelpers::kColorError;
 		else if (entry.pendingTrust || entry.state == "Awaiting approval" || entry.state == "Deferred") state_color = UIHelpers::kColorWarning;
 		ImGui::TextColored(state_color, "%s", entry.state.c_str());
-		if (!entry.error.empty() && ImGui::IsItemHovered()) {
+		if (ImGui::IsItemHovered() && (!entry.error.empty() || entry.limited)) {
 			ImGui::BeginTooltip();
 			ImGui::PushTextWrapPos(480.0f);
-			ImGui::TextUnformatted(entry.error.c_str());
+			if (!entry.error.empty())
+				ImGui::TextUnformatted(entry.error.c_str());
+			if (entry.limited) {
+				ImGui::TextUnformatted("Permission-limited. Denied capabilities:");
+				for (const auto& capability : entry.deniedCapabilities)
+					ImGui::BulletText("%s", capability.c_str());
+			}
 			ImGui::PopTextWrapPos();
 			ImGui::EndTooltip();
 		}
@@ -111,12 +121,23 @@ void PluginLogWindow::RenderInstalled() {
 				registry.Review(entry.Id());
 		}
 		else if (entry.enabled) {
-			if (ImGui::SmallButton("Disable"))
-				registry.SetEnabled(entry.Id(), false);
+			if (entry.loaded) {
+				if (ImGui::SmallButton("Disable"))
+					registry.SetEnabled(entry.Id(), false);
+			}
+			else {
+				if (ImGui::SmallButton("Load"))
+					registry.SetEnabled(entry.Id(), true);
+			}
 		}
 		else {
 			if (ImGui::SmallButton("Enable"))
 				registry.SetEnabled(entry.Id(), true);
+		}
+		if (entry.loaded && entry.IsNative()) {
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Unload"))
+				registry.Unload(entry.Id());
 		}
 		ImGui::SameLine();
 		if (ImGui::SmallButton("Reveal"))

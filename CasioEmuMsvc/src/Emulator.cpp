@@ -1,4 +1,5 @@
 #include "Emulator.hpp"
+#include "Ctl/CtlServer.hpp"
 #include "Chipset/T4xCore.hpp"
 #include "Chipset/Chipset.hpp"
 #include "Logger.hpp"
@@ -200,6 +201,21 @@ namespace casioemu {
 	Emulator::Emulator(std::map<std::string, std::string>& _argv_map, bool _paused, std::shared_ptr<ModelResourceStore> resources)
 		: Paused(_paused), model_resources(std::move(resources)), argv_map(_argv_map), chipset(*new Chipset(*this)), m_step_requested(false) {
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
+
+		if (_argv_map.find("headless") != _argv_map.end()) {
+			// Desktop headless mode: no display is available. Switch SDL video to
+			// the dummy driver before any window is created. Rendering still runs
+			// into the normal offscreen composite target, so the debugger windows
+			// (IDebugger), the LCD, screenshots and the ctl server all work.
+			offscreen_rendering = true;
+			const char* driver = SDL_GetCurrentVideoDriver();
+			if (!driver || std::strcmp(driver, "dummy") != 0) {
+				SDL_QuitSubSystem(SDL_INIT_VIDEO);
+				SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
+				if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0)
+					PANIC("SDL video re-init (dummy) failed: %s\n", SDL_GetError());
+			}
+		}
 
 		running = true;
 		model_path = argv_map["model"];
@@ -518,6 +534,7 @@ namespace casioemu {
 	}
 
 	Emulator::~Emulator() {
+		ctl::OnShutdown(*this);
 		if (!headless) {
 			if (tick_thread && tick_thread->joinable())
 				tick_thread->join();
@@ -725,6 +742,10 @@ namespace casioemu {
 		// SDL_RenderPresent(renderer);
 	}
 	void Emulator::Frame() {
+		// Serve the casioctl control channel on the UI thread. This lazily
+		// starts the local control socket on the first frame and drains queued
+		// debugger requests here, where the debugger state is safe to touch.
+		ctl::OnFrame(*this);
 		if (headless)
 			return;
 #ifdef SINGLE_WINDOW
@@ -918,6 +939,7 @@ namespace casioemu {
 	void Emulator::Shutdown() {
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 
+		ctl::OnShutdown(*this);
 		running = false;
 	}
 

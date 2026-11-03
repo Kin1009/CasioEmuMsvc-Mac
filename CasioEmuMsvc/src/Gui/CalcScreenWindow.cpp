@@ -7,6 +7,7 @@
 // old external window showed. The LCD-only path is kept as a fallback for
 // builds or models without a model face.
 #include "WizToolchain.h"
+#include "Shell/SessionHost.h"
 
 #include "Chipset/Chipset.hpp"
 #include "Peripheral/Keyboard.hpp"
@@ -83,13 +84,15 @@ public:
 
 #ifdef SINGLE_WINDOW
 		// The whole calculator, as the external window used to render it.
-		if (SDL_Texture* composite = m_emu->GetCompositeTexture()) {
-			int image_w = m_emu->GetCompositeTextureWidth();
-			int image_h = m_emu->GetCompositeTextureHeight();
+		int active_w = 0, active_h = 0;
+		SDL_Texture* active_texture = casioemu::session::ActiveTexture(&active_w, &active_h);
+		if (active_texture) {
+			int image_w = active_w;
+			int image_h = active_h;
 			if (image_w <= 0 || image_h <= 0)
-				SDL_QueryTexture(composite, nullptr, nullptr, &image_w, &image_h);
+				SDL_QueryTexture(active_texture, nullptr, nullptr, &image_w, &image_h);
 			if (image_w > 0 && image_h > 0) {
-				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(composite), image_w,
+				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(active_texture), image_w,
 											  image_h, footer, fit_, zoom_);
 				ForwardClicks(place, image_w, image_h);
 				DrawControls(image_w, image_h);
@@ -147,50 +150,20 @@ private:
 	}
 
 	void DrawControls(int width, int height) {
-		ImGui::Checkbox("Fit", &fit_);
-		ImGui::SameLine();
-		bool original = !fit_ && std::abs(zoom_ - 1.0f) < 0.001f;
-		if (ImGui::Checkbox("Original size (1:1)", &original)) {
-			if (original) {
-				fit_ = false;
-				zoom_ = 1.0f;
-			} else {
-				fit_ = true;
-			}
-		}
-		if (!fit_) {
-			// The slider moves in whole pixels of its own track, so some exact
-			// values (2.00x) can be skipped.  Keep two decimals and let the
-			// buttons step precisely.
-			ImGui::SameLine();
-			if (ImGui::SmallButton("-##zoom"))
-				zoom_ = std::max(0.25f, std::round((zoom_ - 0.01f) * 100.0f) / 100.0f);
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(110.0f);
-			if (ImGui::SliderFloat("##zoom", &zoom_, 0.25f, 8.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp))
-				zoom_ = std::round(zoom_ * 100.0f) / 100.0f;
-			ImGui::SameLine();
-			if (ImGui::SmallButton("+##zoom"))
-				zoom_ = std::min(8.0f, std::round((zoom_ + 0.01f) * 100.0f) / 100.0f);
-		}
-		ImGui::SameLine();
-		ImGui::TextDisabled("%dx%d", width, height);
-		if (m_emu && m_emu->GetPaused()) {
-			ImGui::SameLine();
-			ImGui::TextDisabled("(paused)");
-		}
 		if (m_emu) {
 			auto* keyboard = m_emu->chipset.QueryInterface<casioemu::IKeyboardAutomation>();
 			if (keyboard && keyboard->ReturnAliasActive()) {
-				ImGui::SameLine();
 				ImGui::TextDisabled("Ret=Exe");
-				if (ImGui::IsItemHovered()) {
-					ImGui::BeginTooltip();
-					ImGui::TextUnformatted("Return acts as EXE because this model has no explicit Return key binding.");
-					ImGui::EndTooltip();
-				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Return acts as EXE because this model has no explicit Return key binding.");
+			}
+			if (m_emu->GetPaused()) {
+				if (keyboard && keyboard->ReturnAliasActive()) ImGui::SameLine();
+				ImGui::TextDisabled("(paused)");
 			}
 		}
+		(void)width;
+		(void)height;
 	}
 
 	void RecreateTexture(int width, int height) {

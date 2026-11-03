@@ -1,5 +1,10 @@
 # Repository Instructions
 
+- **Never store anything in a temp folder.** No `/tmp`, `/private/tmp`,
+  `/private/var/folders`, `TMPDIR`, or tool-default cache paths. All scratch
+  output (logs, screenshots, experiments, intermediate files) goes under
+  `/Users/kin/Desktop/Wiz/temp/<area>/` and is deleted manually when done.
+  Permanent files go in their repository (`/Users/kin/Desktop/Wiz` or this repo).
 - Treat text files in this repository as UTF-8 without BOM unless a file clearly indicates otherwise.
 - When reading files from PowerShell, do not rely on the shell's default encoding. Use an explicit UTF-8 read, for example:
   `[System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false, $true))`.

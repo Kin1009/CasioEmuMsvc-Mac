@@ -257,6 +257,22 @@ __rt_init:
     ST R0, 0E80DH
     ST R0, 0E80EH
     ST R0, 0E80FH
+    ST R0, 0E805H           ; ticks(): first-call arming flag
+    ; dynamic heap: one free block E820..EF00, file list head 0
+    MOV R0, #20H
+    ST R0, 0E818H
+    MOV R0, #0E8H
+    ST R0, 0E819H
+    MOV R0, #0
+    ST R0, 0E81AH
+    MOV R0, #0EFH
+    ST R0, 0E81BH
+    ST R0, 0E81CH
+    ST R0, 0E81DH
+    MOV R0, #0E0H
+    ST R0, 0E820H
+    MOV R0, #86H
+    ST R0, 0E821H
     RT
 
 ; key_down(k=ER0) -> ER0 = 1 while scan index k is held, else 0
@@ -510,3 +526,110 @@ __rec3:
     ADD ER2, #-1
     BNE __rec3
     B __reset
+
+; ---- Timer0: ticks() / delay_ms() (ported from upstream) ------------------
+; TM0D = 0F020H, TM0C = 0F022H, TM0CON = 0F024H/0F025H; 8 ticks per ms.
+__tm0_start:
+    PUSH LR
+    L R0, 0F00AH
+    AND R0, #0FDH
+    ST R0, 0F00AH
+    MOV R0, #0FFH
+    ST R0, 0F020H
+    ST R0, 0F021H
+    MOV R0, #0
+    ST R0, 0F022H
+    ST R0, 0F023H
+    MOV R0, #1
+    ST R0, 0F024H
+    ST R0, 0F025H
+    POP PC
+
+__tm0_read:
+    PUSH LR
+__tm0_read_l:
+    L R1, 0F023H
+    L R0, 0F022H
+    L R2, 0F023H
+    CMP R1, R2
+    BNE __tm0_read_l
+    POP PC
+
+__ticks:
+    PUSH LR
+    L R0, 0E805H
+    BNE __ticks_chk
+    MOV R0, #1
+    ST R0, 0E805H
+    BL __tm0_start
+    B __ticks_r
+__ticks_chk:
+    BL __tm0_read
+    CMP R0, #0FFH
+    BNE __ticks_r
+    CMP R1, #0FFH
+    BNE __ticks_r
+    BL __tm0_start
+__ticks_r:
+    BL __tm0_read
+    POP PC
+
+__delay_ms:
+    PUSH LR
+    CMP R1, #0
+    BLTS __delay_ms_out
+    MOV ER8, ER0
+    MOV R6, R0
+    MOV R7, R1
+    BL __tm0_read
+    PUSH ER0
+__delay_ms_full:
+    CMP R7, #0
+    BEQ __delay_ms_part
+    MOV R2, #0
+    MOV R3, #1
+    BL __delay_chunk
+    ADD R7, #0FFH
+    B __delay_ms_full
+__delay_ms_part:
+    CMP R6, #0
+    BEQ __delay_ms_fix
+    MOV R2, R6
+    MOV R3, #0
+    BL __delay_chunk
+__delay_ms_fix:
+    POP ER2
+    MOV ER4, ER8
+    ADD ER4, ER4
+    ADD ER4, ER4
+    ADD ER4, ER4
+    ADD ER2, ER4
+    ST R2, 0F022H
+    ST R3, 0F023H
+__delay_ms_out:
+    POP PC
+
+__delay_chunk:
+    PUSH LR
+    BL __tm0_start
+    MOV ER4, ER2
+    ADD ER4, ER4
+    ADD ER4, ER4
+    ADD ER4, ER4
+__delay_chunk_w:
+    BL __tm0_read
+    CMP R0, R4
+    CMPC R1, R5
+    BLTS __delay_chunk_w
+    POP PC
+
+; ---- heap byte access ----------------------------------------------------
+__hpeek:
+    MOV ER2, ER0
+    L R0, [ER2]
+    MOV R1, #0
+    RT
+
+__hpoke:
+    ST R2, [ER0]
+    RT

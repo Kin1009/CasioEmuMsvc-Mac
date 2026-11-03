@@ -419,3 +419,8 @@ app/src/main/assets/
 
 # local planning notes
 /docs/plan.md
+
+# local build dirs and model data
+/build-cli/
+/build-plugin/
+/models

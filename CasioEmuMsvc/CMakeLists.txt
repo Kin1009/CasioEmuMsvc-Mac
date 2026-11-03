@@ -9,6 +9,8 @@ option(CASIOEMU_WEB "Build the Emscripten/WebAssembly version" OFF)
 option(CASIOEMU_CORE_WEB "Build the Emscripten/WebAssembly core API" OFF)
 option(CASIOEMU_WEB_DEBUG_INFO "Enable heavier Emscripten runtime and source-map diagnostics" OFF)
 option(CASIOEMU_ENABLE_SENTRY "Build the bundled Sentry/Crashpad crash reporter" ON)
+option(CASIOEMU_BUILD_SETTINGS_TESTS "Build the settings/theme smoke self-check" OFF)
+option(CASIOEMU_PLUGIN_TESTS "Build the plugin loader smoke test and register it with CTest" ON)
 
 if(CASIOEMU_CORE_WEB)
     set(CASIOEMU_WEB ON CACHE BOOL "Core web builds use the Emscripten/WebAssembly pipeline" FORCE)
@@ -257,6 +259,10 @@ file(GLOB MAIN_SOURCES_IMGUI "${SOURCE_DIR}/Gui/imgui/*.cpp")
 file(GLOB MAIN_SOURCES_JIT "${SOURCE_DIR}/JitU8/*.cpp")
 file(GLOB MAIN_SOURCES_PERIPHERAL CONFIGURE_DEPENDS "${SOURCE_DIR}/Peripheral/*.cpp")
 file(GLOB MAIN_SOURCES_PLUGIN "${SOURCE_DIR}/Plugin/*.cpp")
+file(GLOB MAIN_SOURCES_CTL CONFIGURE_DEPENDS "${SOURCE_DIR}/Ctl/*.cpp")
+file(GLOB MAIN_SOURCES_SETTINGS CONFIGURE_DEPENDS "${SOURCE_DIR}/Settings/*.cpp")
+file(GLOB MAIN_SOURCES_SHELL CONFIGURE_DEPENDS "${SOURCE_DIR}/Gui/Shell/*.cpp")
+file(GLOB MAIN_SOURCES_TERMINAL CONFIGURE_DEPENDS "${SOURCE_DIR}/Terminal/*.cpp")
 file(GLOB MAIN_SOURCES_STARTUP CONFIGURE_DEPENDS "${SOURCE_DIR}/StartupUi/*.cpp")
 file(GLOB MAIN_SOURCES_WEB "${SOURCE_DIR}/Web/*.cpp")
 
@@ -302,6 +308,7 @@ if(CASIOEMU_WEB)
             ${SOURCE_DIR}/Gui/WatchWindow.cpp
             ${SOURCE_DIR}/Gui/Localization.cpp
             ${MAIN_SOURCES_ROP}
+            ${MAIN_SOURCES_SETTINGS}
         )
     endif()
 else()
@@ -319,6 +326,10 @@ else()
         ${MAIN_SOURCES_JIT}
         ${MAIN_SOURCES_PERIPHERAL}
         ${MAIN_SOURCES_PLUGIN}
+        ${MAIN_SOURCES_CTL}
+        ${MAIN_SOURCES_SETTINGS}
+        ${MAIN_SOURCES_SHELL}
+        ${MAIN_SOURCES_TERMINAL}
         ${MAIN_SOURCES_STARTUP}
     )
 endif()
@@ -389,6 +400,183 @@ endif()
 # Apply include dirs to target (scoped) to reduce global includes and compiler parsing
 target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_INCLUDE_DIRS})
 target_include_directories(${TARGET_NAME} BEFORE PRIVATE "${ONLINE_GENERATED_DIR}")
+
+# ------------------------------------------------------------------ Theme presets
+# Colour themes are data.  They are copied next to the executable (or into the
+# bundle's Resources) so built-in presets and theme plugins share one loader.
+set(THEMES_SOURCE_DIR "${CMAKE_SOURCE_DIR}/resources/themes")
+if(EXISTS "${THEMES_SOURCE_DIR}")
+    target_compile_definitions(${TARGET_NAME} PRIVATE
+        CASIOEMU_THEMES_SOURCE_DIR="${THEMES_SOURCE_DIR}")
+    if(APPLE AND BUILD_EXECUTABLE)
+        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/themes"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${THEMES_SOURCE_DIR}"
+                "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/themes"
+            COMMENT "Copying theme presets into the bundle")
+    elseif(BUILD_EXECUTABLE)
+        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:${TARGET_NAME}>/themes"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${THEMES_SOURCE_DIR}"
+                "$<TARGET_FILE_DIR:${TARGET_NAME}>/themes"
+            COMMENT "Copying theme presets next to the executable")
+    endif()
+else()
+    message(STATUS "No resources/themes directory found; built-in presets will fall back to the legacy style")
+endif()
+
+if(CASIOEMU_BUILD_SETTINGS_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+    add_executable(casioemu_settings_smoke
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings_smoke.cpp"
+        "${SOURCE_DIR}/Settings/Settings.cpp")
+    target_include_directories(casioemu_settings_smoke PRIVATE
+        "${SOURCE_DIR}"
+        "${THIRD_PARTY_DIR}")
+    target_compile_definitions(casioemu_settings_smoke PRIVATE
+        CASIOEMU_THEMES_SOURCE_DIR="${THEMES_SOURCE_DIR}")
+    set_target_properties(casioemu_settings_smoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+endif()
+
+# ------------------------------------------------------------------ plugin tests
+# plugin_loader_smoke: deterministic, GUI-free coverage for manifest parsing,
+# permission mapping/denial, zip traversal/case/limit hardening, trust history,
+# payload/layout documents and the fPluginUnload path.
+# plugin_registry_headless: end-to-end registry harness with a fake host; loads
+# theme/inject/layout/tool fixtures, asserts states, permission denials, hash-
+# change re-prompts, unload, install and theme token application.
+if(CASIOEMU_PLUGIN_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+    enable_testing()
+    find_package(Threads REQUIRED)
+
+    add_library(casioemu_plugin_unload_fixture MODULE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/plugin_unload_fixture.cpp")
+    target_include_directories(casioemu_plugin_unload_fixture PRIVATE
+        "${SOURCE_DIR}"
+        "${SOURCE_DIR}/Plugin")
+    target_compile_definitions(casioemu_plugin_unload_fixture PRIVATE
+        PLUGIN_FIXTURE_NO_ABI)
+    set_target_properties(casioemu_plugin_unload_fixture PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "plugin_unload_fixture"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+
+    add_library(casioemu_plugin_window_fixture MODULE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/plugin_unload_fixture.cpp")
+    target_include_directories(casioemu_plugin_window_fixture PRIVATE
+        "${SOURCE_DIR}"
+        "${SOURCE_DIR}/Plugin"
+        "${SOURCE_DIR}/Gui/imgui")
+    target_compile_definitions(casioemu_plugin_window_fixture PRIVATE
+        PLUGIN_FIXTURE_WINDOW)
+    if(APPLE)
+        target_link_options(casioemu_plugin_window_fixture PRIVATE "-undefined" "dynamic_lookup")
+    endif()
+    set_target_properties(casioemu_plugin_window_fixture PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "plugin_window_fixture"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+
+    foreach(plugin_fixture_variant badapi badabi)
+        string(TOUPPER "${plugin_fixture_variant}" plugin_fixture_upper)
+        add_library(casioemu_plugin_${plugin_fixture_variant}_fixture MODULE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/plugin_unload_fixture.cpp")
+        target_include_directories(casioemu_plugin_${plugin_fixture_variant}_fixture PRIVATE
+            "${SOURCE_DIR}"
+            "${SOURCE_DIR}/Plugin"
+            "${SOURCE_DIR}/Gui/imgui")
+        target_compile_definitions(casioemu_plugin_${plugin_fixture_variant}_fixture PRIVATE
+            PLUGIN_FIXTURE_WINDOW
+            PLUGIN_FIXTURE_${plugin_fixture_upper})
+        if(APPLE)
+            target_link_options(casioemu_plugin_${plugin_fixture_variant}_fixture PRIVATE
+                "-undefined" "dynamic_lookup")
+        endif()
+        set_target_properties(casioemu_plugin_${plugin_fixture_variant}_fixture PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME "plugin_${plugin_fixture_variant}_fixture"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    endforeach()
+
+    set(PLUGIN_TEST_COMMON_SOURCES
+        "${SOURCE_DIR}/Plugin/PluginManifest.cpp"
+        "${SOURCE_DIR}/Plugin/PluginPackage.cpp"
+        "${SOURCE_DIR}/Plugin/PluginTrust.cpp"
+        "${SOURCE_DIR}/Plugin/PluginPayloads.cpp"
+        "${SOURCE_DIR}/Plugin/PluginLayout.cpp"
+        "${SOURCE_DIR}/Plugin/PluginPermissions.cpp"
+        "${SOURCE_DIR}/Plugin/PluginResources.cpp"
+        "${SOURCE_DIR}/Plugin/PluginNative.cpp"
+        "${MINIZ_DIR}/miniz.c"
+        "${MINIZ_DIR}/miniz_zip.c"
+        "${MINIZ_DIR}/miniz_tdef.c"
+        "${MINIZ_DIR}/miniz_tinfl.c")
+
+    add_executable(casioemu_plugin_loader_smoke
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_loader_smoke.cpp"
+        ${PLUGIN_TEST_COMMON_SOURCES})
+    target_include_directories(casioemu_plugin_loader_smoke PRIVATE
+        "${SOURCE_DIR}"
+        "${SOURCE_DIR}/Plugin"
+        "${THIRD_PARTY_DIR}"
+        "${MINIZ_DIR}")
+    set_target_properties(casioemu_plugin_loader_smoke PROPERTIES
+        C_STANDARD 11
+        CXX_STANDARD 20
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    target_compile_definitions(casioemu_plugin_loader_smoke PRIVATE
+        CASIOEMU_TEST_FIXTURE_PATH="$<TARGET_FILE:casioemu_plugin_unload_fixture>")
+    add_dependencies(casioemu_plugin_loader_smoke casioemu_plugin_unload_fixture)
+    add_test(NAME plugin_loader_smoke COMMAND casioemu_plugin_loader_smoke)
+    if(TEST plugin_loader_smoke)
+        set_tests_properties(plugin_loader_smoke PROPERTIES
+            ENVIRONMENT "CASIOEMU_PLUGIN_TEST_ROOT=/Users/kin/Desktop/Wiz/temp/plugin-tests")
+    endif()
+
+    add_executable(casioemu_plugin_registry_headless
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_registry_headless.cpp"
+        "${SOURCE_DIR}/Plugin/PluginRegistry.cpp"
+        "${SOURCE_DIR}/Plugin/PluginHost.cpp"
+        "${SOURCE_DIR}/Plugin/PluginHostApi.cpp"
+        "${SOURCE_DIR}/Plugin/ThemeTokens.cpp"
+        "${SOURCE_DIR}/Gui/imgui/imgui.cpp"
+        "${SOURCE_DIR}/Gui/imgui/imgui_draw.cpp"
+        "${SOURCE_DIR}/Gui/imgui/imgui_tables.cpp"
+        "${SOURCE_DIR}/Gui/imgui/imgui_widgets.cpp"
+        ${PLUGIN_TEST_COMMON_SOURCES})
+    target_include_directories(casioemu_plugin_registry_headless PRIVATE
+        "${SOURCE_DIR}"
+        "${SOURCE_DIR}/Plugin"
+        "${SOURCE_DIR}/Gui/imgui"
+        "${THIRD_PARTY_DIR}"
+        "${MINIZ_DIR}")
+    set_target_properties(casioemu_plugin_registry_headless PROPERTIES
+        C_STANDARD 11
+        CXX_STANDARD 20
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    target_compile_definitions(casioemu_plugin_registry_headless PRIVATE
+        CASIOEMU_PLUGIN_WINDOW_FIXTURE="$<TARGET_FILE:casioemu_plugin_window_fixture>"
+        CASIOEMU_PLUGIN_BAD_API_FIXTURE="$<TARGET_FILE:casioemu_plugin_badapi_fixture>"
+        CASIOEMU_PLUGIN_BAD_ABI_FIXTURE="$<TARGET_FILE:casioemu_plugin_badabi_fixture>")
+    if(APPLE)
+        target_link_options(casioemu_plugin_registry_headless PRIVATE "-Wl,-export_dynamic")
+    endif()
+    target_link_libraries(casioemu_plugin_registry_headless PRIVATE Threads::Threads)
+    add_dependencies(casioemu_plugin_registry_headless
+        casioemu_plugin_window_fixture
+        casioemu_plugin_badapi_fixture
+        casioemu_plugin_badabi_fixture)
+    add_test(NAME plugin_registry_headless COMMAND casioemu_plugin_registry_headless)
+    if(TEST plugin_registry_headless)
+        set_tests_properties(plugin_registry_headless PROPERTIES
+            ENVIRONMENT "CASIOEMU_PLUGIN_TEST_ROOT=/Users/kin/Desktop/Wiz/temp/plugin-tests")
+    endif()
+endif()
+
 
 # ------------------------------------------------------------------ Wiz toolchain
 # The Wiz / CWiz compiler, built in-process (see third_party/wiz). The Toolchain

@@ -23,6 +23,8 @@ public:
 };
 
 extern "C" void fPluginLoad(PluginApi* api) {
-	api->RegisterPlugin("com.casioemu.tool.clock", "Clock Tool", "1.0.0", "CasioEmuMsvc", "Example native tool");
+	(void)api->RegisterPlugin("com.casioemu.tool.clock", "Clock Tool", "1.0.0", "CasioEmuMsvc", "Example native tool");
 	api->AddWindow(new ClockWindow());
 }
+
+PLUGIN_EXPORT_ABI();

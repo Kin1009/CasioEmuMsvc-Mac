@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Midnight Blue",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#0b1220",
+      "surface": "#0f1a2e",
+      "surfaceAlt": "#16243f",
+      "foreground": "#d6e4ff",
+      "muted": "#8ba3c7",
+      "border": "#1e3252",
+      "borderStrong": "#2b456e",
+      "accent": "#4c8dff",
+      "accentHover": "#6ba1ff",
+      "selection": "#1f4e8c",
+      "hover": "#1a2c4a",
+      "error": "#ff6b6b",
+      "warning": "#e6b450",
+      "success": "#6fd08c",
+      "link": "#7fb2ff",
+      "titleBar": "#08101c",
+      "activityBar": "#08101c",
+      "statusBar": "#08101c",
+      "panel": "#0f1a2e",
+      "tabActive": "#0f1a2e",
+      "tabInactive": "#16243f"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

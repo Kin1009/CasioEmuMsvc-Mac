@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "name": "VS Code Dark+ (classic)",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#1f1f1f",
+      "surface": "#181818",
+      "surfaceAlt": "#2a2a2a",
+      "foreground": "#cccccc",
+      "muted": "#9d9d9d",
+      "border": "#2b2b2b",
+      "borderStrong": "#3c3c3c",
+      "accent": "#007acc",
+      "accentHover": "#1177bb",
+      "selection": "#264f78",
+      "hover": "#2a2d2e",
+      "error": "#f14c4c",
+      "warning": "#cca700",
+      "success": "#89d185",
+      "link": "#3794ff",
+      "titleBar": "#181818",
+      "activityBar": "#333333",
+      "statusBar": "#007acc",
+      "statusBarForeground": "#ffffff",
+      "panel": "#1e1e1e",
+      "tabActive": "#1f1f1f",
+      "tabInactive": "#2d2d2d"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 0,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 6,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

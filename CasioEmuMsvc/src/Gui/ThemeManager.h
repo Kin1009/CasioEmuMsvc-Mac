@@ -1,9 +1,14 @@
 #pragma once
 #include "Binary.h"
+#include "Plugin/ThemeTokens.h"
+#include "Settings/Settings.h"
 #include <imgui.h>
+#include <filesystem>
 #include <iostream>
 #include <unordered_map>
+#include <string>
 #include <string_view>
+#include <vector>
 #include <cstring>
 #include <SDL.h>
 
@@ -222,6 +227,18 @@ struct ThemeSettings {
 // ============================================================================
 // ThemeManager — 全局单例，统一管理主题、字体缩放、UI 缩放
 // ============================================================================
+struct ThemeTypography {
+	std::string uiFamily = "SF Pro Text";
+	std::string monoFamily = "SF Mono";
+	float scale = 1.0f;
+};
+
+struct ThemeInfo {
+	std::string id;   // file stem, e.g. "vscode-dark"
+	std::string name; // human readable name from the JSON document
+	bool dark = true;
+};
+
 class ThemeManager {
 public:
 	static ThemeManager& Instance() {
@@ -272,6 +289,24 @@ public:
 	/// 应用默认主题（原 SetupDefaultTheme）
 	void ApplyDefaultTheme();
 
+	// —— 数据驱动主题（内置预置 + 主题插件共用一条路径）——
+	/// Apply a built-in theme by file stem (e.g. "vscode-dark").
+	/// Falls back to the legacy style and returns false when the preset cannot
+	/// be resolved or parsed.
+	bool ApplyThemeByName(const std::string& themeId, std::string* error = nullptr);
+	/// Id of the currently applied built-in preset.
+	const std::string& CurrentThemeName() const { return m_themeName; }
+	/// Built-in presets discovered under resources/themes (sorted by id).
+	std::vector<ThemeInfo> AvailableThemes() const;
+	/// Directory that built-in presets are read from (first existing match).
+	static std::filesystem::path ThemeDirectory();
+	/// Typography tokens of the active preset (consumed by the font rebuild in
+	/// stage 2; the fields are already persisted/available now).
+	const ThemeTypography& Typography() const { return m_typography; }
+	/// Palette tokens of the active preset.  Shell chrome should use these.
+	const casioemu::plugin::ThemePalette& Colors() const { return m_palette; }
+	bool IsPluginThemeActive() const { return g_plugin_theme_active; }
+
 	// —— Auto-Tint (MD3 Monet) ——
 	void ExtractAndApplyAutoTint(struct SDL_Texture* bgTexture, struct SDL_Renderer* renderer);
 	void SetSeedColor(const ImVec4& color);
@@ -289,6 +324,18 @@ private:
 	bool m_fontRebuildRequested = false;
 	bool m_bgReloadRequested = false;
 	mutable std::unordered_map<uint64_t, ImVec4> m_harmonizeCache;
+
+	// Data-driven theme state (Settings JSON + resources/themes/*.json)
+	std::string m_themeName;
+	std::string m_themeError;
+	ThemeTypography m_typography;
+	casioemu::plugin::ThemePalette m_palette;
+	bool m_themeStylePending = false;
+	float EffectiveScale() const { return m_fontScale * m_typography.scale; }
+	void ApplyStoreToThemeSettings();
+	void SyncThemeSettingsToStore();
+	void ApplyStyleForCurrentVariant();
+	bool ApplyThemeInternal(const std::string& themeId, bool persist, std::string* error);
 
 	// Auto-tint helpers
 	void GenerateMonetPalette(const ImVec4& seed, ImGuiStyle& style, bool isDark);

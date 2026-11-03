@@ -39,6 +39,23 @@ inline std::string FindBestFont(const std::vector<std::string>& candidates) {
 	return "";
 }
 
+inline std::string GetUIFontPath() {
+	std::vector<std::string> candidates;
+#ifdef _WIN32
+	candidates = { "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\tahoma.ttf" };
+#elif defined(__ANDROID__)
+	candidates = { "/system/fonts/Roboto-Regular.ttf", "/system/fonts/NotoSans-Regular.ttf" };
+#elif defined(__APPLE__)
+	candidates = { "/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc",
+		"/System/Library/Fonts/HelveticaNeue.ttc", "/Library/Fonts/Arial.ttf" };
+#else
+	candidates = { "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf" };
+#endif
+	return FindBestFont(candidates);
+}
+
 // -----------------------------------------------------------------------------
 // 获取等宽字体 (Monospace Font) - 核心修正
 // -----------------------------------------------------------------------------
@@ -61,8 +78,8 @@ inline std::string GetMonospaceFontPath() {
 		"/system/fonts/NotoSansMono-Regular.ttf"};
 #elif defined(__APPLE__)
 	candidates = {
-		"/System/Library/Fonts/Monaco.ttf",
 		"/System/Library/Fonts/SFNSMono.ttf",
+		"/System/Library/Fonts/Monaco.ttf",
 		"/System/Library/Fonts/Menlo.ttc",
 		"/Library/Fonts/Courier New.ttf"};
 #else // Linux / Unix
@@ -164,6 +181,17 @@ inline std::string GetCJKFontPath(int* font_no = nullptr) {
 // Theme/font/scaling globals are now managed by ThemeManager.
 // See ThemeManager.h for the unified API.
 
+extern ImFont* g_mono_font;
+extern ImFont* g_small_font;
+
+inline const ImWchar* GetUiSymbolRanges() {
+	static const ImWchar ranges[] = {
+		0x2000, 0x206F, 0x2190, 0x21FF, 0x2300, 0x23FF,
+		0x25A0, 0x25FF, 0x2600, 0x26FF, 0x2B00, 0x2BFF, 0,
+	};
+	return ranges;
+}
+
 inline void RebuildFont(float scale = 0.0f) {
 	auto& io = ImGui::GetIO();
 	ImFontConfig config = ImFontConfig();
@@ -182,23 +210,21 @@ inline void RebuildFont(float scale = 0.0f) {
 		scale = defaultscale;
 	}
 
-	// 1. 加载等宽基础字体 (Monospace Base)
-	// 这是改动最大的地方，确保英文和代码符号绝对等宽
+	// 1. Original CasioEmuMsvc UI face: the monospace system font at 15 px.
 	std::string mono_font_path = GetMonospaceFontPath();
 #ifdef __ANDROID__
 	ImWchar extended_script_sample = 0;
 	const char* extended_script_name = nullptr;
 #endif
-
 	if (!mono_font_path.empty()) {
-		io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesDefault());
-		printf("[Ui][Info] Loaded Monospace Font: %s\n", mono_font_path.c_str());
+		io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config,
+			io.Fonts->GetGlyphRangesDefault());
 	}
 	else {
-		printf("[Ui][Warn] No monospace font found! Falling back to ImGui Default (ProggyClean).\n");
-		// ImGui 自带的默认字体 (ProggyClean) 也是等宽的，是一个安全的最后防线
 		io.Fonts->AddFontDefault(&config);
 	}
+	g_mono_font = io.Fonts->Fonts.empty() ? nullptr : io.Fonts->Fonts[0];
+	g_small_font = g_mono_font;
 
 	// Merge additional glyph ranges based on localization settings.
 #ifdef __APPLE__
@@ -247,20 +273,17 @@ inline void RebuildFont(float scale = 0.0f) {
 	merge_system_font(load_thai, "th-TH", u"ไทย",
 		io.Fonts->GetGlyphRangesThai(), 0x0E44, "Thai");
 #else
-	if (!mono_font_path.empty()) {
+	const std::string merge_font_path = mono_font_path;
+	if (!merge_font_path.empty()) {
 		config.MergeMode = true;
-		if (load_vietnamese) {
-			io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesVietnamese());
-		}
-		if (load_cyrillic) {
-			io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesCyrillic());
-		}
-		if (load_greek) {
-			io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesGreek());
-		}
-		if (load_thai) {
-			io.Fonts->AddFontFromFileTTF(mono_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesThai());
-		}
+		if (load_vietnamese)
+			io.Fonts->AddFontFromFileTTF(merge_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesVietnamese());
+		if (load_cyrillic)
+			io.Fonts->AddFontFromFileTTF(merge_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesCyrillic());
+		if (load_greek)
+			io.Fonts->AddFontFromFileTTF(merge_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesGreek());
+		if (load_thai)
+			io.Fonts->AddFontFromFileTTF(merge_font_path.c_str(), 15 * scale, &config, io.Fonts->GetGlyphRangesThai());
 		config.MergeMode = false;
 	}
 #endif

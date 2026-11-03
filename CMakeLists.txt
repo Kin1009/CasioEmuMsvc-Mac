@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10...3.22)
 
 project(GAME)
 
+enable_testing()
+
 set(SDL_TEST OFF CACHE BOOL "Disable building the SDL_test library" FORCE)
 option(BUILD_EXECUTABLE "Build a statically linked executable" OFF)
 option(BUILD_MCP_PLUGIN "Build the MCP debugger plugin" ON)
@@ -82,6 +84,8 @@ endif()
 
 # Your game and its CMakeLists.txt are in a subfolder named "src"
 add_subdirectory(CasioEmuMsvc)
+
+add_subdirectory(tools/casioctl)
 
 if(WIN32 AND BUILD_EXECUTABLE AND BUILD_MCP_PLUGIN)
     add_subdirectory(McpPlugin)

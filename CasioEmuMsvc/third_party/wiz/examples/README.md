@@ -1,37 +1,54 @@
-# Example programs — organized library
+# Example programs — rebuilt library
 
-Every category has parallel `.wz` / `.cwiz` pairs where appropriate.
-All examples use 8-px line spacing and stay inside 192 x 64 px.
+Graphics examples draw into the shadow buffer (SB2) and call `render()` to flush
+it to the visible LCD buffer (SB1, `0xF800`). Status examples use `renderStatus()`
+for the smaller status-icon region. Nothing appears until the relevant render call.
 
 ## Categories
 
 | Category | File | Description |
-|----------|------|-------------|
-| **hello** | `hello/01_hello.wz` / `.cwiz` | Smallest visible program (`clear`, `text`, `wait_key`). |
-| **text** | `text/02_text_demo.wz` / `.cwiz` | Showcase: `print` (CW Mono, native 8x8) vs `printMini` (CW Text, native 8 px, proportional). |
-| **shapes** | `shapes/03_shapes.wz` / `.cwiz` | Drawing primitives (`rect`, `line`, `circle`, `disc`, `fillrect`, `hline`, `vline`). Labels sit on 8-px lines (`y` = 8, 16, 24, 32, 40, 48, 56). |
-| **input** | `input/04_keys.wz` / `.cwiz` | Arrow-key box + `key()` echo using `print`; double-buffered (`buffered`/`flip`). |
-| **arrays** | `arrays/05_arrays.wz` / `.cwiz` | RAM array + `rom8` / `rom int`; bar chart with 8-px text grid. |
-| **math** | `math/06_math.wz` / `.cwiz` | Arithmetic, clamped ranges (`clamp`), `printMini` for proportional numbers. |
-| **cwapp** | `cwapp/07_cwapp.cwiz` | `#cwapp`, `#slot 2`, `#for 580`, `exit()`; builds to a full patched 580 ROM `.bin` (does not overwrite embedded stock ROM). |
-| **580/880** | `580_880/08_target.wz` / `.cwiz` | Target-independent; works unchanged for 580 (`192x63`, 1 bp) or 880 (`192x64`, 2 bp). |
+|---|---|---|
+| **hello** | `hello/01_hello.cwiz`, `hello/01_hello.wz` | Smallest visible program. |
+| **shapes** | `shapes/02_shapes.cwiz` | Drawing primitives (`rect`, `fillrect`, `circle`, `disc`, `line`). |
+| **text** | `text/01_text_demo.cwiz` | Native 6x8 CW font (`print`, `text`). |
+| **text** | `text/02_cw_font.cwiz`, `text/03_cw_font.cwiz` | ClassWiz CW Display font at 1x (`print_cw`, `text_cw`, `num_cw`). |
+| **vietnamese** | `vietnamese/01_compile_time.cwiz` … `04_mixed_accented.cwiz` | Vietnamese on the CW Display: `__normalized__`, runtime `normalizeText()`, explicit F4 bytes, mixed ASCII. |
+| **input** | `input/01_keys.cwiz`, `input/02_pong.wz` | Key echo; Pong game (`flip()` per frame). |
+| **arrays** | `arrays/01_arrays.cwiz` | `rom8` / `rom int`; bar chart pattern. |
+| **math** | `math/01_math.cwiz`, `math/02_demo.wz` | Arithmetic with clamped ranges; fibonacci/factorial demo. |
+| **bitmap** | `bitmap/01_bitmap.cwiz` | ROM byte-table bitmap drawing (`sprite`). |
+| **status** | `status/01_status_cycle_580.cwiz/.wz`, `status/02_status_cycle_880.cwiz/.wz` | Cycle every supported status icon with `setStatus()` / `renderStatus()`. |
+| **showcase** | `showcase/01_example_showcase.cwiz`, `showcase/01_example_showcase.wz` | Interactive tour: arrays, helpers, math, keys, shapes, sprites, fonts, status, rendering. |
+| **cwapp** | `cwapp/01_cwapp.cwiz`, `cwapp/02_app_hello.wz` | Full patched ROM (`#cwapp`, `#org`, `#for 580`). |
+| **580/880** | `580_880/01_target.cwiz` | Target-independent; 190x63 (580, 1 bp) or 192x64 (880, 2 bp). |
+| **rop** | `rop/01_hello.cwiz` … `rop/07_rop_guide.cwiz` | CWiz- and Wiz-syntax ROP payloads (`#rop`, `#org 0xE9E0`, `#launcher common`). `04_keys`/`06_rop_keys` show `getkey()` + `keytable()`; `07_rop_guide` combines SHIFT waits, Vietnamese text, bitmap, line and key dispatch; `08_key_asm` writes the getkey chain with raw `asm { }` blocks. |
 
-## Two-print-set note
+## Shadow buffer
 
-- `print(x, y, ...)` draws the **CW Mono** font at its native 8 px glyph size and native 7 px advance (`FONT_LARGE`).
-- `printMini(x, y, ...)` draws the **CW Text** font at its native 8 px glyph size with its native proportional advance (`FONT_MINI` / `FONT_TEXT8 + ADV`).
-- `text()` / `num()` still use the embedded 6x8 CW Mono (`FONT6X8`) with 6 px advance.
-- There are no legacy print aliases: use `print` for CW Mono and `printMini` for CW Text.
+- Wiz and CWiz graphics functions (`clear`, `pixel`, `char`, `text`, `print`,
+  shapes, `char_cw`, `print_cw`, …) write **only** to SB2:
+  `0xDDD3-0xE5D2` on the fx-580VN X, `0xCA54-0xE253` on the fx-880BTG.
+- `render()` performs the only SB2 → SB1 (`0xF800`) copy. Without it the
+  drawing stays invisible.
+- `buffered()` is a compatibility no-op and `flip()` is an alias for `render()`.
+
+## Font note
+
+- `print_cw()` / `text_cw()` / `num_cw()` use ClassWiz CW Display: 11 px advance,
+  13-row cell (12 px cap + 1 descender), rendered at 1x. Use 14 px between
+  baselines (e.g. `y = 2, 16, 30, 44`).
+- Wiz one-char helper: `char_cw`; CWiz: `glyph_cw`.
+- The 2.4 KB `_cw_font` table is included only when a `*_cw` function is referenced.
+- Vietnamese glyphs are stored as `0xF4, <code>` pairs.  `normalizeText()` (or the
+  `__normalized__` declaration modifier) converts UTF-8 source text; the 3.5 KB
+  `_cw_font_vn` table is emitted only when an F4 glyph or `normalizeText()` is used.
+- `print_cw()` at `x = 0` fits at most 17 printable characters (including spaces)
+  per line; wrap longer text with another `print_cw(0, y, ...)` call.
 
 ## Build quick-reference
 
 ```console
-# Wiz (.wz)
-$ WIZ_ROOT=$PWD ./build/wizc examples/hello/01_hello.wz
-# CWiz (.cwiz)
 $ WIZ_ROOT=$PWD ./build/wizc examples/hello/01_hello.cwiz
-# cwapp (writes full 256 KB patched ROM to source-dir .bin)
-$ WIZ_ROOT=$PWD ./build/wizc examples/cwapp/07_cwapp.cwiz
+$ WIZ_ROOT=$PWD ./build/wizc examples/hello/01_hello.wz
+$ WIZ_ROOT=$PWD ./build/wizc examples/cwapp/01_cwapp.cwiz
 ```
-
-All examples stay inside the 192 x 64 pixel screen. No external dependencies.

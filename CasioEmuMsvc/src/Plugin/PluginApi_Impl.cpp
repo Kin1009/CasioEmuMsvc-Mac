@@ -2,7 +2,10 @@
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "FileDialog.hpp"
 #include "PluginApi.h"
+#include "PluginHostApi.h"
 #include "PluginMan.h"
+#include "PluginPermissions.h"
+#include "PluginResources.h"
 #include "SysDialog.h"
 #include <AddressWindow.h>
 #include <CallAnalysis.h>
@@ -29,10 +32,34 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <typeinfo>
 
 extern std::vector<UIWindow*> windows;
 extern SDL_Window* window;
 extern Breakpoints* membp;
+extern PluginApi* g_pluginapi;
+
+// Compile-time ABI guard: the SDK's UIWindow (PluginApi.h) must have exactly
+// the host's size.  This mirror mirrors the SDK declaration in a translation
+// unit that sees the host class, so a drift breaks the build instead of
+// corrupting a plugin window at runtime.  Bump kPluginUiWindowAbiRevision when
+// the member order or virtual order changes.
+namespace {
+struct SdkUiWindowMirror {
+	const char* name{};
+	bool open = true;
+	bool bring_to_front_requested = false;
+	ImVec2 inital_size{800, 800};
+	ImGuiWindowFlags flags{};
+	virtual void Render() {}
+	virtual void RenderCore() = 0;
+	virtual void GotoMemoryAddress(uint32_t) {}
+	virtual ~SdkUiWindowMirror() {}
+};
+static_assert(sizeof(SdkUiWindowMirror) == sizeof(UIWindow),
+	"SDK UIWindow layout drifted from Gui/Ui.hpp; update PluginApi.h and bump kPluginUiWindowAbiRevision");
+} // namespace
 
 namespace {
 	constexpr std::array<const char*, 0x40> kEps6800RegisterNames = {
@@ -988,10 +1015,10 @@ class PluginApi_Impl : public PluginApi {
 		}
 	} hooks_impl;
 	int GetVersion() override {
-		/* v2: IDebugger::AddMemoryBreakpoint gained the extended parameters and
-		 * DebugMemoryBreakpointInfo grew; plugins built against v1 headers must
-		 * be rebuilt. */
-		return 2;
+		/* v3: the SDK UIWindow layout/vtable matches the host and native plugins
+		 * are handed a permission-scoped facade.  v2 added the extended
+		 * IDebugger breakpoint surface. */
+		return PLUGIN_API_VERSION;
 	}
 	void AddWindow(UIWindow* wnd) override {
 		windows.push_back(wnd);
@@ -1038,4 +1065,622 @@ class PluginApi_Impl : public PluginApi {
     return true;
   }
 };
+
+// ---------------------------------------------------------------------------
+// Permission-scoped facade
+//
+// Native plugins receive their own ScopedPluginApi instead of the shared
+// backend.  Queries and window registration pass through a capability check;
+// denied calls return a null/empty value, are recorded for the plugin manager
+// and never reach the emulator.
+// ---------------------------------------------------------------------------
+namespace {
+
+using casioemu::plugin::Capability;
+using casioemu::plugin::CapabilityName;
+using casioemu::plugin::MarkPluginHookRegistration;
+using casioemu::plugin::PermissionSet;
+using casioemu::plugin::RecordPermissionDenial;
+using casioemu::plugin::TrackPluginWindow;
+
+class PlatformHostGuard : public IPlatformHost {
+public:
+	PlatformHostGuard(IPlatformHost* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	const char* GetInternalStoragePath() override { return inner_->GetInternalStoragePath(); }
+	const char* GetExternalStoragePath() override { return inner_->GetExternalStoragePath(); }
+	bool ShowFileOpenDialog(const char* title, const char* filters, char* selectedFilePath,
+		size_t pathBufferSize) override {
+		if (!Allow(Capability::FilesystemRead, "IPlatformHost::ShowFileOpenDialog"))
+			return false;
+		return inner_->ShowFileOpenDialog(title, filters, selectedFilePath, pathBufferSize);
+	}
+	void OpenSystemFileDialog(std::function<void(std::string)> callback) override {
+		if (!Allow(Capability::FilesystemRead, "IPlatformHost::OpenSystemFileDialog"))
+			return;
+		inner_->OpenSystemFileDialog(std::move(callback));
+	}
+	void SaveSystemFileDialog(const char* preferred_name, std::function<void(std::string)> callback) override {
+		if (!Allow(Capability::FilesystemWrite, "IPlatformHost::SaveSystemFileDialog"))
+			return;
+		inner_->SaveSystemFileDialog(preferred_name, std::move(callback));
+	}
+	void ShowMessageBox(const char* title, const char* message, int type) override {
+		if (!Allow(Capability::Window, "IPlatformHost::ShowMessageBox"))
+			return;
+		inner_->ShowMessageBox(title, message, type);
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+
+	IPlatformHost* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+};
+
+class EmulatorGuard : public IEmulator {
+public:
+	EmulatorGuard(IEmulator* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	float* SolarPanelVoltage() override {
+		return Allow(Capability::EmulatorWrite, "IEmulator::SolarPanelVoltage") ? inner_->SolarPanelVoltage() : nullptr;
+	}
+	float* BatteryVoltage() override {
+		return Allow(Capability::EmulatorWrite, "IEmulator::BatteryVoltage") ? inner_->BatteryVoltage() : nullptr;
+	}
+	casioemu::ModelInfo* ModelDefinition() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::ModelDefinition") ? inner_->ModelDefinition() : nullptr;
+	}
+	void RequestScreenshot() override {
+		if (Allow(Capability::EmulatorRead, "IEmulator::RequestScreenshot"))
+			inner_->RequestScreenshot();
+	}
+	bool IsPaused() override { return Allow(Capability::EmulatorRead, "IEmulator::IsPaused") && inner_->IsPaused(); }
+	void Pause() override {
+		if (Allow(Capability::EmulatorWrite, "IEmulator::Pause"))
+			inner_->Pause();
+	}
+	void Resume() override {
+		if (Allow(Capability::EmulatorWrite, "IEmulator::Resume"))
+			inner_->Resume();
+	}
+	unsigned int GetCyclesPerSecond() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetCyclesPerSecond") ? inner_->GetCyclesPerSecond() : 0;
+	}
+	void SetCyclePerSecond(uint32_t cps) override {
+		if (Allow(Capability::EmulatorWrite, "IEmulator::SetCyclePerSecond"))
+			inner_->SetCyclePerSecond(cps);
+	}
+	std::string GetModelFilePath(std::string relative_path) override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetModelFilePath")
+			? inner_->GetModelFilePath(std::move(relative_path)) : std::string();
+	}
+	void* GetRenderer() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetRenderer") ? inner_->GetRenderer() : nullptr;
+	}
+	void* GetInterfaceTexture() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetInterfaceTexture") ? inner_->GetInterfaceTexture() : nullptr;
+	}
+	const char* GetRunningModelName() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetRunningModelName") ? inner_->GetRunningModelName() : "";
+	}
+	const char* GetRunningRomPath() override {
+		return Allow(Capability::EmulatorRead, "IEmulator::GetRunningRomPath") ? inner_->GetRunningRomPath() : "";
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+
+	IEmulator* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+};
+
+class MmuGuard : public IMMU {
+public:
+	MmuGuard(IMMU* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	uint8_t ReadData(size_t addr) override {
+		return Allow(Capability::EmulatorRead, "IMMU::ReadData") ? inner_->ReadData(addr) : 0;
+	}
+	void WriteData(size_t addr, uint8_t dat) override {
+		if (Allow(Capability::EmulatorWrite, "IMMU::WriteData"))
+			inner_->WriteData(addr, dat);
+	}
+	uint16_t ReadCode(size_t addr) override {
+		return Allow(Capability::EmulatorRead, "IMMU::ReadCode") ? inner_->ReadCode(addr) : 0;
+	}
+	void WriteCode(size_t addr, uint8_t dat) override {
+		if (Allow(Capability::EmulatorCode, "IMMU::WriteCode"))
+			inner_->WriteCode(addr, dat);
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+
+	IMMU* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+};
+
+class ChipsetGuard : public IChipset {
+public:
+	ChipsetGuard(IChipset* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	void RaiseInterrupt(int index) override {
+		if (Allow(Capability::EmulatorWrite, "IChipset::RaiseInterrupt"))
+			inner_->RaiseInterrupt(index);
+	}
+	void Tick() override {
+		if (Allow(Capability::EmulatorWrite, "IChipset::Tick"))
+			inner_->Tick();
+	}
+	void SetStatus(RunStatus status) override {
+		if (Allow(Capability::EmulatorWrite, "IChipset::SetStatus"))
+			inner_->SetStatus(status);
+	}
+	RunStatus GetStatus() override {
+		return Allow(Capability::EmulatorRead, "IChipset::GetStatus") ? inner_->GetStatus() : RunStatus::Stop;
+	}
+	void* GetRom() override {
+		return Allow(Capability::EmulatorRead, "IChipset::GetRom") ? inner_->GetRom() : nullptr;
+	}
+	size_t GetRomSize() override {
+		return Allow(Capability::EmulatorRead, "IChipset::GetRomSize") ? inner_->GetRomSize() : 0;
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+
+	IChipset* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+};
+
+class HooksGuard : public Hooks {
+public:
+	HooksGuard(Hooks* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	void SetupOnInstructionHook(std::function<void(InstructionEventArgs&)> handler) override {
+		Register("Hooks::SetupOnInstructionHook");
+		if (Allowed())
+			inner_->SetupOnInstructionHook(std::move(handler));
+	}
+	void SetupOnCallFunctionHook(std::function<void(const FunctionEventArgs&)> handler) override {
+		Register("Hooks::SetupOnCallFunctionHook");
+		if (Allowed())
+			inner_->SetupOnCallFunctionHook(std::move(handler));
+	}
+	void SetupOnFunctionReturnHook(std::function<void(const FunctionEventArgs&)> handler) override {
+		Register("Hooks::SetupOnFunctionReturnHook");
+		if (Allowed())
+			inner_->SetupOnFunctionReturnHook(std::move(handler));
+	}
+	void SetupOnMemoryReadHook(std::function<void(MemoryEventArgs&)> handler) override {
+		Register("Hooks::SetupOnMemoryReadHook");
+		if (Allowed())
+			inner_->SetupOnMemoryReadHook(std::move(handler));
+	}
+	void SetupOnMemoryWriteHook(std::function<void(MemoryEventArgs&)> handler) override {
+		Register("Hooks::SetupOnMemoryWriteHook");
+		if (Allowed())
+			inner_->SetupOnMemoryWriteHook(std::move(handler));
+	}
+	void SetupOnBrkHook(std::function<void(InterruptEventArgs&)> handler) override {
+		Register("Hooks::SetupOnBrkHook");
+		if (Allowed())
+			inner_->SetupOnBrkHook(std::move(handler));
+	}
+	void SetupOnInterruptHook(std::function<void(InterruptEventArgs&)> handler) override {
+		Register("Hooks::SetupOnInterruptHook");
+		if (Allowed())
+			inner_->SetupOnInterruptHook(std::move(handler));
+	}
+	void SetupOnResetHook(std::function<void()> handler) override {
+		Register("Hooks::SetupOnResetHook");
+		if (Allowed())
+			inner_->SetupOnResetHook(std::move(handler));
+	}
+
+private:
+	bool Allowed() {
+		if (permissions_.Allows(Capability::EmulatorRead))
+			return true;
+		RecordPermissionDenial(pluginId_, Capability::EmulatorRead, currentApi_);
+		return false;
+	}
+	void Register(const char* api) {
+		currentApi_ = api;
+		MarkPluginHookRegistration(pluginId_);
+	}
+
+	Hooks* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+	const char* currentApi_ = "Hooks";
+};
+
+class DebuggerGuard : public IDebugger {
+public:
+	DebuggerGuard(IDebugger* inner, PermissionSet permissions, std::string pluginId)
+		: inner_(inner), permissions_(std::move(permissions)), pluginId_(std::move(pluginId)) {}
+
+	uint32_t GetProgramCounter() override { return Read("IDebugger::GetProgramCounter") ? inner_->GetProgramCounter() : 0; }
+	std::vector<DebugRegisterInfo> GetRegisters() override {
+		return Read("IDebugger::GetRegisters") ? inner_->GetRegisters() : std::vector<DebugRegisterInfo>{};
+	}
+	bool ReadRegister(const char* name, uint32_t& value, uint32_t& bitWidth) override {
+		return Read("IDebugger::ReadRegister") && inner_->ReadRegister(name, value, bitWidth);
+	}
+	bool WriteRegister(const char* name, uint32_t value) override {
+		return Write("IDebugger::WriteRegister") && inner_->WriteRegister(name, value);
+	}
+	std::vector<uint8_t> ReadMemory(uint32_t address, size_t size) override {
+		return Read("IDebugger::ReadMemory") ? inner_->ReadMemory(address, size) : std::vector<uint8_t>{};
+	}
+	void WriteMemory(uint32_t address, const std::vector<uint8_t>& data) override {
+		if (Write("IDebugger::WriteMemory"))
+			inner_->WriteMemory(address, data);
+	}
+	std::vector<uint16_t> ReadCode(uint32_t byteAddress, size_t count) override {
+		return Read("IDebugger::ReadCode") ? inner_->ReadCode(byteAddress, count) : std::vector<uint16_t>{};
+	}
+	void WriteCode(uint32_t byteAddress, const std::vector<uint8_t>& data) override {
+		if (Allow(Capability::EmulatorCode, "IDebugger::WriteCode"))
+			inner_->WriteCode(byteAddress, data);
+	}
+	std::vector<DebugDisassemblyLine> GetDisassembly(uint32_t address, size_t count) override {
+		return Read("IDebugger::GetDisassembly") ? inner_->GetDisassembly(address, count) : std::vector<DebugDisassemblyLine>{};
+	}
+	void Pause() override { if (Write("IDebugger::Pause")) inner_->Pause(); }
+	void Resume() override { if (Write("IDebugger::Resume")) inner_->Resume(); }
+	void Reset() override { if (Write("IDebugger::Reset")) inner_->Reset(); }
+	bool StepInto() override { return Write("IDebugger::StepInto") && inner_->StepInto(); }
+	bool StepOver() override { return Write("IDebugger::StepOver") && inner_->StepOver(); }
+	bool StepOut() override { return Write("IDebugger::StepOut") && inner_->StepOut(); }
+
+	std::vector<uint32_t> GetExecutionBreakpoints() override {
+		return Read("IDebugger::GetExecutionBreakpoints") ? inner_->GetExecutionBreakpoints() : std::vector<uint32_t>{};
+	}
+	bool AddExecutionBreakpoint(uint32_t address) override {
+		return Write("IDebugger::AddExecutionBreakpoint") && inner_->AddExecutionBreakpoint(address);
+	}
+	bool RemoveExecutionBreakpoint(uint32_t address) override {
+		return Write("IDebugger::RemoveExecutionBreakpoint") && inner_->RemoveExecutionBreakpoint(address);
+	}
+	void ClearExecutionBreakpoints() override {
+		if (Write("IDebugger::ClearExecutionBreakpoints"))
+			inner_->ClearExecutionBreakpoints();
+	}
+
+	std::vector<DebugMemoryBreakpointInfo> GetMemoryBreakpoints() override {
+		return Read("IDebugger::GetMemoryBreakpoints") ? inner_->GetMemoryBreakpoints() : std::vector<DebugMemoryBreakpointInfo>{};
+	}
+	std::vector<DebugMemoryBreakpointHitInfo> GetMemoryBreakpointHits(uint32_t address, bool write) override {
+		return Read("IDebugger::GetMemoryBreakpointHits")
+			? inner_->GetMemoryBreakpointHits(address, write) : std::vector<DebugMemoryBreakpointHitInfo>{};
+	}
+	bool AddMemoryBreakpoint(uint32_t address, bool write, bool breakWhenHit, bool enabled,
+		bool compareData, uint8_t data, uint8_t mask, uint64_t skipCount) override {
+		return Write("IDebugger::AddMemoryBreakpoint") && inner_->AddMemoryBreakpoint(address, write,
+			breakWhenHit, enabled, compareData, data, mask, skipCount);
+	}
+	bool RemoveMemoryBreakpoint(uint32_t address, bool write) override {
+		return Write("IDebugger::RemoveMemoryBreakpoint") && inner_->RemoveMemoryBreakpoint(address, write);
+	}
+	void ClearMemoryBreakpoints() override {
+		if (Write("IDebugger::ClearMemoryBreakpoints"))
+			inner_->ClearMemoryBreakpoints();
+	}
+
+	std::string GetBacktrace() override {
+		return Read("IDebugger::GetBacktrace") ? inner_->GetBacktrace() : std::string();
+	}
+	std::vector<DebugStackFrameInfo> GetStackFrames() override {
+		return Read("IDebugger::GetStackFrames") ? inner_->GetStackFrames() : std::vector<DebugStackFrameInfo>{};
+	}
+	std::vector<DebugLabelInfo> GetLabels(const char* query, size_t limit) override {
+		return Read("IDebugger::GetLabels") ? inner_->GetLabels(query, limit) : std::vector<DebugLabelInfo>{};
+	}
+	std::vector<DebugVariableInfo> GetVariables() override {
+		return Read("IDebugger::GetVariables") ? inner_->GetVariables() : std::vector<DebugVariableInfo>{};
+	}
+
+	std::vector<DebugSnapshotInfo> GetSnapshots() override {
+		return Read("IDebugger::GetSnapshots") ? inner_->GetSnapshots() : std::vector<DebugSnapshotInfo>{};
+	}
+	uint32_t SaveSnapshot(uint32_t parentId, const char* label) override {
+		return Write("IDebugger::SaveSnapshot") ? inner_->SaveSnapshot(parentId, label) : 0;
+	}
+	bool LoadSnapshot(uint32_t id, std::string& error) override {
+		if (!Write("IDebugger::LoadSnapshot")) {
+			error = DeniedMessage(Capability::EmulatorWrite);
+			return false;
+		}
+		return inner_->LoadSnapshot(id, error);
+	}
+	bool DeleteSnapshot(uint32_t id) override {
+		return Write("IDebugger::DeleteSnapshot") && inner_->DeleteSnapshot(id);
+	}
+	bool ExportSnapshots(const char* path, uint32_t id, bool subtree, std::string& error) override {
+		if (!Allow(Capability::FilesystemWrite, "IDebugger::ExportSnapshots")) {
+			error = DeniedMessage(Capability::FilesystemWrite);
+			return false;
+		}
+		return inner_->ExportSnapshots(path, id, subtree, error);
+	}
+	bool ImportSnapshots(const char* path, std::string& error) override {
+		if (!Allow(Capability::FilesystemRead, "IDebugger::ImportSnapshots")) {
+			error = DeniedMessage(Capability::FilesystemRead);
+			return false;
+		}
+		return inner_->ImportSnapshots(path, error);
+	}
+
+	std::vector<DebugAddressLockInfo> GetAddressLocks() override {
+		return Read("IDebugger::GetAddressLocks") ? inner_->GetAddressLocks() : std::vector<DebugAddressLockInfo>{};
+	}
+	void SetAddressLock(uint32_t address, uint8_t value, bool locked) override {
+		if (Write("IDebugger::SetAddressLock"))
+			inner_->SetAddressLock(address, value, locked);
+	}
+	bool RemoveAddressLock(uint32_t address) override {
+		return Write("IDebugger::RemoveAddressLock") && inner_->RemoveAddressLock(address);
+	}
+	void ClearAddressLocks() override {
+		if (Write("IDebugger::ClearAddressLocks"))
+			inner_->ClearAddressLocks();
+	}
+
+	void StartCallRecording(bool filterCaller, uint32_t caller, bool filterCallee, uint32_t callee) override {
+		if (Write("IDebugger::StartCallRecording"))
+			inner_->StartCallRecording(filterCaller, caller, filterCallee, callee);
+	}
+	void StopCallRecording() override {
+		if (Write("IDebugger::StopCallRecording"))
+			inner_->StopCallRecording();
+	}
+	void ClearCallRecording() override {
+		if (Write("IDebugger::ClearCallRecording"))
+			inner_->ClearCallRecording();
+	}
+	std::vector<DebugFunctionCallInfo> GetFunctionCalls(uint32_t function) override {
+		return Read("IDebugger::GetFunctionCalls") ? inner_->GetFunctionCalls(function) : std::vector<DebugFunctionCallInfo>{};
+	}
+
+	void SetCyclesPerSecond(uint32_t cps) override {
+		if (Write("IDebugger::SetCyclesPerSecond"))
+			inner_->SetCyclesPerSecond(cps);
+	}
+	void SetPdValue(uint8_t value) override {
+		if (Write("IDebugger::SetPdValue"))
+			inner_->SetPdValue(value);
+	}
+	DebugDisplaySettings GetDisplaySettings() override {
+		return Read("IDebugger::GetDisplaySettings") ? inner_->GetDisplaySettings() : DebugDisplaySettings{};
+	}
+	void SetDisplaySettings(const DebugDisplaySettings& settings) override {
+		if (Write("IDebugger::SetDisplaySettings"))
+			inner_->SetDisplaySettings(settings);
+	}
+	DebugQrCodeInfo GetQrCode() override {
+		return Read("IDebugger::GetQrCode") ? inner_->GetQrCode() : DebugQrCodeInfo{};
+	}
+	void RequestScreenshot() override {
+		if (Read("IDebugger::RequestScreenshot"))
+			inner_->RequestScreenshot();
+	}
+	void RequestRecording(bool start) override {
+		if (Write("IDebugger::RequestRecording"))
+			inner_->RequestRecording(start);
+	}
+	bool HotReloadRom(std::string& error) override {
+		if (!Allow(Capability::EmulatorCode, "IDebugger::HotReloadRom")) {
+			error = DeniedMessage(Capability::EmulatorCode);
+			return false;
+		}
+		return inner_->HotReloadRom(error);
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+	bool Read(const char* api) { return Allow(Capability::EmulatorRead, api); }
+	bool Write(const char* api) { return Allow(Capability::EmulatorWrite, api); }
+	std::string DeniedMessage(Capability capability) {
+		return "permission denied: plugin lacks the '" + std::string(CapabilityName(capability)) + "' capability";
+	}
+
+	IDebugger* inner_;
+	PermissionSet permissions_;
+	std::string pluginId_;
+};
+
+class ScopedPluginApi : public PluginApi {
+public:
+	ScopedPluginApi(std::string pluginId, PermissionSet permissions, PluginApi* backend)
+		: pluginId_(std::move(pluginId)), permissions_(std::move(permissions)), backend_(backend) {
+		permissions_.SetPluginId(pluginId_);
+		platform_.reset(new PlatformHostGuard(
+			static_cast<IPlatformHost*>(backend_->QueryInterface(typeid(IPlatformHost).name())),
+			permissions_, pluginId_));
+		emulator_.reset(new EmulatorGuard(
+			static_cast<IEmulator*>(backend_->QueryInterface(typeid(IEmulator).name())),
+			permissions_, pluginId_));
+		mmu_.reset(new MmuGuard(
+			static_cast<IMMU*>(backend_->QueryInterface(typeid(IMMU).name())),
+			permissions_, pluginId_));
+		chipset_.reset(new ChipsetGuard(
+			static_cast<IChipset*>(backend_->QueryInterface(typeid(IChipset).name())),
+			permissions_, pluginId_));
+		hooks_.reset(new HooksGuard(
+			static_cast<Hooks*>(backend_->QueryInterface(typeid(Hooks).name())),
+			permissions_, pluginId_));
+		debugger_.reset(new DebuggerGuard(
+			static_cast<IDebugger*>(backend_->QueryInterface(typeid(IDebugger).name())),
+			permissions_, pluginId_));
+	}
+
+	int GetVersion() override { return PLUGIN_API_VERSION; }
+
+	void AddWindow(UIWindow* wnd) override {
+		if (!wnd)
+			return;
+		if (!Allow(Capability::Window, "PluginApi::AddWindow"))
+			return;
+		TrackPluginWindow(pluginId_, wnd);
+		backend_->AddWindow(wnd);
+	}
+
+	bool RegisterPlugin(const char* id, const char* name, int version) override {
+		return backend_->RegisterPlugin(id, name, version);
+	}
+	void AssertFundamentalSTL(size_t a, size_t b, size_t c, size_t d) override {
+		backend_->AssertFundamentalSTL(a, b, c, d);
+	}
+	void* QueryInterface(const char* name) override {
+		const auto matches = [&](const std::type_info& type) {
+			return name && std::strcmp(name, type.name()) == 0;
+		};
+		if (matches(typeid(IPlatformHost))) {
+			if (permissions_.Allows(Capability::FilesystemRead) ||
+				permissions_.Allows(Capability::FilesystemWrite) ||
+				permissions_.Allows(Capability::Window))
+				return platform_.get();
+			RecordPermissionDenial(pluginId_, Capability::Window, "QueryInterface<IPlatformHost>");
+			return nullptr;
+		}
+		if (matches(typeid(IEmulator))) {
+			if (permissions_.Allows(Capability::EmulatorRead) ||
+				permissions_.Allows(Capability::EmulatorWrite))
+				return emulator_.get();
+			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IEmulator>");
+			return nullptr;
+		}
+		if (matches(typeid(ICPU))) {
+			// ICPU only exposes a writable register pointer.
+			if (permissions_.Allows(Capability::EmulatorWrite))
+				return backend_->QueryInterface(name);
+			RecordPermissionDenial(pluginId_, Capability::EmulatorWrite, "QueryInterface<ICPU>");
+			return nullptr;
+		}
+		if (matches(typeid(IChipset))) {
+			if (permissions_.Allows(Capability::EmulatorRead) ||
+				permissions_.Allows(Capability::EmulatorWrite))
+				return chipset_.get();
+			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IChipset>");
+			return nullptr;
+		}
+		if (matches(typeid(IMMU))) {
+			if (permissions_.Allows(Capability::EmulatorRead) ||
+				permissions_.Allows(Capability::EmulatorWrite) ||
+				permissions_.Allows(Capability::EmulatorCode))
+				return mmu_.get();
+			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IMMU>");
+			return nullptr;
+		}
+		if (matches(typeid(Hooks))) {
+			if (permissions_.Allows(Capability::EmulatorRead))
+				return hooks_.get();
+			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<Hooks>");
+			return nullptr;
+		}
+		if (matches(typeid(IKeyboard))) {
+			if (permissions_.Allows(Capability::EmulatorWrite))
+				return backend_->QueryInterface(name);
+			RecordPermissionDenial(pluginId_, Capability::EmulatorWrite, "QueryInterface<IKeyboard>");
+			return nullptr;
+		}
+		if (matches(typeid(IDebugger))) {
+			if (permissions_.Allows(Capability::EmulatorRead) ||
+				permissions_.Allows(Capability::EmulatorWrite))
+				return debugger_.get();
+			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IDebugger>");
+			return nullptr;
+		}
+		// Chipset-specific peripheral interfaces are opaque to the facade.  They
+		// are reachable only with emulator access.
+		if (permissions_.Allows(Capability::EmulatorRead) ||
+			permissions_.Allows(Capability::EmulatorWrite) ||
+			permissions_.Allows(Capability::EmulatorCode))
+			return backend_->QueryInterface(name);
+		RecordPermissionDenial(pluginId_, Capability::EmulatorRead,
+			name ? std::string("QueryInterface<") + name + ">" : "QueryInterface");
+		return nullptr;
+	}
+	void* GetImGuiContext() override {
+		if (permissions_.Allows(Capability::Window))
+			return backend_->GetImGuiContext();
+		RecordPermissionDenial(pluginId_, Capability::Window, "PluginApi::GetImGuiContext");
+		return nullptr;
+	}
+	bool RegisterPlugin(const char* id, const char* name, const char* version, const char* author,
+		const char* desc) override {
+		return backend_->RegisterPlugin(id, name, version, author, desc);
+	}
+
+private:
+	bool Allow(Capability capability, const char* api) {
+		if (permissions_.Allows(capability))
+			return true;
+		RecordPermissionDenial(pluginId_, capability, api);
+		return false;
+	}
+
+	std::string pluginId_;
+	PermissionSet permissions_;
+	PluginApi* backend_ = nullptr;
+	std::unique_ptr<PlatformHostGuard> platform_;
+	std::unique_ptr<EmulatorGuard> emulator_;
+	std::unique_ptr<MmuGuard> mmu_;
+	std::unique_ptr<ChipsetGuard> chipset_;
+	std::unique_ptr<HooksGuard> hooks_;
+	std::unique_ptr<DebuggerGuard> debugger_;
+};
+
+} // namespace
+
+namespace casioemu::plugin {
+
+PluginApi* CreatePluginApi(const std::string& pluginId, const Manifest& manifest) {
+	PermissionSet permissions(manifest.permissions);
+	return new ScopedPluginApi(pluginId, std::move(permissions), g_pluginapi);
+}
+
+void DestroyPluginApi(PluginApi* api) {
+	delete static_cast<ScopedPluginApi*>(api);
+}
+
+} // namespace casioemu::plugin
+
 PluginApi* g_pluginapi = new PluginApi_Impl();

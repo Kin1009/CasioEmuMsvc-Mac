@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PluginVersion.h"
+
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -7,8 +9,11 @@
 namespace casioemu::plugin {
 
 inline constexpr int kManifestSchema = 1;
-inline constexpr int kHostApiVersion = 2;
-inline constexpr const char* kHostVersion = "2.1.0";
+// Mirrors PLUGIN_API_VERSION from PluginVersion.h.
+inline constexpr int kHostApiVersion = kPluginHostApiVersion;
+// Oldest api_version a v3 host still accepts (v1 packages keep loading).
+inline constexpr int kHostApiMinVersion = kPluginHostApiMinVersion;
+inline constexpr const char* kHostVersion = "2.2.0";
 
 enum class PluginType {
 	Theme,

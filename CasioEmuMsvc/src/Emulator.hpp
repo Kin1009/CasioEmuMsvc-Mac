@@ -67,6 +67,9 @@ namespace casioemu {
 		bool running;
 		std::atomic<bool> Paused;
 		bool headless = false;
+		// "headless" argv in the desktop build: render into offscreen targets
+		// with SDL's dummy video driver so no display/WindowServer is needed.
+		bool offscreen_rendering = false;
 		std::atomic<bool> m_step_requested;
 		unsigned int last_frame_tick_count;
 		std::string model_path;

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Mono Green",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#08130b",
+      "surface": "#0b1a0e",
+      "surfaceAlt": "#102516",
+      "foreground": "#b9f6c5",
+      "muted": "#6f9e79",
+      "border": "#1c3a24",
+      "borderStrong": "#2a5535",
+      "accent": "#3ddc84",
+      "accentHover": "#63e89e",
+      "selection": "#1f5c33",
+      "hover": "#14351c",
+      "error": "#ff5f56",
+      "warning": "#d7b34a",
+      "success": "#7df59b",
+      "link": "#7df59b",
+      "titleBar": "#061009",
+      "activityBar": "#061009",
+      "statusBar": "#061009",
+      "panel": "#0b1a0e",
+      "tabActive": "#0b1a0e",
+      "tabInactive": "#102516"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}
