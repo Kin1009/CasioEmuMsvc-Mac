@@ -51,6 +51,12 @@ std::string builtin_header(const std::string& name) {
          "typedef unsigned int size_t;\ntypedef int ptrdiff_t;\n"
          "typedef int max_align_t;\n#define NULL ((void*)0)\n"},
         {"stdalign.h", "#define alignas _Alignas\n#define alignof _Alignof\n"},
+        {"stdarg.h",
+         "typedef int va_list;\n"
+         "#define va_start(ap, last) ((ap) = __va_start())\n"
+         "#define va_arg(ap, type) __va_arg(&(ap))\n"
+         "#define va_end(ap) ((void)0)\n"
+         "#define va_copy(dst, src) ((dst) = (src))\n"},
         {"stdnoreturn.h", "#define noreturn _Noreturn\n"},
         {"stdint.h",
          "typedef signed char int8_t;\ntypedef unsigned char uint8_t;\n"
@@ -72,8 +78,12 @@ std::string builtin_header(const std::string& name) {
          "#define LONG_MIN (-32768)\n#define LONG_MAX 32767\n#define ULONG_MAX 65535\n"},
         {"string.h",
          "#include <stddef.h>\n"
-         "/* memcpy/memset/memcmp/memccpy/strlen/strcmp/strcpy/strcat/strchr\n"
-         "   are provided by the CWiz prelude; this header supplies size_t. */\n"},
+         "/* memcpy/memset/memcmp/memccpy/strdup/strndup/strlen/strcmp/strcpy/\n"
+         "   strcat/strchr are provided by the CWiz prelude. */\n"},
+        {"stdckdint.h",
+         "/* C23 checked arithmetic subset: ckd_add/ckd_sub are prelude\n"
+         "   functions returning nonzero on overflow.  ckd_mul is not\n"
+         "   available on the 16-bit model. */\n"},
     };
     auto it = headers.find(name);
     return it == headers.end() ? std::string() : it->second;

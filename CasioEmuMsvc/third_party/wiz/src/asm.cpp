@@ -301,7 +301,7 @@ std::vector<uint16_t> Assembler::encode(const std::string& mn_in, const std::vec
     // --- branches ---
     if ((mn == "B" || mn == "BL") && n == 1) {
         int e = opt_ereg(ops[0]);
-        if (e >= 0) return {(uint16_t)(0xF002 | (e << 8) | (mn == "B" ? 0 : 1))};
+        if (e >= 0) return {(uint16_t)(0xF002 | (e << 4) | (mn == "B" ? 0 : 1))};
         int tgt = ev(ops[0], final);
         return {(uint16_t)(0xF000 | ((((tgt >> 16) & 0xF)) << 8) | (mn == "B" ? 0 : 1)),
                 (uint16_t)(tgt & 0xFFFF)};

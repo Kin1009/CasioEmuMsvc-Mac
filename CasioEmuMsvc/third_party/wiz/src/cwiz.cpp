@@ -391,6 +391,9 @@ struct Func {
     std::string label;
     std::vector<Sym*> locals;
     bool recursive = false;
+    bool variadic = false;
+    Sym* va_count = nullptr;
+    Sym* va_array = nullptr;
 };
 
 struct Node {
@@ -418,6 +421,7 @@ struct Node {
     int align = 1;                 // _Alignas/alignas request
     bool has_size = false;
     long long size = 0;
+    bool variadic = false;
     bool has_default = false;
     long long default_val = 0;
     bool has_default_val = false;
@@ -475,6 +479,8 @@ struct StructField {
     int size = 2;
     int bits = 0;        // bitfield width (0 = ordinary member)
     bool flexible = false;
+    bool is_group = false;             // anonymous struct/union member
+    std::vector<StructField> group;    // its flattened members
 };
 struct TypeDef {
     std::string kind;  // "struct" or "union"
@@ -550,6 +556,7 @@ private:
     TypeTable& types_;
     std::vector<NodeP> pending_type_nodes_;  // enum constants produced by a type specifier
     int pending_align_ = 1;                  // _Alignas on the next declaration
+    bool params_variadic_ = false;           // last param_list() ended with ...
 
     const Token& cur() const { return t[p]; }
     bool at(const std::string& kind, const std::string& value = "", bool have_value = false) const {
@@ -813,6 +820,20 @@ private:
                 throw CwizError("unterminated " + kind, kw.line, kw.col,
                                 "add '}' to close the aggregate", "syntax.unterminated-struct");
             std::string fty = type_name();
+            if (at_op1(";") && is_aggregate_type(fty)) {
+                const TypeDef* inner = type_def(fty);
+                if (!inner || !inner->complete)
+                    throw CwizError("anonymous member has an incomplete type", kw.line, kw.col,
+                                    "define the struct/union first", "sema.incomplete-type");
+                StructField g;
+                g.type = fty;
+                g.size = inner->size;
+                g.is_group = true;
+                g.group = inner->fields;
+                fields.push_back(g);
+                next();  // ;
+                continue;
+            }
             while (true) {
                 Token fn = expect_ident();
                 StructField f;
@@ -859,6 +880,8 @@ private:
                                 "move '" + fields[i].name + "[]' to the end of the struct",
                                 "sema.flexible-member");
         int off = 0, size = 0, align = 1;
+        std::vector<StructField> flat;
+        std::set<std::string> flat_names;
         for (auto& f : fields) {
             const int a = type_align(f.type);
             if (a > align) align = a;
@@ -870,8 +893,25 @@ private:
                 f.offset = off;
                 off += f.size;
             }
+            if (f.is_group) {
+                for (StructField sub : f.group) {
+                    sub.offset += f.offset;
+                    if (!flat_names.insert(sub.name).second)
+                        throw CwizError("duplicate member '" + sub.name +
+                                            "' (via an anonymous member)",
+                                        kw.line, kw.col,
+                                        "rename one of the members", "sema.duplicate-member");
+                    flat.push_back(sub);
+                }
+            } else {
+                if (!flat_names.insert(f.name).second)
+                    throw CwizError("duplicate member '" + f.name + "'", kw.line, kw.col,
+                                    "member names must be unique inside one " + kind,
+                                    "sema.duplicate-member");
+                flat.push_back(f);
+            }
         }
-        def.fields = fields;
+        def.fields = flat;
         def.align = align;
         def.size = kind == "union" ? align_up(size, align) : align_up(off, align);
         types_.types[full] = def;
@@ -1009,6 +1049,17 @@ private:
             next();
             std::string base = type_name();
             NodeP empty = mk(NK::DeclGroup, tk.line, tk.col);
+            if (at_op1("(") && t[p + 1].kind == "op" && t[p + 1].sval == "*") {
+                next();
+                while (at_op1("*")) next();
+                Token name = expect_ident();
+                expect_op(")");
+                std::vector<NodeP> sig = param_list();
+                (void)sig;
+                types_.aliases[name.sval] = "fnptr";
+                expect_op(";");
+                return empty;
+            }
             while (true) {
                 Token name = expect_ident();
                 std::string ty = base;
@@ -1176,6 +1227,26 @@ private:
         }
 
         while (true) {
+            if (at_op1("(") && t[p + 1].kind == "op" && t[p + 1].sval == "*") {
+                next();  // (
+                while (at_op1("*")) next();
+                Token name = expect_ident();
+                expect_op(")");
+                std::vector<NodeP> sig = param_list();
+                (void)sig;
+                if (!group->list.empty())
+                    throw CwizError("a function pointer cannot share a declaration",
+                                    name.line, name.col, "put it on its own line",
+                                    "syntax.function-in-declaration");
+                NodeP n = mk(NK::VarDecl, name.line, name.col);
+                n->sval = name.sval;
+                n->type = "fnptr";
+                n->align = decl_align;
+                if (at_op1("=")) { next(); n->a = expr(); }
+                group->list.push_back(n);
+                if (at_op1(",")) { next(); continue; }
+                break;
+            }
             int pointers = 0;
             while (at_op1("*")) { next(); ++pointers; }
             Token name = expect_ident();
@@ -1188,6 +1259,7 @@ private:
                                     "declare the function on its own line",
                                     "syntax.function-in-declaration");
                 std::vector<NodeP> params = param_list();
+                const bool is_variadic = params_variadic_;
                 NodeP body = block();
                 if (!global_scope)
                     throw CwizError("functions can only be defined at file scope", start.line,
@@ -1198,6 +1270,7 @@ private:
                 n->list = params;
                 n->b = body;
                 n->type = ty;
+                n->variadic = is_variadic;
                 return n;
             }
 
@@ -1257,15 +1330,31 @@ private:
 
     std::vector<NodeP> param_list() {
         expect_op("(");
+        params_variadic_ = false;
         std::vector<NodeP> params;
         if (!at_op1(")")) {
             while (true) {
+                if (at_op1("...")) {
+                    next();
+                    params_variadic_ = true;
+                    if (!at_op1(")"))
+                        throw CwizError("'...' must be the last parameter", cur().line, cur().col,
+                                        "write 'f(int n, ...)'", "syntax.variadic");
+                    break;
+                }
                 if (at_kw1("void") && t[p + 1].kind == "op" && t[p + 1].sval == ")") {
                     next();
                     break;
                 }
                 std::string pty = type_name();
-                Token pname = expect_ident();
+                Token pname;
+                if (at_op1(",") || at_op1(")")) {
+                    // Unnamed parameter in a prototype / function-pointer type.
+                    pname.line = cur().line;
+                    pname.col = cur().col;
+                } else {
+                    pname = expect_ident();
+                }
                 NodeP n = mk(NK::Param, pname.line, pname.col);
                 n->sval = pname.sval;
                 n->type = pty;
@@ -1387,6 +1476,22 @@ private:
         NodeP group = mk(NK::DeclGroup, start.line, start.col);
 
         while (true) {
+            if (at_op1("(") && t[p + 1].kind == "op" && t[p + 1].sval == "*") {
+                next();
+                while (at_op1("*")) next();
+                Token name = expect_ident();
+                expect_op(")");
+                std::vector<NodeP> sig = param_list();
+                (void)sig;
+                NodeP n = mk(NK::VarDecl, name.line, name.col);
+                n->sval = name.sval;
+                n->type = "fnptr";
+                n->align = decl_align;
+                if (at_op1("=")) { next(); n->a = expr(); }
+                group->list.push_back(n);
+                if (at_op1(",")) { next(); continue; }
+                break;
+            }
             int pointers = 0;
             while (at_op1("*")) { next(); ++pointers; }
             Token name = expect_ident();
@@ -1865,6 +1970,7 @@ private:
                 expect_op(")");
                 NodeP n = mk(NK::Call, e->line, e->col);
                 n->sval = e->sval;
+                n->a = e;  // callee; direct calls still resolve by name
                 n->list = args;
                 e = n;
             } else if (at_op1("++") || at_op1("--")) {
@@ -2327,6 +2433,39 @@ char *strchr(char *s, int c) {
     if (c == 0) { return s; }
     return 0;
 }
+// C23 <stdckdint.h> subset: add/sub overflow checks.
+int ckd_add(int *r, int a, int b) {
+    int s = a + b;
+    *r = s;
+    return (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0);
+}
+int ckd_sub(int *r, int a, int b) {
+    int s = a - b;
+    *r = s;
+    return (a >= 0 && b < 0 && s < 0) || (a < 0 && b > 0 && s >= 0);
+}
+// strdup/strndup subset: a fixed static arena, never freed (documented).
+char _dup_buf[512];
+int _dup_pos = 0;
+char *strdup(char *s) {
+    char *out = _dup_buf + _dup_pos;
+    int i = 0;
+    while (s[i] != 0 && _dup_pos + i < 511) { out[i] = s[i]; i = i + 1; }
+    out[i] = 0;
+    _dup_pos = _dup_pos + i + 1;
+    if (_dup_pos > 500) { _dup_pos = 0; }
+    return out;
+}
+char *strndup(char *s, int n) {
+    char *out = _dup_buf + _dup_pos;
+    int i = 0;
+    while (i < n && s[i] != 0 && _dup_pos + i < 511) { out[i] = s[i]; i = i + 1; }
+    out[i] = 0;
+    _dup_pos = _dup_pos + i + 1;
+    if (_dup_pos > 500) { _dup_pos = 0; }
+    return out;
+}
+
 int strlen(char *s) {
     int n = 0;
     while (_rpeek(s + n) != 0) { n = n + 1; }
@@ -2528,6 +2667,8 @@ static const std::map<std::string, BuiltinInfo> CW_BUILTINS = {
     {"renderStatus", {0, 0, "renderStatus()", 0}},
     {"ticks", {0, 0, "ticks()", 0}},
     {"delay_ms", {1, 1, "delay_ms(ms)", 0}},
+    {"__va_start", {0, 0, "__va_start()", 0}},
+    {"__va_arg", {1, 1, "__va_arg(ap)", 1u << 0}},
     {"_hpeek", {1, 1, "_hpeek(addr)", 1u << 0}},
     {"_hpoke", {2, 2, "_hpoke(addr, value)", 1u << 0}}};
 static const int PRINT_MIN = 3;
@@ -2842,6 +2983,7 @@ private:
             f->params = d->list;
             f->body = d->b;
             f->ret = d->type;
+            f->variadic = d->variadic;
             f->label = "f_" + d->sval;
             if (is_aggregate_type(f->ret))
                 err("functions cannot return a struct/union by value", d,
@@ -2892,6 +3034,25 @@ private:
             sym->index = (int)i;
             locals.push_back({p->sval, sym});
             f->locals.push_back(sym);
+        }
+        if (f->variadic) {
+            Sym* count = new_sym("var", "__va_count");
+            count->vtype = "int";
+            count->scope = "local";
+            count->qname = f->name + ".__va_count";
+            count->func = f;
+            f->va_count = count;
+            f->locals.push_back(count);
+            Sym* arr = new_sym("array", "__va_args");
+            arr->vtype = "int";
+            arr->elem_bytes = 2;
+            arr->size = 16;
+            arr->dims.push_back(16);
+            arr->scope = "local";
+            arr->qname = f->name + ".__va_args";
+            arr->func = f;
+            f->va_array = arr;
+            f->locals.push_back(arr);
         }
         loop_depth = 0;
         switch_depth = 0;
@@ -3235,8 +3396,7 @@ private:
                 Sym* sym = resolve(e->sval);
                 if (!sym) {
                     if (an.funcs.count(e->sval))
-                        err(fmt("'%s' is a function, not a variable", e->sval.c_str()), e,
-                            "call it with '" + e->sval + "()'", "sema.function-as-value");
+                        return e->etype = "fnptr";  // function designator decays
                     err(fmt("'%s' is not defined", e->sval.c_str()), e,
                         did_you_mean(e->sval, name_candidates()),
                         "sema.undefined-identifier");
@@ -3636,6 +3796,14 @@ private:
             c->kind = name;
             return "void";
         }
+        if (name == "__va_start") {
+            if (!fn || !fn->variadic || !fn->va_array)
+                err("__va_start is only valid inside a variadic function", c,
+                    "use va_start(ap, last) in a function declared with '...'",
+                    "sema.va-start");
+            c->kind = "va_start";
+            return "int";
+        }
         auto bit = CW_BUILTINS.find(name);
         if (bit != CW_BUILTINS.end()) {
             const BuiltinInfo& bi = bit->second;
@@ -3682,7 +3850,7 @@ private:
                 if (!p->a) required++;
             int total = (int)f->params.size();
             int n = (int)c->list.size();
-            if (!(required <= n && n <= total)) {
+            if (!(f->variadic ? (n >= required) : (required <= n && n <= total))) {
                 if (required == total)
                     err(fmt("%s() takes %d argument%s, got %d", name.c_str(), total,
                             total == 1 ? "" : "s", n),
@@ -3700,6 +3868,19 @@ private:
             c->kind = "func";
             c->func = f;
             return f->ret.empty() ? "int" : f->ret;
+        }
+        if (Sym* s = resolve(name)) {
+            if (s->vtype != "fnptr")
+                err(fmt("'%s' is not a function", name.c_str()), c,
+                    "call a function or a function pointer", "sema.unknown-function");
+            for (auto& a : c->list)
+                if (expr(a) == "void")
+                    err("a void function cannot be used as a call argument", a,
+                        "remove the call, or call a value-returning function",
+                        "sema.void-expression");
+            expr(c->a);
+            c->kind = "indirect";
+            return "int";
         }
         err(fmt("'%s' is not a function", name.c_str()), c,
             did_you_mean(name, name_candidates()), "sema.unknown-function");
@@ -3890,6 +4071,11 @@ private:
         else if (e->k == NK::Str) load_label(reg, intern(e->cps, e));
         else if (e->k == NK::Ident) {
             Sym* sym = e->sym;
+            if (!sym) {
+                auto it = an.funcs.find(e->sval);
+                if (it != an.funcs.end()) { load_label(reg, it->second->label); return; }
+                throw CwizError("internal: unresolved identifier '" + e->sval + "'", e->line);
+            }
             if (sym->kind == "const") const_(reg, sym->value);
             else if (sym->kind == "var" || sym->kind == "param") {
                 if (type_bytes(sym->vtype) == 1) {
@@ -4297,7 +4483,21 @@ private:
     void ex_call(const NodeP& c) {
         if (c->kind == "print") { ex_print(c, "text", "num"); return; }
         if (c->kind == "print_cw") { ex_print(c, "text_cw", "num_cw"); return; }
+        if (c->kind == "va_start") {
+            const_(0, fn && fn->va_array ? fn->va_array->addr : 0);
+            return;
+        }
         if (c->kind == "builtin") { ex_builtin(c); return; }
+        if (c->kind == "indirect") {
+            for (auto& a : c->list) {
+                ex(a);
+                emit("PUSH ER0");
+            }
+            ex(c->a);
+            emit("MOV ER2, ER0");
+            emit("BL ER2");
+            return;
+        }
         emit_call(c->func, c->list);
     }
 
@@ -4315,17 +4515,17 @@ private:
     void emit_call(Func* f, const std::vector<NodeP>& args) {
         bool recursive_here = f->recursive && fn == f;
         if (recursive_here) save_locals(f);
-        for (auto& a : effective_args(f, args)) {
+        std::vector<NodeP> effective = effective_args(f, args);
+        for (auto& a : effective) {
             ex(a);
             emit("PUSH ER0");
         }
-        for (auto it = f->params.rbegin(); it != f->params.rend(); ++it) {
-            emit("POP ER0");
-            if (type_bytes((*it)->type) == 1)
-                emit(fmt("ST R0, %d", param_addr(f, *it)));
-            else
-                emit(fmt("ST ER0, %d", param_addr(f, *it)));
+        if (f->variadic) {
+            const_(0, (long long)effective.size());
+            emit("PUSH ER0");
         }
+        // The callee pops its parameters in emit_func(); this uniform stack
+        // convention also makes indirect calls through function pointers work.
         emit("BL " + f->label);
         if (recursive_here) restore_locals(f);
     }
@@ -4498,6 +4698,41 @@ private:
     void emit_func(Func* f) {
         fn = f;
         label(f->label);
+        if (f->variadic && f->va_count && f->va_array) {
+            emit("POP ER0");
+            emit(fmt("ST ER0, %d", f->va_count->addr));
+            // ER2 = number of extra arguments.
+            emit(fmt("L ER2, %d", f->va_count->addr));
+            const_(0, (long long)f->params.size());
+            emit("SUB R2, R0");
+            emit("SUBC R3, R1");
+            // ER4 = array + extra*2 - 2, filled from the top of the stack.
+            emit("MOV ER4, ER2");
+            emit("ADD ER4, ER4");
+            const_(0, f->va_array->addr);
+            emit("ADD ER4, ER0");
+            emit("ADD ER4, #-2");
+            std::string loop = new_label(), done = new_label();
+            label(loop);
+            emit("MOV R0, R2");
+            emit("OR R0, R3");
+            emit("BEQ " + done);
+            emit("POP ER0");
+            emit("ST ER0, [ER4]");
+            emit("ADD ER4, #-2");
+            emit("ADD ER2, #-1");
+            emit("B " + loop);
+            label(done);
+            const_(0, f->va_array->addr);
+            emit("ST ER0, 0E806H");
+        }
+        for (auto it = f->params.rbegin(); it != f->params.rend(); ++it) {
+            emit("POP ER0");
+            if (type_bytes((*it)->type) == 1)
+                emit(fmt("ST R0, %d", param_addr(f, *it)));
+            else
+                emit(fmt("ST ER0, %d", param_addr(f, *it)));
+        }
         emit("PUSH LR");
         stmt(f->body);
         emit("MOV ER0, #0");

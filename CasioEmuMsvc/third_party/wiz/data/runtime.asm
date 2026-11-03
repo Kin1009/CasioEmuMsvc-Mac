@@ -633,3 +633,18 @@ __hpeek:
 __hpoke:
     ST R2, [ER0]
     RT
+
+; ---- C23/C89 variadic helpers -------------------------------------------
+; The prologue of a variadic function stores the first-extra-argument array
+; at 0E806H; va_start returns it and va_arg advances one 16-bit slot.
+__va_start:
+    L ER0, 0E806H
+    RT
+
+__va_arg:
+    MOV ER4, ER0        ; ER4 = &ap
+    L ER2, [ER4]        ; ER2 = ap (pointer into the argument array)
+    L ER0, [ER2]        ; value
+    ADD ER2, #2
+    ST ER2, [ER4]       ; *(&ap) = ap + 2
+    RT
