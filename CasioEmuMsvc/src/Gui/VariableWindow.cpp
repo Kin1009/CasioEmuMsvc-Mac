@@ -54,7 +54,9 @@ void VariableWindow::RenderCore() {
 	if (showhex) cols += (s_im ? 2 : 1);
 	if (showaddr) cols += (s_im ? 2 : 1);
 
-	if (ImGui::BeginTable("##vars_table", cols, pretty_table)) {
+	if (ImGui::BeginTable("##vars_table", cols,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable | ImGuiTableFlags_NoSavedSettings)) {
 		ImGui::TableSetupColumn("VarWindow.Variable"_lc, ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("VarWindow.ReP"_lc, ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		if (s_im) {

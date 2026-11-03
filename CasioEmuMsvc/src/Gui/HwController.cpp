@@ -73,8 +73,9 @@ void HwController::RenderCore() {
 		static_cast<float>((capture_background >> 16) & 0xff) / 255.0f,
 		static_cast<float>((capture_background >> 8) & 0xff) / 255.0f,
 		static_cast<float>(capture_background & 0xff) / 255.0f};
+	ImGui::TextUnformatted("HwController.CaptureBackground"_lc);
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-	if (ImGui::ColorEdit3("HwController.CaptureBackground"_lc, capture_background_color)) {
+	if (ImGui::ColorEdit3("##capture_background", capture_background_color)) {
 		const auto channel = [](float value) {
 			return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(value * 255.0f)), 0, 255));
 		};
@@ -87,15 +88,21 @@ void HwController::RenderCore() {
 	if (!casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
 		auto gate = casioemu::screen_gate::Get();
 		int flashing_threshold = gate.flashing_threshold;
-		if (ImGui::SliderInt("HwController.Value1"_lc, &flashing_threshold, 0, 0x3F))
+		ImGui::TextUnformatted("HwController.Value1"_lc);
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderInt("##flashing_threshold", &flashing_threshold, 0, 0x3F))
 			casioemu::screen_gate::SetFlashingThreshold(flashing_threshold);
 		float flashing_brightness = screen_flashing_brightness_coeff;
-		if (ImGui::SliderFloat("HwController.Value2"_lc, &flashing_brightness, 1.0f, 8.0f)) {
+		ImGui::TextUnformatted("HwController.Value2"_lc);
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderFloat("##flashing_brightness", &flashing_brightness, 1.0f, 8.0f)) {
 			casioemu::ordinary_lcd_history::UntrackedChange change;
 			screen_flashing_brightness_coeff = flashing_brightness;
 		}
 		int buffer_select = screen_buffer_select;
-		if (ImGui::SliderInt("HwController.ScreenBufferSelect"_lc, &buffer_select, 0, 2)) {
+		ImGui::TextUnformatted("HwController.ScreenBufferSelect"_lc);
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderInt("##screen_buffer_select", &buffer_select, 0, 2)) {
 			casioemu::ordinary_lcd_history::UntrackedChange change;
 			screen_buffer_select = buffer_select;
 		}
@@ -104,7 +111,9 @@ void HwController::RenderCore() {
 	UIHelpers::SectionHeader("CPU & Performance");
 	
 	static int cps = log(m_emu->cycles.cycles_per_second) / log(2);
-	if (ImGui::SliderInt("HwController.CPS"_lc, &cps, 1, 28, "2^%d CPS")) {
+	ImGui::TextUnformatted("HwController.CPS"_lc);
+	ImGui::SetNextItemWidth(-1.0f);
+	if (ImGui::SliderInt("##cpu_speed", &cps, 1, 28, "2^%d CPS")) {
 		m_emu->cycles.Setup((Uint64)1 << cps, m_emu->cycles.timer_interval);
 	}
 	if (m_emu->hardware_id == casioemu::HW_TI_MULTI_VIEW)

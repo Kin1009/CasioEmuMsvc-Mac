@@ -83,6 +83,13 @@ public:                       \
 
 #include <git_info.h>
 
+#ifndef CASIOEMU_BUILD_COMMIT
+#define CASIOEMU_BUILD_COMMIT GIT_COMMIT_HASH
+#endif
+#ifndef CASIOEMU_BUILD_TIME
+#define CASIOEMU_BUILD_TIME "dev"
+#endif
+
 #define EMULATOR_VERSION GIT_COMMIT_HASH
 
 #if !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(DISABLE_SENTRY)

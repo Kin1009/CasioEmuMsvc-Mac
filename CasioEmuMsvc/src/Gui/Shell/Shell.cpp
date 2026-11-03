@@ -44,7 +44,7 @@ using casioemu::plugin::ThemePalette;
 using casioemu::settings::SettingsData;
 using casioemu::settings::SettingsStore;
 
-constexpr float kTitleBarHeight = 35.0f;
+constexpr float kTitleBarHeight = 38.0f;
 constexpr float kTabStripHeight = 26.0f;
 constexpr float kBreadcrumbHeight = 22.0f;
 constexpr float kStatusBarHeight = 22.0f;
@@ -61,8 +61,11 @@ struct DiagLine {
 	std::string file;
 	int line = 0;
 	int column = 0;
+	int end_column = 0;
 	int severity = 0;
 	std::string text;
+	std::string code;
+	std::string hint;
 };
 
 struct PaletteCommand {
@@ -74,8 +77,11 @@ struct PaletteCommand {
 struct EditorProblem {
 	int line = 0;
 	int column = 0;
+	int end_column = 0;
 	int severity = 0;
 	std::string message;
+	std::string code;
+	std::string hint;
 };
 
 struct FileDocument {
@@ -113,6 +119,9 @@ struct State {
 	bool toolsVisible = true;
 	float toolsWidth = 360.0f;
 	int toolIndex = 0;
+	std::vector<std::string> toolOrder;
+	int draggingTool = -1;
+	int dragTargetTool = -1;
 	bool calculatorVisible = true;
 	float calculatorWidth = 360.0f;
 	std::string pendingTool;
@@ -418,6 +427,267 @@ std::string LanguageNameForIndex(int index) {
 }
 
 void SaveFileDocument(FileDocument& doc, const std::string& path = std::string());
+void RunLintForDocument(FileDocument& doc);
+
+bool MatchesFilter(const std::string& text, const std::string& filter) {
+	if (filter.empty())
+		return true;
+	std::string needle;
+	for (char ch : filter)
+		needle.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+	std::string haystack;
+	for (char ch : text)
+		haystack.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+	return haystack.find(needle) != std::string::npos;
+}
+
+void SetWorkspace(const std::string& folder) {
+	g.workspace = folder;
+	g.expanded.clear();
+	g.quickFilesDirty = true;
+	auto& data = SettingsStore::Instance().Data();
+	data.workspace.folder = folder;
+	auto& recents = data.workspace.recentFolders;
+	recents.erase(std::remove(recents.begin(), recents.end(), folder), recents.end());
+	recents.insert(recents.begin(), folder);
+	if (recents.size() > 10)
+		recents.resize(10);
+	if (!g.workspace.empty())
+		g.expanded.insert(g.workspace);
+	SaveLayout();
+	AppendOutput("[workspace] " + (folder.empty() ? std::string("(none)") : folder));
+}
+
+void ApplyThemeAndSave(const std::string& id) {
+	std::string error;
+	if (!ThemeManager::Instance().ApplyThemeByName(id, &error)) {
+		AppendOutput("[theme] " + error);
+		return;
+	}
+	AppendOutput("[theme] " + id);
+}
+
+bool IsWizDocument(const FileDocument& doc);
+void TransferDocumentToToolchain(FileDocument& doc);
+void SaveFileDocument(FileDocument& doc, const std::string& path);
+bool FileDocumentDirty(const FileDocument& doc);
+
+void BuildToolchain(bool run) {
+	UIWindow* win = FindWindow("Wiz Compiler");
+	if (!win)
+		return;
+	if (g.activeFile >= 0 && g.activeFile < static_cast<int>(g.files.size()) &&
+		IsWizDocument(*g.files[static_cast<size_t>(g.activeFile)])) {
+		FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
+		if (FileDocumentDirty(doc))
+			SaveFileDocument(doc, std::string());
+		TransferDocumentToToolchain(doc);
+		win->BuildEditorDocument(run);
+		g.panelVisible = true;
+		g.panelTab = 0;
+		return;
+	}
+	win->BuildEditorDocument(run);
+	g.panelVisible = true;
+	g.panelTab = 0;
+}
+
+void ExecuteCommand(const std::string& id) {
+	if (id == "session.new") {
+		if (m_emu) {
+			m_emu->ResetToMainMenu();
+			g.showWelcome = false;
+			if (g.activeTab < 0 && !g.tabs.empty())
+				g.activeTab = 0;
+			g.lastBuildStatus = "Calculator reset";
+		}
+	}
+	else if (id == "model.open") RequestOpenModel();
+	else if (id == "folder.open") RequestOpenFolder();
+	else if (id == "plugin.install") RequestInstallPlugin();
+	else if (id == "view.sidebar") ToggleSidebar();
+	else if (id == "view.panel") ToggleBottomPanel();
+	else if (id == "view.tools") ToggleTools();
+	else if (id == "view.terminal") FocusTerminal();
+	else if (id == "settings.open") OpenSettings();
+	else if (id == "build") BuildToolchain(false);
+	else if (id == "build.run") BuildToolchain(true);
+	else if (id == "session.pause") { if (m_emu) m_emu->SetPaused(!m_emu->GetPaused()); }
+	else if (id == "session.reset") { if (m_emu) m_emu->ResetToMainMenu(); }
+	else if (id == "plugin.manager") { if (auto* win = FindWindow("Plugin Manager")) { win->BringToFront(); } }
+	else if (id == "theme.vscode-dark-plus") ApplyThemeAndSave("vscode-dark-plus");
+	else if (id == "theme.vscode-dark") ApplyThemeAndSave("vscode-dark");
+	else if (id == "theme.midnight-blue") ApplyThemeAndSave("midnight-blue");
+	else if (id == "theme.solarized") ApplyThemeAndSave("solarized");
+	else if (id == "theme.mono-green") ApplyThemeAndSave("mono-green");
+}
+
+void DrawFlatPanel(const char* name, ImVec2 pos, ImVec2 size, ImVec4 background, ImGuiWindowFlags extra = 0) {
+	ImGui::SetNextWindowPos(pos);
+	ImGui::SetNextWindowSize(size);
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+	ImGui::Begin(name, nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+		ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+		ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking | extra);
+}
+
+void EndFlatPanel() {
+	ImGui::End();
+	ImGui::PopStyleVar(3);
+	ImGui::PopStyleColor();
+}
+
+void BuildQuickFiles() {
+	g.quickFiles.clear();
+	g.quickFilesDirty = false;
+	g.lastWorkspaceForFiles = g.workspace;
+	if (g.workspace.empty())
+		return;
+	std::error_code ec;
+	for (auto it = std::filesystem::recursive_directory_iterator(
+			 g.workspace, std::filesystem::directory_options::skip_permission_denied, ec);
+		 it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+		if (ec)
+			break;
+		if (it.depth() > 8) {
+			it.disable_recursion_pending();
+			continue;
+		}
+		const std::string name = it->path().filename().string();
+		if (!name.empty() && name[0] == '.') {
+			if (it->is_directory())
+				it.disable_recursion_pending();
+			continue;
+		}
+		if (it->is_directory()) {
+			if (name == "build" || name == "node_modules" || name == "third_party")
+				it.disable_recursion_pending();
+			continue;
+		}
+		g.quickFiles.push_back(it->path().string());
+		if (g.quickFiles.size() >= 4000)
+			break;
+	}
+	std::sort(g.quickFiles.begin(), g.quickFiles.end());
+}
+
+void TransferDocumentToToolchain(FileDocument& doc) {
+	UIWindow* wiz = FindWindow("Wiz Compiler");
+	if (!wiz)
+		return;
+	wiz->OpenEditorDocument(doc.path, doc.editor.GetText());
+	wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
+	wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
+}
+
+void RunLintForDocument(FileDocument& doc) {
+	doc.editor.SetErrorMarkers({});
+	doc.problems.clear();
+	doc.lastLintedText = doc.editor.GetText();
+	const std::string target = TargetNameForIndex(doc.targetIndex);
+	std::vector<wiz::LintDiagnostic> results;
+	try {
+		results = wiz::lint_source(doc.lastLintedText, doc.name, target);
+	}
+	catch (const std::exception& error) {
+		DiagLine diag;
+		diag.file = doc.path;
+		diag.severity = 2;
+		diag.text = std::string("linter failed: ") + error.what();
+		diag.code = "linter";
+		g.problems.push_back(diag);
+		g.panelVisible = true;
+		g.panelTab = 1;
+		AppendOutput("[lint] " + doc.name + ": " + error.what());
+		return;
+	}
+	TextEditor::ErrorMarkers markers;
+	g.problems.erase(std::remove_if(g.problems.begin(), g.problems.end(),
+		[&](const DiagLine& line) { return line.file == doc.path || line.file == doc.name; }), g.problems.end());
+	for (const auto& item : results) {
+		EditorProblem problem;
+		problem.line = item.line;
+		problem.column = item.col;
+		problem.end_column = item.end_col;
+		problem.severity = item.severity == wiz::LintSeverity::Error ? 2 :
+			(item.severity == wiz::LintSeverity::Warning ? 1 : 0);
+		problem.message = item.message;
+		problem.code = !item.rule.empty() ? item.rule : item.code;
+		problem.hint = item.hint;
+		doc.problems.push_back(problem);
+		if (item.line > 0)
+			markers[item.line] = problem.message;
+		DiagLine diag;
+		diag.file = doc.path;
+		diag.line = item.line;
+		diag.column = item.col;
+		diag.end_column = item.end_col;
+		diag.severity = problem.severity;
+		diag.text = problem.message;
+		diag.code = problem.code;
+		diag.hint = problem.hint;
+		g.problems.push_back(std::move(diag));
+	}
+	doc.editor.SetErrorMarkers(markers);
+	if (!results.empty()) {
+		int errors = 0;
+		for (const auto& item : doc.problems)
+			errors += item.severity >= 2 ? 1 : 0;
+		g.panelVisible = true;
+		if (errors > 0)
+			g.panelTab = 1;
+	}
+}
+
+bool FileDocumentDirty(const FileDocument& doc) {
+	return doc.editor.GetText() != doc.savedText;
+}
+
+void EraseFileDocument(int index) {
+	if (index < 0 || index >= static_cast<int>(g.files.size()))
+		return;
+	g.activeFile = -1;
+	if (index < static_cast<int>(g.files.size())) {
+		g.files.erase(g.files.begin() + index);
+		if (!g.files.empty())
+			g.activeFile = std::min(index, static_cast<int>(g.files.size()) - 1);
+	}
+	if (g.activeFile < 0)
+		g.showWelcome = true;
+}
+
+void CloseFileDocument(int index) {
+	if (index < 0 || index >= static_cast<int>(g.files.size()))
+		return;
+	if (FileDocumentDirty(*g.files[static_cast<size_t>(index)])) {
+		g.pendingCloseFile = index;
+		g.closeConfirmOpen = true;
+		return;
+	}
+	EraseFileDocument(index);
+}
+
+void SaveFileDocument(FileDocument& doc, const std::string& path) {
+	const std::string target_path = path.empty() ? doc.path : path;
+	std::ofstream output(target_path, std::ios::binary | std::ios::trunc);
+	if (!output) {
+		AppendOutput("[editor] cannot save " + target_path);
+		return;
+	}
+	const std::string text = doc.editor.GetText();
+	output << text;
+	output.close();
+	doc.path = target_path;
+	doc.name = std::filesystem::path(target_path).filename().string();
+	doc.savedText = text;
+	AppendOutput("[editor] saved " + target_path);
+	RunLintForDocument(doc);
+}
 
 void OpenFileInEditor(const std::filesystem::path& path) {
 	if (!WantsEditor(path)) {
@@ -454,281 +724,8 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 	g.files.push_back(std::move(doc));
 	g.activeFile = static_cast<int>(g.files.size()) - 1;
 	g.showWelcome = false;
+	RunLintForDocument(*g.files.back());
 	AppendOutput("[editor] opened " + path.string());
-}
-
-void TransferDocumentToToolchain(FileDocument& doc) {
-	UIWindow* wiz = FindWindow("Wiz Compiler");
-	if (!wiz)
-		return;
-	wiz->OpenEditorDocument(doc.path, doc.editor.GetText());
-	wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
-	wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
-}
-
-void RunLintForDocument(FileDocument& doc) {
-	doc.editor.SetErrorMarkers({});
-	doc.problems.clear();
-	doc.lastLintedText = doc.editor.GetText();
-	const std::string target = TargetNameForIndex(doc.targetIndex);
-	std::vector<wiz::LintDiagnostic> results;
-	try {
-		results = wiz::lint_source(doc.lastLintedText, doc.name, target);
-	}
-	catch (const std::exception& error) {
-		AppendOutput("[lint] " + doc.name + ": " + error.what());
-		return;
-	}
-	TextEditor::ErrorMarkers markers;
-	// Remove this file's previous diagnostics, then publish the new set.
-	g.problems.erase(std::remove_if(g.problems.begin(), g.problems.end(),
-		[&](const DiagLine& line) { return line.file == doc.path || line.file == doc.name; }), g.problems.end());
-	for (const auto& item : results) {
-		EditorProblem problem;
-		problem.line = item.line;
-		problem.column = item.col;
-		problem.severity = item.severity == wiz::LintSeverity::Error ? 2 :
-			(item.severity == wiz::LintSeverity::Warning ? 1 : 0);
-		problem.message = item.rule.empty() ? item.message : item.message + "  [" + item.rule + "]";
-		doc.problems.push_back(problem);
-		if (item.line > 0)
-			markers[item.line] = problem.message;
-		DiagLine diag;
-		diag.file = doc.path;
-		diag.line = item.line;
-		diag.column = item.col;
-		diag.severity = problem.severity;
-		diag.text = problem.message;
-		g.problems.push_back(std::move(diag));
-	}
-	doc.editor.SetErrorMarkers(markers);
-	if (!results.empty()) {
-		int errors = 0;
-		for (const auto& item : doc.problems)
-			errors += item.severity >= 2 ? 1 : 0;
-		g.panelVisible = true;
-		if (errors > 0)
-			g.panelTab = 1;
-	}
-}
-
-void SaveFileDocument(FileDocument& doc, const std::string& path) {
-	const std::string target_path = path.empty() ? doc.path : path;
-	std::ofstream output(target_path, std::ios::binary | std::ios::trunc);
-	if (!output) {
-		AppendOutput("[editor] cannot save " + target_path);
-		return;
-	}
-	const std::string text = doc.editor.GetText();
-	output << text;
-	output.close();
-	doc.path = target_path;
-	doc.name = std::filesystem::path(target_path).filename().string();
-	doc.savedText = text;
-	AppendOutput("[editor] saved " + target_path);
-	RunLintForDocument(doc);
-}
-
-bool FileDocumentDirty(const FileDocument& doc) {
-	return doc.editor.GetText() != doc.savedText;
-}
-
-void EraseFileDocument(int index) {
-	if (index < 0 || index >= static_cast<int>(g.files.size()))
-		return;
-	g.files.erase(g.files.begin() + index);
-	if (g.activeFile >= index)
-		--g.activeFile;
-	if (g.activeFile < 0)
-		g.showWelcome = true;
-}
-
-void CloseFileDocument(int index) {
-	if (index < 0 || index >= static_cast<int>(g.files.size()))
-		return;
-	if (FileDocumentDirty(*g.files[static_cast<size_t>(index)])) {
-		g.pendingCloseFile = index;
-		g.closeConfirmOpen = true;
-		return;
-	}
-	EraseFileDocument(index);
-}
-
-void BuildQuickFiles() {
-	g.quickFiles.clear();
-	g.quickFilesDirty = false;
-	g.lastWorkspaceForFiles = g.workspace;
-	if (g.workspace.empty())
-		return;
-	std::error_code ec;
-	for (auto it = std::filesystem::recursive_directory_iterator(
-			 g.workspace, std::filesystem::directory_options::skip_permission_denied, ec);
-		 it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-		if (ec)
-			break;
-		if (it.depth() > 8) {
-			it.disable_recursion_pending();
-			continue;
-		}
-		const std::string name = it->path().filename().string();
-		if (!name.empty() && name[0] == '.') {
-			if (it->is_directory())
-				it.disable_recursion_pending();
-			continue;
-		}
-		if (it->is_directory()) {
-			const std::string lower = name;
-			if (lower == "build" || lower == "node_modules" || lower == "third_party")
-				it.disable_recursion_pending();
-			continue;
-		}
-		g.quickFiles.push_back(it->path().string());
-		if (g.quickFiles.size() >= 4000)
-			break;
-	}
-	std::sort(g.quickFiles.begin(), g.quickFiles.end());
-}
-
-bool MatchesFilter(const std::string& text, const std::string& filter) {
-	if (filter.empty())
-		return true;
-	std::string needle;
-	for (char ch : filter)
-		needle.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-	std::string haystack;
-	for (char ch : text)
-		haystack.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-	return haystack.find(needle) != std::string::npos;
-}
-
-void SetWorkspace(const std::string& folder) {
-	g.workspace = folder;
-	g.expanded.clear();
-	g.quickFilesDirty = true;
-	auto& data = SettingsStore::Instance().Data();
-	data.workspace.folder = folder;
-	auto& recents = data.workspace.recentFolders;
-	recents.erase(std::remove(recents.begin(), recents.end(), folder), recents.end());
-	recents.insert(recents.begin(), folder);
-	if (recents.size() > 10)
-		recents.resize(10);
-	SaveLayout();
-	AppendOutput("[workspace] " + (folder.empty() ? std::string("(none)") : folder));
-}
-
-void ApplyThemeAndSave(const std::string& id) {
-	std::string error;
-	if (!ThemeManager::Instance().ApplyThemeByName(id, &error)) {
-		AppendOutput("[theme] " + error);
-		return;
-	}
-	AppendOutput("[theme] " + id);
-}
-
-bool IsWizDocument(const FileDocument& doc);
-
-void BuildToolchain(bool run) {
-	UIWindow* win = FindWindow("Wiz Compiler");
-	if (!win)
-		return;
-	if (g.activeFile >= 0 && g.activeFile < static_cast<int>(g.files.size()) &&
-		IsWizDocument(*g.files[static_cast<size_t>(g.activeFile)])) {
-		FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
-		if (FileDocumentDirty(doc))
-			SaveFileDocument(doc);
-		TransferDocumentToToolchain(doc);
-		win->BuildEditorDocument(run);
-		g.panelVisible = true;
-		g.panelTab = 0;
-		return;
-	}
-	// No source file is active: build the compiler's own editor buffer (the
-	// bundled sample) so Build/Run still work from the toolbar.
-	win->BuildEditorDocument(run);
-	g.panelVisible = true;
-	g.panelTab = 0;
-}
-
-void ExecuteCommand(const std::string& id) {
-	if (id == "session.new") {
-		if (m_emu) {
-			m_emu->ResetToMainMenu();
-			g.showWelcome = false;
-			if (g.activeTab < 0 && !g.tabs.empty())
-				g.activeTab = 0;
-			g.lastBuildStatus = "Calculator reset";
-		}
-	}
-	else if (id == "model.open") RequestOpenModel();
-	else if (id == "folder.open") RequestOpenFolder();
-	else if (id == "plugin.install") RequestInstallPlugin();
-	else if (id == "view.sidebar") ToggleSidebar();
-	else if (id == "view.panel") ToggleBottomPanel();
-	else if (id == "view.tools") ToggleTools();
-	else if (id == "view.terminal") FocusTerminal();
-	else if (id == "settings.open") OpenSettings();
-	else if (id == "build") BuildToolchain(false);
-	else if (id == "build.run") BuildToolchain(true);
-	else if (id == "session.pause") { if (m_emu) m_emu->SetPaused(!m_emu->GetPaused()); }
-	else if (id == "session.reset") { if (m_emu) m_emu->ResetToMainMenu(); }
-	else if (id == "plugin.manager") { if (auto* win = FindWindow("Plugin Manager")) { win->BringToFront(); g.toolsVisible = true; } }
-	else if (id == "theme.vscode-dark") ApplyThemeAndSave("vscode-dark");
-	else if (id == "theme.vscode-light") ApplyThemeAndSave("vscode-light");
-	else if (id == "theme.midnight-blue") ApplyThemeAndSave("midnight-blue");
-	else if (id == "theme.solarized") ApplyThemeAndSave("solarized");
-	else if (id == "theme.mono-green") ApplyThemeAndSave("mono-green");
-}
-
-std::vector<PaletteCommand> Commands() {
-	return {
-		{ "session.new", "Session: New Calculator", "Ctrl+N" },
-		{ "model.open", "File: Open Model...", "Ctrl+O" },
-		{ "folder.open", "File: Open Folder...", "Ctrl+Shift+O" },
-		{ "plugin.install", "Plugins: Install Plugin...", "" },
-		{ "plugin.manager", "Plugins: Open Plugin Manager", "" },
-		{ "view.sidebar", "View: Toggle Sidebar", "Ctrl+B" },
-		{ "view.panel", "View: Toggle Bottom Panel", "Ctrl+J" },
-		{ "view.tools", "View: Toggle Calculator Panel", "" },
-		{ "view.terminal", "Terminal: Focus Terminal", "Ctrl+`" },
-		{ "settings.open", "Preferences: Open Settings", "Ctrl+," },
-		{ "session.pause", "Session: Pause / Resume", "" },
-		{ "session.reset", "Session: Reset", "" },
-		{ "build", "Build: Build", "F7" },
-		{ "build.run", "Build: Build & Run", "F5" },
-		{ "theme.vscode-dark", "Preferences: Color Theme - VS Code Dark Modern", "" },
-		{ "theme.vscode-light", "Preferences: Color Theme - VS Code Light Modern", "" },
-		{ "theme.midnight-blue", "Preferences: Color Theme - Midnight Blue", "" },
-		{ "theme.solarized", "Preferences: Color Theme - Solarized", "" },
-		{ "theme.mono-green", "Preferences: Color Theme - Mono Green", "" },
-	};
-}
-
-void DrawFlatPanel(const char* name, ImVec2 pos, ImVec2 size, ImVec4 background, ImGuiWindowFlags extra = 0) {
-	ImGui::SetNextWindowPos(pos);
-	ImGui::SetNextWindowSize(size);
-	ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-	ImGui::Begin(name, nullptr,
-		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-		ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-		ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
-		ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking | extra);
-}
-
-void EndFlatPanel() {
-	ImGui::End();
-	ImGui::PopStyleVar(3);
-	ImGui::PopStyleColor();
-}
-
-void DrawSeparatorH(float x0, float x1, float y, ImU32 color) {
-	ImGui::GetWindowDrawList()->AddLine(ImVec2(x0, y), ImVec2(x1, y), color, 1.0f);
-}
-
-void DrawSeparatorV(float x, float y0, float y1, ImU32 color) {
-	ImGui::GetWindowDrawList()->AddLine(ImVec2(x, y0), ImVec2(x, y1), color, 1.0f);
 }
 
 void RenderTitleBar(const ThemePalette& palette) {
@@ -736,21 +733,17 @@ void RenderTitleBar(const ThemePalette& palette) {
 	const ImVec2 pos = viewport->Pos;
 	const float width = viewport->Size.x;
 	DrawFlatPanel("##ShellTitle", pos, ImVec2(width, kTitleBarHeight), palette.titleBar);
-
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	draw->AddLine(ImVec2(pos.x, pos.y + kTitleBarHeight - 1.0f),
 		ImVec2(pos.x + width, pos.y + kTitleBarHeight - 1.0f),
 		ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
 
-	// Native traffic lights live at x 0..78.  Start the app title just after
-	// them (12 px padding) so the chrome does not look empty.
 	const float traffic = 82.0f;
 	const float line_height = ImGui::GetTextLineHeight();
-	const float text_y = pos.y + (kTitleBarHeight - line_height) * 0.5f;
+	const float text_y = pos.y + 8.0f;
 	draw->AddText(ImVec2(pos.x + traffic + 12.0f, text_y),
 		ImGui::ColorConvertFloat4ToU32(palette.foreground), "CasioEmuMsvc");
 
-	// Original-style menu labels (native menu remains the real command host).
 	const char* menues[] = { "File", "View", "Session" };
 	float menu_x = pos.x + traffic + 12.0f + TextWidth("CasioEmuMsvc") + 18.0f;
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
@@ -758,7 +751,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
 	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 3.0f));
 	for (const char* menu : menues) {
-		ImGui::SetCursorScreenPos(ImVec2(menu_x, pos.y + 5.0f));
+		ImGui::SetCursorScreenPos(ImVec2(menu_x, pos.y + 6.0f));
 		ImGui::PushID(menu);
 		if (ImGui::Button(menu, ImVec2(0, 25))) {
 			if (std::strcmp(menu, "File") == 0)
@@ -771,7 +764,6 @@ void RenderTitleBar(const ThemePalette& palette) {
 		if (ImGui::BeginPopup("##file_menu")) {
 			if (ImGui::MenuItem("Open Model...")) RequestOpenModel();
 			if (ImGui::MenuItem("Open Folder...")) RequestOpenFolder();
-			if (ImGui::MenuItem("Settings...")) OpenSettings();
 			ImGui::Separator();
 			if (ImGui::MenuItem("Quit")) g.quitRequested = true;
 			ImGui::EndPopup();
@@ -796,34 +788,39 @@ void RenderTitleBar(const ThemePalette& palette) {
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor(3);
 
-	// Right-hand toolbar: build, run, pause, settings.
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + width - 360.0f, pos.y + 4.0f));
+	// Right-aligned actions, 12 px from the content edge, vertically centred.
+	const float build_w = UIHelpers::ButtonWidth("Build");
+	const float run_w = UIHelpers::ButtonWidth("Run");
+	const float pause_w = UIHelpers::ButtonWidth(m_emu && m_emu->GetPaused() ? "Resume" : "Pause");
+	const float palette_w = UIHelpers::ButtonWidth("Palette");
+	float actions_width = pause_w + 8.0f + palette_w;
+	if (g.activeFile < 0)
+		actions_width += build_w + 8.0f + run_w + 8.0f;
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + width - actions_width - 12.0f, pos.y + 6.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.selection);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
 	if (g.activeFile < 0) {
-		// The file editor owns Build/Build & Run in its own overlay.
-		if (ImGui::Button("Build", ImVec2(48, 26)))
+		if (ImGui::Button("Build", ImVec2(build_w, 26)))
 			BuildToolchain(false);
 		ImGui::SameLine();
-		if (ImGui::Button("Run", ImVec2(42, 26)))
+		if (ImGui::Button("Run", ImVec2(run_w, 26)))
 			BuildToolchain(true);
 		ImGui::SameLine();
 	}
-	if (ImGui::Button(m_emu && m_emu->GetPaused() ? "Resume" : "Pause", ImVec2(60, 26))) {
+	if (ImGui::Button(m_emu && m_emu->GetPaused() ? "Resume" : "Pause", ImVec2(pause_w, 26))) {
 		if (m_emu)
 			m_emu->SetPaused(!m_emu->GetPaused());
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("Palette", ImVec2(62, 26)))
+	if (ImGui::Button("Palette", ImVec2(palette_w, 26)))
 		OpenCommandPalette();
 	ImGui::PopStyleColor(4);
 
-	// Drag the window by the title bar.  Skip the command centre and buttons.
 	const ImVec2 mouse = ImGui::GetIO().MousePos;
 	const bool in_drag_zone = mouse.y >= pos.y && mouse.y < pos.y + kTitleBarHeight &&
-		mouse.x > pos.x + traffic && mouse.x < pos.x + width - 310.0f;
+		mouse.x > pos.x + traffic && mouse.x < pos.x + width - actions_width - 20.0f;
 	if (in_drag_zone && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsAnyItemHovered()) {
 		g.draggingWindow = true;
 		int mx = 0, my = 0;
@@ -832,21 +829,20 @@ void RenderTitleBar(const ThemePalette& palette) {
 		int wx = 0, wy = 0;
 		if (window)
 			SDL_GetWindowPosition(window, &wx, &wy);
-		g.dragStartWindow = ImVec2(static_cast<float>(wx), static_cast<float>(wy));
+		g.dragStartWindow = ImVec2((float)wx, (float)wy);
 	}
 	if (g.draggingWindow) {
 		if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && window) {
 			int mx = 0, my = 0;
 			SDL_GetGlobalMouseState(&mx, &my);
 			SDL_SetWindowPosition(window,
-				static_cast<int>(g.dragStartWindow.x + (mx - g.dragStartMouse.x)),
-				static_cast<int>(g.dragStartWindow.y + (my - g.dragStartMouse.y)));
+				(int)(g.dragStartWindow.x + (mx - g.dragStartMouse.x)),
+				(int)(g.dragStartWindow.y + (my - g.dragStartMouse.y)));
 		}
 		else {
 			g.draggingWindow = false;
 		}
 	}
-
 	EndFlatPanel();
 }
 
@@ -855,55 +851,73 @@ void RenderTabStrip(const ThemePalette& palette) {
 	const ImVec2 pos(viewport->Pos.x, viewport->Pos.y + kTitleBarHeight);
 	const float width = viewport->Size.x;
 	DrawFlatPanel("##ShellTabs", pos, ImVec2(width, kTabStripHeight), palette.surface);
-	const bool small = g_small_font != nullptr;
-	if (small)
-		ImGui::PushFont(g_small_font);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	draw->AddLine(ImVec2(pos.x, pos.y + kTabStripHeight - 1.0f),
 		ImVec2(pos.x + width, pos.y + kTabStripHeight - 1.0f),
 		ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
-
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + 8.0f, pos.y + 4.0f));
-	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
-	ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.selection);
-
-	auto tab_at = [&](int index) -> SessionTab* {
-		if (index < 0 || index >= static_cast<int>(g.tabs.size()))
-			return nullptr;
-		return &g.tabs[static_cast<size_t>(index)];
+	float x = pos.x + 8.0f;
+	auto draw_tab_text = [&](const ImVec2& min, const ImVec2& max, const std::string& label,
+			bool active, bool hovered, bool dirty) {
+		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(active ? palette.tabActive :
+			(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
+		draw->AddLine(ImVec2(max.x - 1.0f, min.y + 5.0f), ImVec2(max.x - 1.0f, max.y - 5.0f),
+			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
+		if (active)
+			draw->AddRectFilled(ImVec2(min.x + 4.0f, min.y), ImVec2(max.x - 4.0f, min.y + 2.0f),
+				ImGui::ColorConvertFloat4ToU32(palette.accent));
+		draw->AddText(ImVec2(min.x + 12.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f),
+			ImGui::ColorConvertFloat4ToU32(active ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
+			label.c_str());
+		if (hovered)
+			draw->AddText(ImVec2(max.x - 20.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f),
+				ImGui::ColorConvertFloat4ToU32(palette.foreground), "x");
+		(void)dirty;
 	};
 
-	const bool welcomeActive = g.showWelcome;
-	float x = pos.x + 8.0f;
-	if (welcomeActive) {
+	if (g.showWelcome) {
 		const char* label = "Welcome";
 		const float tab_width = TextWidth(label) + 34.0f;
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
 		ImGui::InvisibleButton("##welcome_tab", ImVec2(tab_width, kTabStripHeight));
 		if (ImGui::IsItemClicked())
 			g.showWelcome = true;
-		const ImVec2 min = ImGui::GetItemRectMin();
-		const ImVec2 max = ImGui::GetItemRectMax();
-		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(palette.tabActive));
-		draw->AddRectFilled(ImVec2(min.x, min.y), ImVec2(max.x, min.y + 2.0f),
-			ImGui::ColorConvertFloat4ToU32(palette.accent));
-		draw->AddText(ImVec2(min.x + 14.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f),
-			ImGui::ColorConvertFloat4ToU32(palette.foreground), label);
+		draw_tab_text(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), label, true,
+			ImGui::IsItemHovered(), false);
 		x += tab_width;
 	}
 
 	for (int index = 0; index < static_cast<int>(g.tabs.size()); ++index) {
 		SessionTab& tab = g.tabs[static_cast<size_t>(index)];
-		const bool active = (!welcomeActive && g.activeFile < 0 && index == g.activeTab);
+		const bool active = (!g.showWelcome && g.activeFile < 0 && index == g.activeTab);
 		std::string label = tab.title.empty() ? tab.model : tab.title;
-		if (!tab.live)
-			label += "  (not running)";
 		const float tab_width = TextWidth(label.c_str()) + 52.0f;
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
 		ImGui::PushID(index);
 		ImGui::InvisibleButton("##tab", ImVec2(tab_width, kTabStripHeight));
 		const bool hovered = ImGui::IsItemHovered();
+		const ImVec2 min = ImGui::GetItemRectMin();
+		const ImVec2 max = ImGui::GetItemRectMax();
+		const bool close_clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+			ImGui::GetIO().MousePos.x > max.x - 24.0f;
+		if (close_clicked || ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
+			if (index > 0 && tab.live) {
+				session::CloseSession(index);
+				SyncTabsFromSessions();
+			}
+			else if (tab.live) {
+				g.showWelcome = true;
+				g.activeTab = -1;
+				if (m_emu) m_emu->ResetToMainMenu();
+			}
+			else {
+				g.tabs.erase(g.tabs.begin() + index);
+				if (g.activeTab >= index) --g.activeTab;
+				if (g.tabs.empty()) g.activeTab = -1;
+			}
+			SaveSessions();
+			ImGui::PopID();
+			break;
+		}
 		if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 			g.activeTab = index;
 			g.activeFile = -1;
@@ -913,67 +927,7 @@ void RenderTabStrip(const ThemePalette& palette) {
 			else if (!tab.modelPath.empty())
 				OpenModelAt(tab.modelPath);
 		}
-		if (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
-			if (index > 0 && tab.live) {
-				session::CloseSession(index);
-				SyncTabsFromSessions();
-			}
-			else if (tab.live) {
-				g.showWelcome = true;
-				g.activeTab = -1;
-				if (m_emu)
-					m_emu->ResetToMainMenu();
-			}
-			else {
-				g.tabs.erase(g.tabs.begin() + index);
-				if (g.activeTab >= index)
-					--g.activeTab;
-			}
-			SaveSessions();
-			ImGui::PopID();
-			break;
-		}
-		const ImVec2 min = ImGui::GetItemRectMin();
-		const ImVec2 max = ImGui::GetItemRectMax();
-		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(active ? palette.background :
-			(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
-		draw->AddLine(ImVec2(max.x - 1.0f, min.y + 5.0f), ImVec2(max.x - 1.0f, max.y - 5.0f),
-			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
-		if (active) {
-			draw->AddRectFilled(ImVec2(min.x, max.y - 1.0f), ImVec2(max.x, max.y),
-				ImGui::ColorConvertFloat4ToU32(palette.background));
-		}
-		const ImU32 text_color = ImGui::ColorConvertFloat4ToU32(active ? palette.foreground : WithAlpha(palette.foreground, 0.72f));
-		draw->AddText(ImVec2(min.x + 12.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f), text_color, label.c_str());
-		// close button
-		const ImVec2 close_pos(min.x + tab_width - 22.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f);
-		if (hovered) {
-			draw->AddText(close_pos, text_color, "x");
-			ImGui::SetCursorScreenPos(ImVec2(min.x + tab_width - 26.0f, min.y + 4.0f));
-			ImGui::InvisibleButton("##close", ImVec2(22.0f, 22.0f));
-			if (ImGui::IsItemClicked()) {
-				if (index > 0 && tab.live) {
-					session::CloseSession(index);
-					SyncTabsFromSessions();
-				}
-				else if (tab.live) {
-					g.showWelcome = true;
-					g.activeTab = -1;
-					if (m_emu)
-						m_emu->ResetToMainMenu();
-				}
-				else {
-					g.tabs.erase(g.tabs.begin() + index);
-					if (g.activeTab >= index)
-						--g.activeTab;
-					if (g.tabs.empty())
-						g.activeTab = -1;
-				}
-				SaveSessions();
-				ImGui::PopID();
-				break;
-			}
-		}
+		draw_tab_text(min, max, label, active, hovered, false);
 		ImGui::PopID();
 		x += tab_width;
 	}
@@ -981,56 +935,27 @@ void RenderTabStrip(const ThemePalette& palette) {
 	for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
 		FileDocument& doc = *g.files[static_cast<size_t>(index)];
 		const bool active = g.activeFile == index;
-		std::string label = doc.name;
-		if (FileDocumentDirty(doc))
-			label += " *";
+		std::string label = doc.name + (FileDocumentDirty(doc) ? " *" : "");
 		const float tab_width = TextWidth(label.c_str()) + 52.0f;
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
 		ImGui::PushID(1000 + index);
 		ImGui::InvisibleButton("##file_tab", ImVec2(tab_width, kTabStripHeight));
 		const bool hovered = ImGui::IsItemHovered();
-		bool close = false;
+		const ImVec2 min = ImGui::GetItemRectMin();
+		const ImVec2 max = ImGui::GetItemRectMax();
+		const bool close_clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+			ImGui::GetIO().MousePos.x > max.x - 24.0f;
+		if (close_clicked || ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
+			CloseFileDocument(index);
+			ImGui::PopID();
+			break;
+		}
 		if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 			g.activeFile = index;
 			g.showWelcome = false;
 		}
-		if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
-			close = true;
-		const ImVec2 min = ImGui::GetItemRectMin();
-		const ImVec2 max = ImGui::GetItemRectMax();
-		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(active ? palette.background :
-			(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
-		draw->AddLine(ImVec2(max.x - 1.0f, min.y + 6.0f), ImVec2(max.x - 1.0f, max.y - 6.0f),
-			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
-		if (active)
-			draw->AddRectFilled(ImVec2(min.x + 4.0f, min.y), ImVec2(max.x - 4.0f, min.y + 2.0f),
-				ImGui::ColorConvertFloat4ToU32(palette.accent));
-		draw->AddText(ImVec2(min.x + 12.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f),
-			ImGui::ColorConvertFloat4ToU32(active ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
-			label.c_str());
-		if (hovered) {
-			draw->AddText(ImVec2(min.x + tab_width - 20.0f, min.y + (kTabStripHeight - ImGui::GetTextLineHeight()) * 0.5f),
-				ImGui::ColorConvertFloat4ToU32(palette.foreground), "x");
-			ImGui::SetCursorScreenPos(ImVec2(min.x + tab_width - 26.0f, min.y + 4.0f));
-			ImGui::InvisibleButton("##file_close", ImVec2(22.0f, 22.0f));
-			if (ImGui::IsItemClicked())
-				close = true;
-		}
+		draw_tab_text(min, max, label, active, hovered, FileDocumentDirty(doc));
 		ImGui::PopID();
-		if (close) {
-			if (FileDocumentDirty(doc)) {
-				g.pendingCloseFile = index;
-				g.closeConfirmOpen = true;
-			}
-			else {
-				g.files.erase(g.files.begin() + index);
-				if (g.activeFile >= index)
-					--g.activeFile;
-				if (g.activeFile < 0)
-					g.showWelcome = true;
-			}
-			break;
-		}
 		x += tab_width;
 	}
 
@@ -1041,8 +966,6 @@ void RenderTabStrip(const ThemePalette& palette) {
 		g.openModelFocus = true;
 		g.openModelQuery[0] = '\0';
 	}
-	if (small)
-		ImGui::PopFont();
 	EndFlatPanel();
 }
 
@@ -1074,11 +997,16 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 		ImGui::PushStyleColor(ImGuiCol_Header, palette.selection);
 		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, palette.hover);
 		ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-		const bool clicked = ImGui::Selectable((label + "##" + key).c_str(), false,
+		const bool row_selected = g.selectedPath == entry.path();
+		const bool clicked = ImGui::Selectable((label + "##" + key).c_str(), row_selected,
 			ImGuiSelectableFlags_AllowDoubleClick, ImVec2(ImGui::GetContentRegionAvail().x - 6.0f, 0.0f));
-		g.selectedPath = entry.path();
-		g.selectedIsDir = is_directory;
+		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+			g.selectedPath = entry.path();
+			g.selectedIsDir = is_directory;
+		}
 		if (clicked) {
+			g.selectedPath = entry.path();
+			g.selectedIsDir = is_directory;
 			if (is_directory) {
 				if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 					if (g.expanded.count(key))
@@ -1092,6 +1020,8 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 			}
 		}
 		if (ImGui::BeginPopupContextItem("##explorer_context")) {
+			g.selectedPath = entry.path();
+			g.selectedIsDir = is_directory;
 			const std::filesystem::path base = is_directory ? entry.path() : entry.path().parent_path();
 			if (ImGui::MenuItem("New File")) {
 				g.selectedPath = base;
@@ -1134,26 +1064,70 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 
 void RenderSidebar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellSidebar", pos, size, palette.surface);
+	const bool narrow_sidebar = size.x < 286.0f;
+	const float header_height = narrow_sidebar ? 114.0f : 76.0f;
 	ImDrawList* draw = ImGui::GetWindowDrawList();
-	draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + kSidebarHeaderHeight),
+	draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + header_height),
 		ImGui::ColorConvertFloat4ToU32(palette.titleBar));
 	ImGui::SetCursorPos(ImVec2(20.0f, 3.0f));
 	ImGui::TextDisabled("%s", "EXPLORER");
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 186.0f, pos.y + 24.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	if (ImGui::Button("Refresh", ImVec2(66.0f, 18.0f))) {
-		g.quickFilesDirty = true;
-		g.sidebarError.clear();
+	if (narrow_sidebar) {
+		const float button_w = size.x - 32.0f;
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 24.0f));
+		if (ImGui::Button("New File", ImVec2(button_w, 20.0f))) {
+			g.selectedPath = g.workspace;
+			g.selectedIsDir = true;
+			g.entryName[0] = '\0';
+			g.newFileOpen = true;
+		}
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 46.0f));
+		if (ImGui::Button("New Folder", ImVec2(button_w, 20.0f))) {
+			g.selectedPath = g.workspace;
+			g.selectedIsDir = true;
+			g.entryName[0] = '\0';
+			g.newFolderOpen = true;
+		}
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 68.0f));
+		if (ImGui::Button("Refresh", ImVec2(button_w, 20.0f))) {
+			g.quickFilesDirty = true;
+			g.sidebarError.clear();
+		}
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 90.0f));
+		if (ImGui::Button("Open Folder", ImVec2(button_w, 20.0f)))
+			RequestOpenFolder();
 	}
-	ImGui::SameLine();
-	if (ImGui::Button("Open Folder", ImVec2(96.0f, 18.0f)))
-		RequestOpenFolder();
+	else {
+		const float button_w = (size.x - 40.0f) * 0.5f;
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 24.0f));
+		if (ImGui::Button("New File", ImVec2(button_w, 20.0f))) {
+			g.selectedPath = g.workspace;
+			g.selectedIsDir = true;
+			g.entryName[0] = '\0';
+			g.newFileOpen = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("New Folder", ImVec2(button_w, 20.0f))) {
+			g.selectedPath = g.workspace;
+			g.selectedIsDir = true;
+			g.entryName[0] = '\0';
+			g.newFolderOpen = true;
+		}
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 48.0f));
+		if (ImGui::Button("Refresh", ImVec2(button_w, 20.0f))) {
+			g.quickFilesDirty = true;
+			g.sidebarError.clear();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Open Folder", ImVec2(button_w, 20.0f)))
+			RequestOpenFolder();
+	}
 	ImGui::PopStyleColor(3);
 
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + kSidebarHeaderHeight + 3.0f));
-	ImGui::BeginChild("##explorer_body", ImVec2(size.x - 32.0f, size.y - kSidebarHeaderHeight - 14.0f), ImGuiChildFlags_None);
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + header_height + 3.0f));
+	ImGui::BeginChild("##explorer_body", ImVec2(size.x - 32.0f, size.y - header_height - 14.0f), ImGuiChildFlags_None);
 	if (g.workspace.empty()) {
 		ImGui::TextWrapped("You have not yet opened a folder.");
 		ImGui::Spacing();
@@ -1263,6 +1237,7 @@ void RenderWelcome(const ThemePalette& palette) {
 }
 
 std::vector<UIWindow*> ToolWindows();
+void SortToolsByOrder(std::vector<UIWindow*>& tools);
 
 void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellCalculator", pos, size, palette.background);
@@ -1276,7 +1251,7 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	if (ImGui::Button("Hide", ImVec2(44.0f, 20.0f)))
+	if (ImGui::Button("Hide", ImVec2(58.0f, 20.0f)))
 		g.calculatorVisible = false;
 	ImGui::PopStyleColor(3);
 
@@ -1336,25 +1311,25 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 
 	// Row 1: file actions.
 	ImGui::SetCursorPos(ImVec2(8.0f, 6.0f));
-	if (ImGui::Button("Save", ImVec2(52, 24)))
+	if (ImGui::Button("Save"))
 		SaveFileDocument(doc);
 	ImGui::SameLine();
-	if (ImGui::Button("Save As", ImVec2(70, 24))) {
+	if (ImGui::Button("Save As")) {
 		SystemDialogs::SaveFileDialog(doc.name, [&doc](std::filesystem::path path) {
 			SaveFileDocument(doc, path.string());
 		});
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("Find", ImVec2(48, 24)))
+	if (ImGui::Button("Find"))
 		doc.findOpen = !doc.findOpen;
 
 	// Row 2: history and cursor state.
 	const auto cursor = doc.editor.GetCursorPosition();
 	ImGui::SetCursorPos(ImVec2(8.0f, 34.0f));
-	if (ImGui::Button("Undo", ImVec2(50, 24)))
+	if (ImGui::Button("Undo"))
 		doc.editor.Undo();
 	ImGui::SameLine();
-	if (ImGui::Button("Redo", ImVec2(50, 24)))
+	if (ImGui::Button("Redo"))
 		doc.editor.Redo();
 	ImGui::SameLine();
 	ImGui::TextDisabled("Ln %d, Col %d", cursor.mLine + 1, cursor.mColumn + 1);
@@ -1390,10 +1365,10 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 
 		// Row 4: lint and build actions.
 		ImGui::SetCursorPos(ImVec2(8.0f, 90.0f));
-		if (ImGui::Button("Lint", ImVec2(48, 24)))
+		if (ImGui::Button("Lint"))
 			RunLintForDocument(doc);
 		ImGui::SameLine();
-		if (ImGui::Button("Build", ImVec2(54, 24))) {
+		if (ImGui::Button("Build")) {
 			if (FileDocumentDirty(doc))
 				SaveFileDocument(doc);
 			TransferDocumentToToolchain(doc);
@@ -1403,7 +1378,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			g.panelTab = 0;
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Build & Run", ImVec2(96, 24))) {
+		if (ImGui::Button("Build & Run")) {
 			if (FileDocumentDirty(doc))
 				SaveFileDocument(doc);
 			TransferDocumentToToolchain(doc);
@@ -1413,7 +1388,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			g.panelTab = 0;
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Preprocess", ImVec2(92, 24))) {
+		if (ImGui::Button("Preprocess")) {
 			TransferDocumentToToolchain(doc);
 			if (UIWindow* wiz = FindWindow("Wiz Compiler"))
 				wiz->PreprocessEditorDocument();
@@ -1453,7 +1428,8 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 
 void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellDocuments", pos, size, palette.background);
-	const auto tools = ToolWindows();
+	auto tools = ToolWindows();
+	SortToolsByOrder(tools);
 	if (tools.empty()) {
 		RenderWelcome(palette);
 		EndFlatPanel();
@@ -1463,6 +1439,12 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		if (tools[index]->bring_to_front_requested) {
 			g.toolIndex = index;
 			tools[index]->bring_to_front_requested = false;
+		}
+	}
+	if (const char* requested = std::getenv("CASIOEMU_TOOL_NAME")) {
+		for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
+			if (std::strcmp(tools[index]->name, requested) == 0)
+				g.toolIndex = index;
 		}
 	}
 	if (!g.pendingTool.empty()) {
@@ -1495,12 +1477,21 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
 		const char* label = tools[index]->name;
 		const float tab_width = ImGui::CalcTextSize(label).x + 30.0f;
+		// Do not paint partially visible tabs; the scrollbar reaches them.
+		if (index != g.toolIndex && (x + tab_width > size.x - 4.0f || x + tab_width < 4.0f)) {
+			x += tab_width + 1.0f;
+			continue;
+		}
 		ImGui::SetCursorPos(ImVec2(x, 0.0f));
 		ImGui::PushID(index);
 		ImGui::InvisibleButton("##doc_tab", ImVec2(tab_width, 26.0f));
 		const bool hovered = ImGui::IsItemHovered();
 		if (ImGui::IsItemClicked())
 			g.toolIndex = index;
+		if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
+			g.draggingTool = index;
+		if (g.draggingTool >= 0 && hovered && g.draggingTool != index)
+			g.dragTargetTool = index;
 		const ImVec2 min = ImGui::GetItemRectMin();
 		const ImVec2 max = ImGui::GetItemRectMax();
 		const bool selected = index == g.toolIndex;
@@ -1514,26 +1505,48 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		draw->AddText(ImVec2(min.x + 15.0f, min.y + (26.0f - ImGui::GetTextLineHeight()) * 0.5f),
 			ImGui::ColorConvertFloat4ToU32(selected ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
 			label);
+		if (selected && (x < 6.0f - doc_scroll || x + tab_width > 6.0f - doc_scroll + size.x - 16.0f))
+			doc_scroll = std::clamp(x - 6.0f, 0.0f, max_scroll);
 		ImGui::PopID();
 		x += tab_width + 1.0f;
 	}
-	// Fixed scroll controls stay above the tabs so every full label is
-	// reachable without truncating the text.
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 64.0f, pos.y + 1.0f));
-	ImGui::InvisibleButton("##doc_left", ImVec2(30.0f, 24.0f));
-	if (ImGui::IsItemClicked())
-		doc_scroll = std::max(0.0f, doc_scroll - 140.0f);
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 32.0f, pos.y + 1.0f));
-	ImGui::InvisibleButton("##doc_right", ImVec2(30.0f, 24.0f));
-	if (ImGui::IsItemClicked())
-		doc_scroll = std::min(max_scroll, doc_scroll + 140.0f);
-	draw->AddRectFilled(ImVec2(pos.x + size.x - 66.0f, pos.y + 1.0f),
-		ImVec2(pos.x + size.x - 2.0f, pos.y + 25.0f),
-		ImGui::ColorConvertFloat4ToU32(palette.surface));
-	draw->AddText(ImVec2(pos.x + size.x - 54.0f, pos.y + 5.0f),
-		ImGui::ColorConvertFloat4ToU32(palette.foreground), "<");
-	draw->AddText(ImVec2(pos.x + size.x - 22.0f, pos.y + 5.0f),
-		ImGui::ColorConvertFloat4ToU32(palette.foreground), ">");
+	if (g.draggingTool >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+		if (g.dragTargetTool >= 0 && g.dragTargetTool != g.draggingTool &&
+			g.draggingTool < static_cast<int>(tools.size()) && g.dragTargetTool < static_cast<int>(tools.size())) {
+			const std::string moved = tools[static_cast<size_t>(g.draggingTool)]->name;
+			const std::string target = tools[static_cast<size_t>(g.dragTargetTool)]->name;
+			auto moved_it = std::find(g.toolOrder.begin(), g.toolOrder.end(), moved);
+			auto target_it = std::find(g.toolOrder.begin(), g.toolOrder.end(), target);
+			if (moved_it != g.toolOrder.end() && target_it != g.toolOrder.end())
+				std::iter_swap(moved_it, target_it);
+			g.toolIndex = g.dragTargetTool;
+		}
+		g.draggingTool = -1;
+		g.dragTargetTool = -1;
+	}
+
+	// Horizontal scrollbar for the document strip (no mystery arrow buttons).
+	const float viewport_width = size.x;
+	if (max_scroll > 0.0f) {
+		const float track_x = pos.x + 8.0f;
+		const float track_w = std::max(40.0f, size.x - 16.0f);
+		const float thumb_w = std::max(32.0f, track_w * (viewport_width / total_width));
+		const float thumb_x = track_x + (doc_scroll / max_scroll) * (track_w - thumb_w);
+		const float bar_y = pos.y + 26.0f;
+		draw->AddRectFilled(ImVec2(track_x, bar_y), ImVec2(track_x + track_w, bar_y + 3.0f),
+			ImGui::ColorConvertFloat4ToU32(palette.border));
+		draw->AddRectFilled(ImVec2(thumb_x, bar_y), ImVec2(thumb_x + thumb_w, bar_y + 3.0f),
+			ImGui::ColorConvertFloat4ToU32(palette.muted));
+		ImGui::SetCursorScreenPos(ImVec2(track_x, bar_y - 1.0f));
+		ImGui::InvisibleButton("##doc_scrollbar", ImVec2(track_w, 6.0f));
+		if (ImGui::IsItemActive()) {
+			const float t = std::clamp((ImGui::GetIO().MousePos.x - track_x - thumb_w * 0.5f) /
+				std::max(1.0f, track_w - thumb_w), 0.0f, 1.0f);
+			doc_scroll = t * max_scroll;
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+	}
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
 
@@ -1575,45 +1588,106 @@ void RenderOutputTab() {
 
 void RenderProblemsTab() {
 	ImGui::BeginChild("##problems_body", ImVec2(0, 0), ImGuiChildFlags_None);
-	ImGui::Indent(10.0f);
-	if (g.problems.empty()) {
-		ImGui::TextDisabled("No problems have been detected in the workspace.");
-	}
+	int errors = 0, warnings = 0, notes = 0;
 	for (const auto& problem : g.problems) {
-		const ImVec4 color = problem.severity >= 2 ? ImVec4(0.945f, 0.298f, 0.298f, 1.0f)
-			: (problem.severity == 1 ? ImVec4(0.8f, 0.655f, 0.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-		const std::string label = problem.file.empty()
-			? problem.text
-			: (problem.file + ":" + std::to_string(problem.line) + ":" + std::to_string(problem.column) + "  " + problem.text);
-		ImGui::TextColored(color, "%s", label.c_str());
-		if (ImGui::IsItemClicked()) {
-			if (!problem.file.empty()) {
-				int target = -1;
-				for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
-					if (g.files[static_cast<size_t>(index)]->path == problem.file ||
-						g.files[static_cast<size_t>(index)]->name == problem.file) {
-						target = index;
-						break;
-					}
-				}
-				if (target < 0) {
-					std::error_code ec;
-					if (std::filesystem::is_regular_file(problem.file, ec)) {
-						OpenFileInEditor(problem.file);
-						target = g.activeFile;
-					}
-				}
-				if (target >= 0) {
-					g.activeFile = target;
-					FileDocument& doc = *g.files[static_cast<size_t>(target)];
-					if (problem.line > 0)
-						doc.editor.SetCursorPosition(TextEditor::Coordinates(problem.line - 1,
-							std::max(0, problem.column - 1)));
-				}
+		errors += problem.severity >= 2 ? 1 : 0;
+		warnings += problem.severity == 1 ? 1 : 0;
+		notes += problem.severity == 0 ? 1 : 0;
+	}
+	ImGui::SetCursorPosX(10.0f);
+	ImGui::TextDisabled("%d errors, %d warnings, %d notes", errors, warnings, notes);
+	ImGui::Spacing();
+	auto activate = [](const DiagLine& problem) {
+		int target = -1;
+		for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
+			if (g.files[static_cast<size_t>(index)]->path == problem.file ||
+				g.files[static_cast<size_t>(index)]->name == problem.file) {
+				target = index;
+				break;
 			}
 		}
+		if (target < 0) {
+			std::error_code ec;
+			if (std::filesystem::is_regular_file(problem.file, ec)) {
+				OpenFileInEditor(problem.file);
+				target = g.activeFile;
+			}
+		}
+		if (target >= 0) {
+			g.activeFile = target;
+			FileDocument& doc = *g.files[static_cast<size_t>(target)];
+			if (problem.line > 0)
+				doc.editor.SetCursorPosition(TextEditor::Coordinates(problem.line - 1,
+					std::max(0, problem.column - 1)));
+		}
+	};
+	auto color = [](int severity) {
+		return severity >= 2 ? ImVec4(0.945f, 0.298f, 0.298f, 1.0f)
+			: (severity == 1 ? ImVec4(0.8f, 0.655f, 0.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+	};
+	if (ImGui::GetContentRegionAvail().x < 700.0f) {
+		// Narrow editor column: two-line rows avoid horizontal clipping.
+		for (const auto& problem : g.problems) {
+			ImGui::PushID(&problem);
+			ImGui::SetCursorPosX(10.0f);
+			ImGui::TextColored(color(problem.severity), "%s", problem.severity >= 2 ? "Error" :
+				(problem.severity == 1 ? "Warning" : "Note"));
+			ImGui::SameLine();
+			ImGui::TextDisabled("%s", problem.code.empty() ? "-" : problem.code.c_str());
+			ImGui::SetCursorPosX(22.0f);
+			ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 10.0f);
+			ImGui::TextWrapped("%s", problem.text.c_str());
+			ImGui::PopTextWrapPos();
+			if (ImGui::IsItemHovered() && !problem.hint.empty())
+				ImGui::SetTooltip("%s", problem.hint.c_str());
+			if (ImGui::IsItemClicked())
+				activate(problem);
+			ImGui::SetCursorPosX(22.0f);
+			if (!problem.file.empty()) {
+				ImGui::TextDisabled("%s:%d:%d", std::filesystem::path(problem.file).filename().string().c_str(),
+					problem.line, problem.column);
+				if (ImGui::IsItemClicked())
+					activate(problem);
+			}
+			ImGui::Separator();
+			ImGui::PopID();
+		}
 	}
-	ImGui::Unindent(10.0f);
+	else if (ImGui::BeginTable("##problems_table", 4,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
+		ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+		ImGui::TableSetupColumn("Code", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+		ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+		ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+		ImGui::TableHeadersRow();
+		for (const auto& problem : g.problems) {
+			ImGui::TableNextRow();
+			bool clicked = false;
+			ImGui::TableNextColumn();
+			ImGui::TextColored(color(problem.severity), "%s", problem.severity >= 2 ? "Error" :
+				(problem.severity == 1 ? "Warning" : "Note"));
+			clicked |= ImGui::IsItemClicked();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(problem.code.empty() ? "-" : problem.code.c_str());
+			clicked |= ImGui::IsItemClicked();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(problem.text.c_str());
+			if (ImGui::IsItemHovered() && !problem.hint.empty())
+				ImGui::SetTooltip("%s", problem.hint.c_str());
+			clicked |= ImGui::IsItemClicked();
+			ImGui::TableNextColumn();
+			if (!problem.file.empty())
+				ImGui::Text("%s:%d:%d", std::filesystem::path(problem.file).filename().string().c_str(),
+					problem.line, problem.column);
+			else
+				ImGui::TextDisabled("-");
+			clicked |= ImGui::IsItemClicked();
+			if (clicked && !problem.file.empty())
+				activate(problem);
+		}
+		ImGui::EndTable();
+	}
 	ImGui::EndChild();
 }
 
@@ -1628,7 +1702,8 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	const char* tabs[] = { "OUTPUT", "PROBLEMS", "TERMINAL" };
 	float x = pos.x + 12.0f;
 	for (int index = 0; index < 3; ++index) {
-		const float width = TextWidth(tabs[index]) + 26.0f;
+		const float width = TextWidth(tabs[index]) + 26.0f +
+			((index == 1 && !g.problems.empty()) ? 34.0f : 0.0f);
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
 		ImGui::PushID(index);
 		ImGui::InvisibleButton("##paneltab", ImVec2(width, kPanelHeaderHeight));
@@ -1653,7 +1728,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			ImGui::ColorConvertFloat4ToU32(g.panelTab == index ? palette.foreground : palette.muted), tabs[index]);
 		if (index == 1 && !g.problems.empty()) {
 			const std::string count = std::to_string(g.problems.size());
-			draw->AddText(ImVec2(min.x + width - 18.0f, min.y + 10.0f),
+			draw->AddText(ImVec2(min.x + width - 24.0f, min.y + (kPanelHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f),
 				ImGui::ColorConvertFloat4ToU32(palette.error), count.c_str());
 		}
 		ImGui::PopID();
@@ -1665,7 +1740,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	if (ImGui::Button("Close##panel_close", ImVec2(60, 22)))
+	if (ImGui::Button("Close##panel_close", ImVec2(70, 22)))
 		g.panelVisible = false;
 	ImGui::PopStyleColor(3);
 
@@ -1685,8 +1760,14 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	ImGui::EndChild();
 
 	// resize grip along the top edge
-	ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y - 2.0f));
-	ImGui::InvisibleButton("##panel_resize", ImVec2(size.x, 5.0f));
+	ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y - 3.0f));
+	ImGui::InvisibleButton("##panel_resize", ImVec2(size.x, 6.0f));
+	ImGui::GetWindowDrawList()->AddLine(ImVec2(pos.x, pos.y - 1.0f),
+		ImVec2(pos.x + size.x, pos.y - 1.0f), ImGui::ColorConvertFloat4ToU32(palette.borderStrong), 1.0f);
+	if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+		ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+		g.panelHeight = 200.0f;
 	if (ImGui::IsItemActive()) {
 		g.panelHeight = std::clamp(g.panelHeight - ImGui::GetIO().MouseDelta.y,
 			80.0f, ImGui::GetMainViewport()->Size.y * 0.6f);
@@ -1718,10 +1799,16 @@ void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	char pc[32];
 	std::snprintf(pc, sizeof(pc), "PC %05X", pc_cache);
 	item(pc, fg);
-	item(g.lastBuildStatus.c_str(), fg);
-	std::string right = "UTF-8   " +
-		SettingsStore::Instance().Data().language + "   " +
-		ThemeManager::Instance().CurrentThemeName();
+	if (!g.problems.empty()) {
+		char counts[64];
+		std::snprintf(counts, sizeof(counts), "Errors: %d  Warnings: %d",
+			(int)std::count_if(g.problems.begin(), g.problems.end(), [](const DiagLine& d) { return d.severity >= 2; }),
+			(int)std::count_if(g.problems.begin(), g.problems.end(), [](const DiagLine& d) { return d.severity == 1; }));
+		const float counts_w = TextWidth(counts);
+		draw->AddText(ImVec2(pos.x + size.x * 0.45f - counts_w * 0.5f, pos.y + 2.0f), fg, counts);
+	}
+	std::string right = SettingsStore::Instance().Data().language + "  |  " +
+		ThemeManager::Instance().CurrentThemeName() + "  |  build " CASIOEMU_BUILD_COMMIT " " CASIOEMU_BUILD_TIME;
 	const float right_width = TextWidth(right.c_str());
 	draw->AddText(ImVec2(pos.x + size.x - right_width - 10.0f, pos.y + 2.0f), fg, right.c_str());
 	if (small)
@@ -1742,12 +1829,48 @@ std::vector<UIWindow*> ToolWindows() {
 	return tools;
 }
 
+void SortToolsByOrder(std::vector<UIWindow*>& tools) {
+	for (const auto* tool : tools) {
+		if (std::find(g.toolOrder.begin(), g.toolOrder.end(), tool->name) == g.toolOrder.end())
+			g.toolOrder.push_back(tool->name);
+	}
+	std::sort(tools.begin(), tools.end(), [](const UIWindow* lhs, const UIWindow* rhs) {
+		const auto left = std::find(g.toolOrder.begin(), g.toolOrder.end(), lhs->name);
+		const auto right = std::find(g.toolOrder.begin(), g.toolOrder.end(), rhs->name);
+		return left < right;
+	});
+}
+
 
 void ExecutePaletteSelection(const std::string& id) {
 	ExecuteCommand(id);
 	g.paletteOpen = false;
 	g.quickOpen = false;
 	g.paletteQuery[0] = '\0';
+}
+
+std::vector<PaletteCommand> Commands() {
+	return {
+		{ "session.new", "Session: New Calculator", "" },
+		{ "model.open", "File: Open Model...", "" },
+		{ "folder.open", "File: Open Folder...", "" },
+		{ "plugin.install", "Plugins: Install Plugin...", "" },
+		{ "plugin.manager", "Plugins: Open Plugin Manager", "" },
+		{ "view.sidebar", "View: Toggle Sidebar", "" },
+		{ "view.panel", "View: Toggle Bottom Panel", "" },
+		{ "view.tools", "View: Toggle Calculator Panel", "" },
+		{ "view.terminal", "Terminal: Focus Terminal", "" },
+		{ "settings.open", "Preferences: Open Settings", "" },
+		{ "session.pause", "Session: Pause / Resume", "" },
+		{ "session.reset", "Session: Reset", "" },
+		{ "build", "Build: Build", "" },
+		{ "build.run", "Build: Build & Run", "" },
+		{ "theme.vscode-dark-plus", "Preferences: Color Theme - VS Code Dark+ (classic)", "" },
+		{ "theme.vscode-dark", "Preferences: Color Theme - VS Code Dark Modern", "" },
+		{ "theme.midnight-blue", "Preferences: Color Theme - Midnight Blue", "" },
+		{ "theme.solarized", "Preferences: Color Theme - Solarized", "" },
+		{ "theme.mono-green", "Preferences: Color Theme - Mono Green", "" },
+	};
 }
 
 void RenderOverlays(const ThemePalette& palette) {
@@ -2094,6 +2217,13 @@ void RenderLayout() {
 		ImGui::Begin("##sidebar_grip", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground);
 		ImGui::InvisibleButton("##grip", ImVec2(4.0f, body_h));
+		ImGui::GetWindowDrawList()->AddLine(ImVec2(ImGui::GetWindowPos().x + 2.0f, ImGui::GetWindowPos().y),
+			ImVec2(ImGui::GetWindowPos().x + 2.0f, ImGui::GetWindowPos().y + body_h),
+			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
+		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+		if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			g.sidebarWidth = 300.0f;
 		if (ImGui::IsItemActive()) {
 			g.sidebarWidth = std::clamp(g.sidebarWidth + ImGui::GetIO().MouseDelta.x, 200.0f, width * 0.45f);
 			SaveLayoutThrottled();
@@ -2108,6 +2238,13 @@ void RenderLayout() {
 		ImGui::Begin("##calculator_grip", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground);
 		ImGui::InvisibleButton("##grip", ImVec2(4.0f, body_h));
+		ImGui::GetWindowDrawList()->AddLine(ImVec2(ImGui::GetWindowPos().x + 2.0f, ImGui::GetWindowPos().y),
+			ImVec2(ImGui::GetWindowPos().x + 2.0f, ImGui::GetWindowPos().y + body_h),
+			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
+		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+		if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			g.calculatorWidth = 360.0f;
 		if (ImGui::IsItemActive()) {
 			g.calculatorWidth = std::clamp(g.calculatorWidth - ImGui::GetIO().MouseDelta.x, 260.0f, width * 0.6f);
 			SaveLayoutThrottled();
@@ -2365,6 +2502,11 @@ bool WriteLayoutReport(const std::string& path) {
 			ok = false;
 	};
 	output << "sessions=" << session::Count() << " tabs=" << g.tabs.size() << '\n';
+	if (g.activeFile < 0) {
+		const auto tools = ToolWindows();
+		if (!tools.empty())
+			output << "tool=" << tools[static_cast<size_t>(std::clamp(g.toolIndex, 0, (int)tools.size() - 1))]->name << '\n';
+	}
 	output << "viewport " << rect_text(g.rectViewport) << '\n';
 	output << "title " << rect_text(g.rectTitle) << '\n';
 	output << "tabs " << rect_text(g.rectTabs) << '\n';
@@ -2553,6 +2695,27 @@ void Render() {
 				}
 			}
 		}
+		if (frame == 20) {
+			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
+			const std::filesystem::path directory = root && *root
+				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+			const auto cwiz = directory / "lint-errors.cwiz";
+			const auto wiz = directory / "lint-warnings.wz";
+			{
+				std::ofstream file(cwiz, std::ios::binary | std::ios::trunc);
+				file << "#cwapp\nint main( {\n  unknown_value = ;\n}\n";
+			}
+			{
+				std::ofstream file(wiz, std::ios::binary | std::ios::trunc);
+				file << "#org 0xE000\nint value = 1;\n";
+			}
+			OpenFileInEditor(cwiz);
+			RunLintForDocument(*g.files.back());
+			OpenFileInEditor(wiz);
+			RunLintForDocument(*g.files.back());
+			g.panelVisible = true;
+			g.panelTab = 1;
+		}
 		if (frame == 24) {
 			FocusTerminal();
 			terminal_started = true;
@@ -2582,6 +2745,8 @@ void Render() {
 		}
 	}
 
+	if (const char* panel = std::getenv("CASIOEMU_PANEL_TAB"))
+		g.panelTab = std::clamp(std::atoi(panel), 0, 2);
 	calculator_panel_focused = false;
 	RenderLayout();
 }

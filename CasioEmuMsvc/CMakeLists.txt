@@ -401,6 +401,12 @@ endif()
 target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_INCLUDE_DIRS})
 target_include_directories(${TARGET_NAME} BEFORE PRIVATE "${ONLINE_GENERATED_DIR}")
 
+# Visible build stamp (commit + configure time) for stale-binary detection.
+string(TIMESTAMP CASIOEMU_BUILD_TIME "%m-%d %H:%M" UTC)
+target_compile_definitions(${TARGET_NAME} PRIVATE
+    CASIOEMU_BUILD_COMMIT="${CASIOEMU_GIT_COMMIT}"
+    CASIOEMU_BUILD_TIME="${CASIOEMU_BUILD_TIME}")
+
 # ------------------------------------------------------------------ Theme presets
 # Colour themes are data.  They are copied next to the executable (or into the
 # bundle's Resources) so built-in presets and theme plugins share one loader.
