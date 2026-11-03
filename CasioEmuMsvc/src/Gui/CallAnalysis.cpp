@@ -24,7 +24,7 @@ struct CallAnalysis : public UIWindow {
 	};
 	std::map<uint32_t, std::vector<FunctionCall>> funcs;
 	std::vector<FunctionCall> viewing_calls;
-	CallAnalysis() : UIWindow("Funcs") {
+	CallAnalysis() : UIWindow("Functions") {
 		SetupHook(on_call_function, [this](casioemu::CPU& sender, const FunctionEventArgs& ea) {
 			const uint32_t xr0 = (static_cast<uint32_t>(sender.reg_r[3]) << 24) |
 				(static_cast<uint32_t>(sender.reg_r[2]) << 16) |

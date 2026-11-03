@@ -2,6 +2,8 @@
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "FileDialog.hpp"
 #include "Settings/Settings.h"
+#include "Shell/Shell.h"
+#include "Shell/SessionHost.h"
 #ifndef CASIOEMU_CORE_WEB
 #include "SysDialog.h"
 #else
@@ -216,8 +218,10 @@ private:
 		ImGui::Checkbox("Ui.DisableVibration"_lc, &setting_DisableVibration);
 #endif
 		ImGui::SetNextItemWidth(240.0f);
-		if (ImGui::SliderFloat("Settings.Emulator.Throttle"_lc, &data.emulator.backgroundThrottle, 0.05f, 1.0f, "%.2f"))
+		if (ImGui::SliderFloat("Settings.Emulator.Throttle"_lc, &data.emulator.backgroundThrottle, 0.05f, 1.0f, "%.2f")) {
 			data.emulator.backgroundThrottle = ImClamp(data.emulator.backgroundThrottle, 0.05f, 1.0f);
+			casioemu::session::SetThrottle(data.emulator.backgroundThrottle);
+		}
 		if (ImGui::IsItemDeactivatedAfterEdit())
 			SaveNow();
 		if (ImGui::IsItemHovered()) {
@@ -225,6 +229,15 @@ private:
 			ImGui::TextUnformatted("Settings.Emulator.ThrottleHint"_lc);
 			ImGui::EndTooltip();
 		}
+
+		UIHelpers::SectionHeader("Calculator panel"_lc);
+		bool calculator_visible = casioemu::shell::CalculatorVisible();
+		if (ImGui::Checkbox("Show calculator panel"_lc, &calculator_visible))
+			casioemu::shell::SetCalculatorVisible(calculator_visible);
+		int calculator_width = data.shell.calculator.width;
+		ImGui::SetNextItemWidth(200.0f);
+		if (ImGui::SliderInt("Calculator width"_lc, &calculator_width, 260, 700, "%d px"))
+			casioemu::shell::SetCalculatorWidth(calculator_width);
 
 		UIHelpers::SectionHeader("Ui.InjectionFilePath"_lc);
 		ImGui::SetNextItemWidth(360.0f);
@@ -264,10 +277,6 @@ private:
 			tm.CurrentThemeName().empty() ? "(none)" : tm.CurrentThemeName().c_str());
 
 		UIHelpers::SectionHeader("Settings.Plugins.Registry"_lc);
-		ImGui::Text("%s: %d", "Settings.Plugins.EnabledCount"_lc, (int)data.plugins.enabled.size());
-		ImGui::Text("%s: %d", "Settings.Plugins.DisabledCount"_lc, (int)data.plugins.disabled.size());
-		ImGui::TextDisabled("%s: %s", "Settings.Plugins.TrustStore"_lc, data.plugins.trustPath.c_str());
-
 		UIWindow* manager = nullptr;
 		for (auto* win : windows) {
 			if (win && win->name && std::strcmp(win->name, "Plugin Manager") == 0) {
@@ -428,10 +437,6 @@ public:
 		if (ImGui::BeginTabBar("##settings_categories")) {
 			if (ImGui::BeginTabItem("Settings.Tab.Theme"_lc)) {
 				RenderThemeTab(tm, settings, data);
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Settings.Tab.Editor"_lc)) {
-				RenderEditorTab(tm, data);
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("Settings.Tab.Emulator"_lc)) {

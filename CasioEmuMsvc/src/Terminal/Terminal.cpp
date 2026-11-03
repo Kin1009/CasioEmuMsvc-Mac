@@ -516,6 +516,31 @@ void Terminal::SendString(const std::string& text) {
 	Send(text.data(), text.size());
 }
 
+std::string Terminal::ScreenText() const {
+	std::string text;
+	for (const auto& row : m_grid) {
+		std::string line;
+		for (const auto& cell : row) {
+			if (cell.ch >= 32 && cell.ch < 0x7f)
+				line.push_back(static_cast<char>(cell.ch));
+			else if (cell.ch == U' ')
+				line.push_back(' ');
+			else
+				line.push_back('?');
+		}
+		while (!line.empty() && line.back() == ' ')
+			line.pop_back();
+		text += line;
+		text.push_back('\n');
+	}
+	return text;
+}
+
+void Terminal::SendLineForTest(const std::string& text) {
+	SendString(text);
+	SendString("\r");
+}
+
 uint32_t Terminal::MapColour(uint8_t index) const {
 	static const ImU32 ansi16[16] = {
 		0xFF000000, 0xFFCD3131, 0xFF0DBC79, 0xFFE5E510,

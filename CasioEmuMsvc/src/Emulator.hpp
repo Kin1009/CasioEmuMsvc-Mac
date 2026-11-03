@@ -147,6 +147,9 @@ namespace casioemu {
 		bool Running();
 		void HandleMemoryError();
 		void Shutdown();
+		// Stop the worker thread and join it without destroying the emulator.
+		// Used by the shell before tearing down multi-session state.
+		void StopAndJoin();
 		// Reboot the emulated model to its power-on state (the calculator's main
 		// menu).  Used when the calculator window is closed: the debugger stays
 		// open instead of terminating the whole application.

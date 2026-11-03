@@ -164,16 +164,36 @@ void CloseSession(int index) {
 }
 
 void ShutdownAll() {
+	// Stop every worker but do not destroy the emulator objects here: the
+	// primary emulator is owned by the main loop's stack frame and secondary
+	// emulators share process-wide debugger globals (me_mmu, m_emu).  Deleting
+	// them before the primary destructor tears the chipset while the other
+	// worker may still observe those globals, which aborts in FairRecursiveMutex.
+	// The process is exiting, so release the owners after stopping the threads.
 	for (auto& entry : g_entries) {
 		if (entry.mirror) {
 			SDL_DestroyTexture(entry.mirror);
 			entry.mirror = nullptr;
 		}
-		if (entry.emulator)
+		if (entry.emulator) {
 			entry.emulator->Shutdown();
+			entry.emulator->StopAndJoin();
+		}
+	}
+	Emulator* primary = g_entries.empty() ? nullptr : g_entries.front().emulator;
+	for (auto& entry : g_entries) {
+		// Threads are already joined.  Release instead of deleting: SDL audio /
+		// renderer teardown after the UI event loop has stopped is not safe on
+		// macOS when more than one device exists.  The process is exiting.
+		if (entry.owned)
+			entry.owned.release();
 	}
 	g_entries.clear();
 	g_active = 0;
+	// Never leave the debugger globals pointing at a destroyed secondary.
+	m_emu = primary;
+	if (primary)
+		me_mmu = &primary->chipset.mmu;
 }
 
 Emulator* Active() {

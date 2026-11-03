@@ -54,7 +54,7 @@ private:
 
 public:
 	uint8_t debug_flags = DEBUG_BREAKPOINT;
-	CodeViewer() : UIWindow("Code") {
+	CodeViewer() : UIWindow("Code Viewer") {
 #ifndef CASIOEMU_CORE_WEB
 		PrepareDisasm();
 #endif

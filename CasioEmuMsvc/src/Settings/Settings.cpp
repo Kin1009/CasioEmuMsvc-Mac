@@ -216,6 +216,7 @@ void SettingsStore::Normalize() {
 	d.shell.sidebar.width = std::clamp(d.shell.sidebar.width, 160, 600);
 	d.shell.bottom.height = std::clamp(d.shell.bottom.height, 80, 800);
 	d.shell.tools.width = std::clamp(d.shell.tools.width, 200, 800);
+	d.shell.calculator.width = std::clamp(d.shell.calculator.width, 260, 700);
 	d.shell.window.width = std::max(d.shell.window.width, 640);
 	d.shell.window.height = std::max(d.shell.window.height, 400);
 	if (d.shell.bottom.active != "output" && d.shell.bottom.active != "problems" && d.shell.bottom.active != "terminal")
@@ -298,6 +299,10 @@ LoadStatus SettingsStore::Load(std::string* error) {
 			if (const json* tools = ObjectAt(*shell, "tools")) {
 				parsed.shell.tools.visible = BoolAt(*tools, "visible", parsed.shell.tools.visible);
 				parsed.shell.tools.width = IntAt(*tools, "width", parsed.shell.tools.width);
+			}
+			if (const json* calculator = ObjectAt(*shell, "calculator")) {
+				parsed.shell.calculator.visible = BoolAt(*calculator, "visible", parsed.shell.calculator.visible);
+				parsed.shell.calculator.width = IntAt(*calculator, "width", parsed.shell.calculator.width);
 			}
 			if (const json* window = ObjectAt(*shell, "window")) {
 				parsed.shell.window.x = IntAt(*window, "x", parsed.shell.window.x);
@@ -429,6 +434,10 @@ bool SettingsStore::Save(std::string* error) {
 	tools["visible"] = m_data.shell.tools.visible;
 	tools["width"] = m_data.shell.tools.width;
 	shell["tools"] = tools;
+	json calculator_panel = json::object();
+	calculator_panel["visible"] = m_data.shell.calculator.visible;
+	calculator_panel["width"] = m_data.shell.calculator.width;
+	shell["calculator"] = calculator_panel;
 	json window = json::object();
 	window["x"] = m_data.shell.window.x;
 	window["y"] = m_data.shell.window.y;

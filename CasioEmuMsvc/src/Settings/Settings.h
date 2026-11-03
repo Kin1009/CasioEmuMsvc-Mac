@@ -64,10 +64,16 @@ struct WindowGeometry {
 	bool fullscreen = false;
 };
 
+struct CalculatorPanelSettings {
+	bool visible = true;
+	int width = 360;
+};
+
 struct ShellSettings {
 	SidebarSettings sidebar;
 	BottomPanelSettings bottom;
 	ToolDockSettings tools;
+	CalculatorPanelSettings calculator;
 	WindowGeometry window;
 };
 

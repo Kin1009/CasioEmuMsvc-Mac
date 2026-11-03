@@ -287,6 +287,7 @@ int main(int argc, char* argv[]) {
 	}
 	if (std::getenv("CASIOEMU_SHOT_STARTUP") || std::getenv("CASIOEMU_SHOT_SHELL")) {
 		setenv("SDL_VIDEODRIVER", "dummy", 1);
+		setenv("SDL_AUDIODRIVER", "dummy", 1);
 		SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
 	}
 	int sdlFlags = SDL_INIT_VIDEO | SDL_INIT_TIMER;
@@ -375,6 +376,21 @@ for (;;) {
 	casioemu::mac::ConfigureFramelessWindow(emulator.window);
 	SDL_SetWindowTitle(emulator.window, "CasioEmuMsvc");
 #endif
+	casioemu::mac::MenuActions menu_actions;
+	menu_actions.open_model = [] { casioemu::shell::RequestOpenModel(); };
+	menu_actions.open_folder = [] { casioemu::shell::RequestOpenFolder(); };
+	menu_actions.install_plugin = [] { casioemu::shell::RequestInstallPlugin(); };
+	menu_actions.toggle_sidebar = [] { casioemu::shell::ToggleSidebar(); };
+	menu_actions.toggle_panel = [] { casioemu::shell::ToggleBottomPanel(); };
+	menu_actions.toggle_tools = [] { casioemu::shell::ToggleTools(); };
+	menu_actions.settings = [] { casioemu::shell::OpenSettings(); };
+	menu_actions.command_palette = [] { casioemu::shell::OpenCommandPalette(); };
+	menu_actions.build = [] { casioemu::shell::RequestBuild(false); };
+	menu_actions.build_run = [] { casioemu::shell::RequestBuild(true); };
+	menu_actions.pause_resume = [] { casioemu::shell::TogglePause(); };
+	menu_actions.reset = [] { casioemu::shell::ResetSession(); };
+	casioemu::mac::InstallNativeMenu(menu_actions);
+
 	SDL_ShowWindow(emulator.window);
 	SDL_RaiseWindow(emulator.window);
 
@@ -382,6 +398,10 @@ for (;;) {
 	LoadPlugins();
 #endif
 	while (emulator.Running()) {
+		if (casioemu::shell::ConsumeQuitRequest()) {
+			emulator.Shutdown();
+			break;
+		}
 		Emulator* active_emulator = casioemu::session::Active();
 		if (!active_emulator)
 			active_emulator = &emulator;
@@ -449,8 +469,12 @@ for (;;) {
 					const bool layout_ok = casioemu::shell::WriteLayoutReport(report);
 					std::printf("[shot] %s shell=%s layout=%s\n", shot,
 						saved ? "ok" : "failed", layout_ok ? "PASS" : "FAIL");
-					emulator.Shutdown();
-					break;
+					if (std::getenv("CASIOEMU_SAVE_STATE"))
+						casioemu::shell::Shutdown();
+					std::fflush(nullptr);
+					// Headless verification only: skip audio/renderer teardown on
+					// macOS, which is not safe after multiple SDL audio devices.
+					_Exit(0);
 				}
 			}
 

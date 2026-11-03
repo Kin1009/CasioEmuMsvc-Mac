@@ -936,6 +936,14 @@ namespace casioemu {
 		return Paused.load(std::memory_order_relaxed);
 	}
 
+	void Emulator::StopAndJoin() {
+		running = false;
+		if (tick_thread && tick_thread->joinable())
+			tick_thread->join();
+		delete tick_thread;
+		tick_thread = nullptr;
+	}
+
 	void Emulator::Shutdown() {
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 

@@ -1785,37 +1785,14 @@ namespace casioemu {
 			ImGui::PopStyleColor(3);
 		}
 
-		void DrawStartupActivity(const plugin::ThemePalette& palette, ImVec2 pos, ImVec2 size) {
-			ImDrawList* draw = ImGui::GetWindowDrawList();
-			draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-				ImGui::ColorConvertFloat4ToU32(palette.activityBar));
-			draw->AddLine(ImVec2(pos.x + size.x - 1, pos.y), ImVec2(pos.x + size.x - 1, pos.y + size.y),
-				ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
-			const ImU32 active = ImGui::ColorConvertFloat4ToU32(palette.foreground);
-			const ImU32 muted = ImGui::ColorConvertFloat4ToU32(palette.muted);
-			const ImU32 accent = ImGui::ColorConvertFloat4ToU32(palette.accent);
-			const char* labels[] = { "EX", "SR", "SC", "RN", "PL" };
-			float y = pos.y + 8.0f;
-			for (int index = 0; index < 5; ++index) {
-				if (index == 0)
-					draw->AddRectFilled(ImVec2(pos.x, y), ImVec2(pos.x + 2, y + 36), accent);
-				const float width = ImGui::CalcTextSize(labels[index]).x;
-				draw->AddText(ImVec2(pos.x + (size.x - width) * 0.5f,
-					y + (36.0f - ImGui::GetTextLineHeight()) * 0.5f),
-					index == 0 ? active : muted, labels[index]);
-				y += 40.0f;
-			}
-			draw->AddText(ImVec2(pos.x + (size.x - ImGui::CalcTextSize("SET").x) * 0.5f,
-				pos.y + size.y - 24.0f), muted, "SET");
-		}
-
 		void RenderModelRow(Model& model, int& id) {
 			ImGui::PushID(id++);
+			ImGui::SetCursorPosX(10.0f);
 			const bool selected = selected_path == model.path;
 			ImGui::PushStyleColor(ImGuiCol_Header, ThemeManager::Instance().Colors().selection);
 			ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ThemeManager::Instance().Colors().hover);
 			if (ImGui::Selectable((model.name + "##" + model.path.string()).c_str(), selected,
-					ImGuiSelectableFlags_AllowDoubleClick)) {
+					ImGuiSelectableFlags_AllowDoubleClick, ImVec2(ImGui::GetContentRegionAvail().x - 12.0f, 0.0f))) {
 				selected_path = model.path;
 				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					LaunchModel(model);
@@ -1843,8 +1820,8 @@ namespace casioemu {
 			const ImVec2 start = ImGui::GetWindowPos();
 			draw->AddRectFilled(start, ImVec2(start.x + width, start.y + 22.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.titleBar));
-			draw->AddText(ImVec2(start.x + 12.0f, start.y + 4.0f),
-				ImGui::ColorConvertFloat4ToU32(palette.muted), "EXPLORER");
+			ImGui::SetCursorPos(ImVec2(12.0f, 3.0f));
+			ImGui::TextDisabled("%s", "MODELS");
 			ImGui::SetCursorPos(ImVec2(10.0f, 28.0f));
 			ImGui::SetNextItemWidth(width - 20.0f);
 			ImGui::InputTextWithHint("##model_search", "Search models", search_txt, sizeof(search_txt));
@@ -1930,11 +1907,6 @@ namespace casioemu {
 			});
 			ImGui::SetCursorPosX(36.0f);
 			link("Online Models", [&] { show_online_popup = true; });
-			ImGui::SetCursorPosX(36.0f);
-			link("Install Plugin...", [&] {
-				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Plugins",
-					"Start a session, then use the Plugin Manager to install .plugin packages.", nullptr);
-			});
 			ImGui::Dummy(ImVec2(0, 14));
 			ImGui::SetCursorPosX(36.0f);
 			ImGui::TextDisabled("Recent");
@@ -1951,16 +1923,21 @@ namespace casioemu {
 					LaunchModel(*iter);
 				ImGui::PopStyleColor();
 			}
+			if (!any) {
+				const auto& saved = casioemu::settings::SettingsStore::Instance().Data().sessions;
+				for (const auto& record : saved) {
+					any = true;
+					ImGui::PushStyleColor(ImGuiCol_Text, palette.link);
+					if (ImGui::Selectable((std::string("> ") + (record.title.empty() ? record.model : record.title)).c_str(), false,
+							ImGuiSelectableFlags_None, ImVec2(360, 0))) {
+						auto iter = std::find_if(models.begin(), models.end(),
+							[&](const Model& item) { return item.path.string().find(record.model) != std::string::npos; });
+						if (iter != models.end()) LaunchModel(*iter);
+					}
+					ImGui::PopStyleColor();
+				}
+			}
 			if (!any) { ImGui::SetCursorPosX(36.0f); ImGui::TextDisabled("No recent models yet"); }
-			ImGui::Dummy(ImVec2(0, 14));
-			ImGui::SetCursorPosX(36.0f);
-			ImGui::TextDisabled("Walkthroughs");
-			ImGui::SetCursorPosX(36.0f);
-			ImGui::TextDisabled("1. Choose a model in the sidebar");
-			ImGui::SetCursorPosX(36.0f);
-			ImGui::TextDisabled("2. Double-click it or press New Calculator");
-			ImGui::SetCursorPosX(36.0f);
-			ImGui::TextDisabled("3. Build and run from the Wiz Compiler");
 			ImGui::EndChild();
 			ImGui::PopStyleColor();
 		}
@@ -2025,15 +2002,12 @@ namespace casioemu {
 				ImGui::ColorConvertFloat4ToU32(palette.foreground), "Welcome");
 			const float body_y = 71.0f;
 			const float status_h = 22.0f;
-			const float activity_w = 48.0f;
 			const float body_h = viewport->Size.y - body_y - status_h;
 			const float sidebar_w = std::min(300.0f, viewport->Size.x * 0.32f);
-			DrawStartupActivity(palette, ImVec2(viewport->Pos.x, viewport->Pos.y + body_y),
-				ImVec2(activity_w, body_h));
-			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + activity_w, viewport->Pos.y + body_y));
+			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x, viewport->Pos.y + body_y));
 			RenderStartupSidebar(palette, sidebar_w, body_h);
-			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + activity_w + sidebar_w + 1.0f, viewport->Pos.y + body_y));
-			RenderStartupWelcome(palette, viewport->Size.x - activity_w - sidebar_w - 1.0f, body_h);
+			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + sidebar_w + 1.0f, viewport->Pos.y + body_y));
+			RenderStartupWelcome(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
 			RenderStartupStatus(palette, viewport->Size.x, status_h);
 			RenderOnlineModels();
 			if (show_password_input) ImGui::OpenPopup("StartupUI.EnterPassword"_lc);

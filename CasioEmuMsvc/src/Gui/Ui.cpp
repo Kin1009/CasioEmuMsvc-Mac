@@ -652,6 +652,9 @@ namespace UIHelpers {
 
 void gui_cleanup() {
 #ifndef CASIOEMU_CORE_WEB
+#ifndef TEST_BUILD
+	casioemu::plugin::PluginRegistry::Instance().Shutdown();
+#endif
 #ifndef __ANDROID__
 	casioemu::shell::Shutdown();
 #endif

@@ -69,7 +69,7 @@ static void RequestSnapshotFsSync() {
 // ============================================================
 
 SnapshotWindow::SnapshotWindow()
-    : UIWindow("Snapshot"/*"SnapshotWindow.Title"_lc*/) { // Reminder here: don't localize ImGui window titles as they are linked to imgui presistent storage key
+    : UIWindow("Snapshots"/*"SnapshotWindow.Title"_lc*/) { // Reminder here: don't localize ImGui window titles as they are linked to imgui presistent storage key
     inital_size = ImVec2(880, 560);
     memset(m_LabelBuf, 0, sizeof(m_LabelBuf));
 }

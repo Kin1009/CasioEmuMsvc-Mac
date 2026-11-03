@@ -15,7 +15,7 @@
 // clipped strip behind.
 class BitmapViewer : public UIWindow {
 public:
-	BitmapViewer() : UIWindow("Bitmap") {}
+	BitmapViewer() : UIWindow("Bitmap Viewer") {}
 
 	char bufaddr[16] = {};
 	int width = 16;       // bits per row

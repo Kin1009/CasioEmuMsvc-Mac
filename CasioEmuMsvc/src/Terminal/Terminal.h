@@ -28,6 +28,11 @@ public:
 	const std::string& LastError() const { return m_lastError; }
 	const std::string& WorkingDirectory() const { return m_cwd; }
 
+	// Headless self-test helpers: a plain-text view of the visible grid and a
+	// way to type a command without an ImGui input queue.
+	std::string ScreenText() const;
+	void SendLineForTest(const std::string& text);
+
 private:
 	struct Cell {
 		char32_t ch = U' ';

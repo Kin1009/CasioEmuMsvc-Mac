@@ -58,7 +58,7 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
 	store.SetPathForTesting(path);
 
 	Check(store.Load() == LoadStatus::Missing, "missing file reports Missing");
-	Check(store.Data().appearance.theme == "vscode-dark", "default theme is vscode-dark");
+	Check(store.Data().appearance.theme == "classic", "default theme is classic");
 	Check(store.Data().language == "en_US", "default language is en_US");
 
 	auto& data = store.Data();
@@ -107,7 +107,7 @@ void TestMalformedDocument(const std::filesystem::path& root) {
 	std::string error;
 	Check(store.Load(&error) == LoadStatus::Error, "malformed JSON reports Error");
 	Check(!error.empty(), "malformed JSON reports an error message");
-	Check(store.Data().appearance.theme == "vscode-dark", "malformed JSON falls back to defaults");
+	Check(store.Data().appearance.theme == "classic", "malformed JSON falls back to defaults");
 	Check(store.Data().editor.tabSize == 4, "defaults are complete after a parse error");
 
 	// A load must never destroy the user's file; the next explicit save repairs it.

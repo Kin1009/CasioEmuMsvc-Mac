@@ -11,7 +11,7 @@ struct AddressInfo {
 
 class AddressWindow : public UIWindow {
 public:
-	AddressWindow() : UIWindow("Addrs") {
+	AddressWindow() : UIWindow("Memory") {
 		SetupHooks();
 	}
 

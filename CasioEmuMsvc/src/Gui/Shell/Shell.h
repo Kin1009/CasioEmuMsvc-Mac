@@ -45,9 +45,15 @@ void RequestInstallPlugin();
 void ToggleSidebar();
 void ToggleBottomPanel();
 void ToggleTools();
+void SetCalculatorVisible(bool visible);
+void SetCalculatorWidth(int width);
+bool CalculatorVisible();
 void FocusTerminal();
 void OpenSettings();
 void OpenCommandPalette();
+void RequestBuild(bool run);
+void TogglePause();
+void ResetSession();
 void OpenQuickOpen();
 
 std::string WorkspaceFolder();
