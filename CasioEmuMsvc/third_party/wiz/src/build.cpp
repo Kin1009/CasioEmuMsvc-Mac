@@ -1,6 +1,7 @@
 // build.cpp - implementation of the shared build pipeline.
 #include "build.hpp"
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -10,18 +11,65 @@
 #include <stdexcept>
 
 #include "asm.hpp"
+#include "asset_fallback.hpp"
 #include "cpre.hpp"
 #include "cwiz.hpp"
 #include "wiz.hpp"
 
 namespace wiz {
 
-static std::string g_data_dir = "compiler";
+static bool has_asset(const std::string& dir) {
+    bool ok = false;
+    read_text_file(dir + "/runtime.asm", &ok);
+    if (ok) return true;
+    read_text_file(dir + "/template_ML620909.asm", &ok);
+    return ok;
+}
+
+// Embeds call set_data_dir() at start-up, but lint/preview paths and the first
+// compile can run before that.  Resolve a usable directory from the
+// environment/known layouts; read_asset() still has an embedded fallback.
+static std::string default_data_dir() {
+    if (const char* e = std::getenv("WIZ_DATA_DIR"); e && *e) return e;
+    for (const char* d : {"compiler", "data", "compiler/data", "."})
+        if (has_asset(d)) return d;
+    return "compiler";
+}
+
+static std::string g_data_dir = default_data_dir();
 
 void set_data_dir(const std::string& dir) {
     if (!dir.empty()) g_data_dir = dir;
 }
 const std::string& data_dir() { return g_data_dir; }
+
+// Look for `name` in the configured directory, then common bundle/repo
+// layouts, then the copy embedded in wizcore.  `ok` is false only when the
+// asset is unknown and every location failed.
+static std::string read_asset(const std::string& name, bool& ok) {
+    std::vector<std::string> dirs;
+    auto add = [&](const std::string& d) {
+        if (!d.empty() && !contains(dirs, d)) dirs.push_back(d);
+    };
+    add(g_data_dir);
+    if (const char* e = std::getenv("WIZ_DATA_DIR")) add(e);
+    add("compiler");
+    add("compiler/data");
+    add("data");
+    add(".");
+    for (const std::string& d : dirs) {
+        std::string path = d + (d.back() == '/' ? "" : "/") + name;
+        std::string text = read_text_file(path, &ok);
+        if (ok) return text;
+    }
+    const std::string& embedded = embedded_asset(name);
+    if (!embedded.empty()) {
+        ok = true;
+        return embedded;
+    }
+    ok = false;
+    return "";
+}
 
 // ------------------------------------------------------------------ templates
 // `re.match(r'^\s*(type\s*\(|model\b|romwindow\b|extrn\b|public\b)', line, re.I)`
@@ -62,8 +110,9 @@ static bool is_b_main(const std::string& line) {
 
 std::string make_boot(const Target& target) {
     bool ok = false;
-    std::string t = read_text_file(g_data_dir + "/" + target.tmpl, &ok);
-    if (!ok) throw std::runtime_error("cannot read boot template " + target.tmpl);
+    std::string t = read_asset(target.tmpl, ok);
+    if (!ok) throw std::runtime_error("cannot read boot template " + target.tmpl +
+                                      " (set WIZ_DATA_DIR or call set_data_dir())");
     t = replace_all(replace_all(t, "\r", ""), "\t", " ");
     std::vector<std::string> keep;
     for (const std::string& raw : split(t, '\n')) {
@@ -78,8 +127,8 @@ std::string make_boot(const Target& target) {
 std::string runtime_for(const Target& target) {
     std::string drop = target.planes == 2 ? ";@1p" : ";@2p";
     bool ok = false;
-    std::string text = read_text_file(g_data_dir + "/runtime.asm", &ok);
-    if (!ok) throw std::runtime_error("cannot read runtime.asm");
+    std::string text = read_asset("runtime.asm", ok);
+    if (!ok) throw std::runtime_error("cannot read runtime.asm (set WIZ_DATA_DIR or call set_data_dir())");
     std::vector<std::string> out;
     out.push_back(fmt("_ROWS EQU %d", target.rows));  // pixel() ignores y >= _ROWS
     // Drawing targets the shadow buffer (SB2); render() copies it to the LCD (SB1).
