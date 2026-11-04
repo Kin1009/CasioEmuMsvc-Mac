@@ -1867,7 +1867,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	// Line numbers, word wrap and font size have no editor API in this tree.
 	doc.editor.SetTabSize(std::clamp(SettingsStore::Instance().Data().editor.tabSize, 1, 16));
 	const bool wiz_file = IsWizDocument(doc);
-	const float toolbar_height = (wiz_file ? 118.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
+	const float toolbar_height = (wiz_file ? 146.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
 
 	// Row 1: file actions.
 	ImGui::SetCursorPos(ImVec2(8.0f, 6.0f));
@@ -1928,13 +1928,6 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			}
 			ImGui::EndCombo();
 		}
-		ImGui::SameLine();
-		ImGui::TextDisabled("ROP pad");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(76.0f);
-		ImGui::InputInt("##editor_rop_pad", &doc.ropPadding, 0, 0);
-		doc.ropPadding = std::clamp(doc.ropPadding, 0, 4096);
-
 		// Row 4: lint and build actions.
 		ImGui::SetCursorPos(ImVec2(8.0f, 90.0f));
 		if (ImGui::Button("Lint"))
@@ -1967,6 +1960,13 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			g.panelVisible = true;
 			g.panelTab = 0;
 		}
+		// Row 5: ROP padding and source/launcher actions.
+		ImGui::SetCursorPos(ImVec2(8.0f, 118.0f));
+		ImGui::TextDisabled("ROP pad");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(76.0f);
+		ImGui::InputInt("##editor_rop_pad", &doc.ropPadding, 0, 0);
+		doc.ropPadding = std::clamp(doc.ropPadding, 0, 4096);
 		ImGui::SameLine();
 		if (ImGui::Button("Load Source...")) {
 			SystemDialogs::OpenFileDialog([](std::filesystem::path path) {
@@ -1985,7 +1985,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 
 	if (doc.findOpen) {
-		const float find_y = wiz_file ? 118.0f : 62.0f;
+		const float find_y = wiz_file ? 146.0f : 62.0f;
 		ImGui::SetCursorPos(ImVec2(8.0f, find_y));
 		ImGui::SetNextItemWidth(220.0f);
 		if (ImGui::InputTextWithHint("##editor_find", "Find in file", doc.findText, sizeof(doc.findText),
