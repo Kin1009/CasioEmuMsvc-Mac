@@ -3,6 +3,7 @@
 #include "Gui.h"
 #include "Gui/ThemeManager.h"
 #include "Gui/Ui.hpp"
+#include "Gui/ToolUi.hpp"
 #include "Plugin/PluginMan.h"
 #include "Settings/Settings.h"
 #include "SysDialog.h"
@@ -1761,6 +1762,9 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		return;
 	}
 	FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
+	// Editor settings: only tab size is exposed by the embedded TextEditor.
+	// Line numbers, word wrap and font size have no editor API in this tree.
+	doc.editor.SetTabSize(std::clamp(SettingsStore::Instance().Data().editor.tabSize, 1, 16));
 	const bool wiz_file = IsWizDocument(doc);
 	const float toolbar_height = (wiz_file ? 118.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
 
@@ -1977,8 +1981,10 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::PushID(index);
 		const bool clicked = ImGui::InvisibleButton("##doc_tab", ImVec2(rect.z - 1.0f, rect.w));
 		const bool hovered = ImGui::IsItemHovered();
-		if (clicked)
+		if (clicked) {
 			g.toolIndex = index;
+			tools[static_cast<size_t>(index)]->open = true;
+		}
 		if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
 			g.draggingTool = index;
 		if (g.draggingTool >= 0 && hovered && g.draggingTool != index)
@@ -2558,39 +2564,40 @@ void RenderOverlays(const ThemePalette& palette) {
 	}
 	if (g.closeConfirmOpen) {
 		ImGui::OpenPopup("Unsaved changes##file_close");
-		bool open = g.closeConfirmOpen;
-		if (BeginShellModal("Unsaved changes##file_close", palette, "Unsaved Changes", &open,
-				ImVec2(470.0f, 180.0f))) {
-			ImGui::TextWrapped("This file has unsaved changes. Save before closing?");
-			ImGui::Dummy(ImVec2(0.0f, 6.0f));
-			if (ImGui::Button("Save", ImVec2(110, 26))) {
-				if (g.pendingCloseFile >= 0 && g.pendingCloseFile < static_cast<int>(g.files.size()))
-					SaveFileDocument(*g.files[static_cast<size_t>(g.pendingCloseFile)]);
-				const int index = g.pendingCloseFile;
-				g.pendingCloseFile = -1;
-				g.closeConfirmOpen = false;
-				EraseFileDocument(index);
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Discard", ImVec2(110, 26))) {
-				const int index = g.pendingCloseFile;
-				g.pendingCloseFile = -1;
-				g.closeConfirmOpen = false;
-				EraseFileDocument(index);
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+		ToolUi::DialogScope dialog("Unsaved changes##file_close", "Unsaved Changes", 470.0f);
+		if (dialog) {
+			if (dialog.CloseRequested()) {
 				g.pendingCloseFile = -1;
 				g.closeConfirmOpen = false;
 				ImGui::CloseCurrentPopup();
 			}
-			EndShellModal();
-		}
-		if (!open) {
-			g.pendingCloseFile = -1;
-			g.closeConfirmOpen = false;
+			else {
+				ImGui::TextWrapped("This file has unsaved changes. Save before closing?");
+				ImGui::Dummy(ImVec2(0.0f, 6.0f));
+				if (ImGui::Button("Save", ImVec2(110, 26))) {
+					if (g.pendingCloseFile >= 0 && g.pendingCloseFile < static_cast<int>(g.files.size()))
+						SaveFileDocument(*g.files[static_cast<size_t>(g.pendingCloseFile)]);
+					const int index = g.pendingCloseFile;
+					g.pendingCloseFile = -1;
+					g.closeConfirmOpen = false;
+					EraseFileDocument(index);
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Discard", ImVec2(110, 26))) {
+					const int index = g.pendingCloseFile;
+					g.pendingCloseFile = -1;
+					g.closeConfirmOpen = false;
+					EraseFileDocument(index);
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+					g.pendingCloseFile = -1;
+					g.closeConfirmOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
+			}
 		}
 	}
 	auto filesystem_error = [](const std::string& action, const std::error_code& ec) {
@@ -2599,107 +2606,115 @@ void RenderOverlays(const ThemePalette& palette) {
 	};
 	if (g.renameOpen) {
 		ImGui::OpenPopup("Rename##explorer");
-		bool open = g.renameOpen;
-		if (BeginShellModal("Rename##explorer", palette, "Rename", &open, ImVec2(500.0f, 185.0f))) {
-			ImGui::TextDisabled("%s", g.selectedPath.string().c_str());
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::InputText("##rename_name", g.entryName, sizeof(g.entryName));
-			ImGui::Dummy(ImVec2(0.0f, 6.0f));
-			if (ImGui::Button("Rename", ImVec2(110, 26))) {
-				if (g.entryName[0]) {
-					std::error_code ec;
-					const auto target = g.selectedPath.parent_path() / g.entryName;
-					std::filesystem::rename(g.selectedPath, target, ec);
-					g.sidebarCache.clear();
-					if (ec)
-						filesystem_error("rename failed", ec);
-					else
-						g.selectedPath = target;
+		ToolUi::DialogScope dialog("Rename##explorer", "Rename", 500.0f);
+		if (dialog) {
+			if (dialog.CloseRequested()) {
+				g.renameOpen = false;
+				ImGui::CloseCurrentPopup();
+			}
+			else {
+				ImGui::TextDisabled("%s", g.selectedPath.string().c_str());
+				ImGui::SetNextItemWidth(-1.0f);
+				ImGui::InputText("##rename_name", g.entryName, sizeof(g.entryName));
+				ImGui::Dummy(ImVec2(0.0f, 6.0f));
+				if (ImGui::Button("Rename", ImVec2(110, 26))) {
+					if (g.entryName[0]) {
+						std::error_code ec;
+						const auto target = g.selectedPath.parent_path() / g.entryName;
+						std::filesystem::rename(g.selectedPath, target, ec);
+						g.sidebarCache.clear();
+						if (ec)
+							filesystem_error("rename failed", ec);
+						else
+							g.selectedPath = target;
+					}
+					g.renameOpen = false;
+					ImGui::CloseCurrentPopup();
 				}
-				g.renameOpen = false;
-				ImGui::CloseCurrentPopup();
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+					g.renameOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
 			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(110, 26))) {
-				g.renameOpen = false;
-				ImGui::CloseCurrentPopup();
-			}
-			EndShellModal();
 		}
-		if (!open)
-			g.renameOpen = false;
 	}
 	if (g.newFileOpen || g.newFolderOpen) {
 		const bool folder = g.newFolderOpen;
-		ImGui::OpenPopup(folder ? "New Folder##explorer" : "New File##explorer");
-		bool open = g.newFileOpen || g.newFolderOpen;
-		if (BeginShellModal(folder ? "New Folder##explorer" : "New File##explorer", palette,
-				folder ? "New Folder" : "New File", &open, ImVec2(500.0f, 185.0f))) {
-			ImGui::TextDisabled("%s", g.selectedPath.string().c_str());
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::InputText("##new_entry_name", g.entryName, sizeof(g.entryName));
-			ImGui::Dummy(ImVec2(0.0f, 6.0f));
-			if (ImGui::Button("Create", ImVec2(110, 26))) {
-				if (g.entryName[0]) {
-					std::error_code ec;
-					const auto target = g.selectedPath / g.entryName;
-					if (folder) {
-						std::filesystem::create_directory(target, ec);
-						g.sidebarCache.clear();
-						if (ec)
-							filesystem_error("create folder failed", ec);
+		const char* popup = folder ? "New Folder##explorer" : "New File##explorer";
+		ImGui::OpenPopup(popup);
+		ToolUi::DialogScope dialog(popup, folder ? "New Folder" : "New File", 500.0f);
+		if (dialog) {
+			if (dialog.CloseRequested()) {
+				g.newFileOpen = false;
+				g.newFolderOpen = false;
+				ImGui::CloseCurrentPopup();
+			}
+			else {
+				ImGui::TextDisabled("%s", g.selectedPath.string().c_str());
+				ImGui::SetNextItemWidth(-1.0f);
+				ImGui::InputText("##new_entry_name", g.entryName, sizeof(g.entryName));
+				ImGui::Dummy(ImVec2(0.0f, 6.0f));
+				if (ImGui::Button("Create", ImVec2(110, 26))) {
+					if (g.entryName[0]) {
+						std::error_code ec;
+						const auto target = g.selectedPath / g.entryName;
+						if (folder) {
+							std::filesystem::create_directory(target, ec);
+							g.sidebarCache.clear();
+							if (ec)
+								filesystem_error("create folder failed", ec);
+						}
+						else {
+							std::ofstream file(target, std::ios::binary);
+							if (!file)
+								filesystem_error("create file failed", std::make_error_code(std::errc::permission_denied));
+							else
+								file.close();
+							g.sidebarCache.clear();
+							OpenFileInEditor(target);
+						}
 					}
-					else {
-						std::ofstream file(target, std::ios::binary);
-						if (!file)
-							filesystem_error("create file failed", std::make_error_code(std::errc::permission_denied));
-						else
-							file.close();
-						g.sidebarCache.clear();
-						OpenFileInEditor(target);
-					}
+					g.newFileOpen = false;
+					g.newFolderOpen = false;
+					ImGui::CloseCurrentPopup();
 				}
-				g.newFileOpen = false;
-				g.newFolderOpen = false;
-				ImGui::CloseCurrentPopup();
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+					g.newFileOpen = false;
+					g.newFolderOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
 			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(110, 26))) {
-				g.newFileOpen = false;
-				g.newFolderOpen = false;
-				ImGui::CloseCurrentPopup();
-			}
-			EndShellModal();
-		}
-		if (!open) {
-			g.newFileOpen = false;
-			g.newFolderOpen = false;
 		}
 	}
 	if (g.deleteOpen) {
 		ImGui::OpenPopup("Delete##explorer");
-		bool open = g.deleteOpen;
-		if (BeginShellModal("Delete##explorer", palette, "Delete", &open, ImVec2(500.0f, 165.0f))) {
-			ImGui::TextWrapped("Delete %s? This cannot be undone.", g.selectedPath.string().c_str());
-			ImGui::Dummy(ImVec2(0.0f, 6.0f));
-			if (ImGui::Button("Delete", ImVec2(110, 26))) {
-				std::error_code ec;
-				std::filesystem::remove_all(g.selectedPath, ec);
-				g.sidebarCache.clear();
-				if (ec)
-					filesystem_error("delete failed", ec);
+		ToolUi::DialogScope dialog("Delete##explorer", "Delete", 500.0f);
+		if (dialog) {
+			if (dialog.CloseRequested()) {
 				g.deleteOpen = false;
 				ImGui::CloseCurrentPopup();
 			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(110, 26))) {
-				g.deleteOpen = false;
-				ImGui::CloseCurrentPopup();
+			else {
+				ImGui::TextWrapped("Delete %s? This cannot be undone.", g.selectedPath.string().c_str());
+				ImGui::Dummy(ImVec2(0.0f, 6.0f));
+				if (ImGui::Button("Delete", ImVec2(110, 26))) {
+					std::error_code ec;
+					std::filesystem::remove_all(g.selectedPath, ec);
+					g.sidebarCache.clear();
+					if (ec)
+						filesystem_error("delete failed", ec);
+					g.deleteOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+					g.deleteOpen = false;
+					ImGui::CloseCurrentPopup();
+				}
 			}
-			EndShellModal();
 		}
-		if (!open)
-			g.deleteOpen = false;
 	}
 	if (g.importPasswordOpen) {
 		ImGui::OpenPopup("Import Password##shell_import");
@@ -3254,7 +3269,41 @@ void ToggleBottomPanel() {
 }
 
 void ToggleTools() {
-	g.calculatorVisible = !g.calculatorVisible;
+	g.toolsVisible = !g.toolsVisible;
+	SaveLayout();
+}
+
+void SetSidebarVisible(bool visible) {
+	g.sidebarVisible = visible;
+	SaveLayout();
+}
+
+void SetSidebarWidth(int width) {
+	g.sidebarWidth = static_cast<float>(std::clamp(width, 200, 600));
+	SaveLayout();
+}
+
+void SetBottomPanelVisible(bool visible) {
+	g.panelVisible = visible;
+	SaveLayout();
+	if (g.panelVisible && g.panelTab == 2 && !g.terminalStarted) {
+		g.terminal.Start(g.workspace);
+		g.terminalStarted = true;
+	}
+}
+
+void SetBottomPanelHeight(int height) {
+	g.panelHeight = static_cast<float>(std::clamp(height, 80, 700));
+	SaveLayout();
+}
+
+void SetToolsVisible(bool visible) {
+	g.toolsVisible = visible;
+	SaveLayout();
+}
+
+void SetToolsWidth(int width) {
+	g.toolsWidth = static_cast<float>(std::clamp(width, 240, 800));
 	SaveLayout();
 }
 
