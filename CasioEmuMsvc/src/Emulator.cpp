@@ -7,11 +7,15 @@
 #include "ModelInfo.h"
 #include "RendererBackend.h"
 #include "Peripheral/Screen.hpp"
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
+#include "Gui/Shell/SessionHost.h"
+#endif
 #include <SDL.h>
 #include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -35,6 +39,73 @@ namespace casioemu {
 		void RequestProcessQuit() noexcept {
 			g_process_quit.store(true, std::memory_order_release);
 		}
+
+		// Dedicated SDL event used to run session teardown on the main loop,
+		// outside PrepareActiveFrame() (which holds an Entry& into the session
+		// vector). One event type per process.
+		Uint32 ShutdownEventType() {
+			static const Uint32 type = []() -> Uint32 {
+				const Uint32 registered = SDL_RegisterEvents(1);
+				return registered != static_cast<Uint32>(-1) ? registered
+					: static_cast<Uint32>(SDL_USEREVENT + 7);
+			}();
+			return type;
+		}
+
+		std::atomic<bool> g_shutdown_posted{false};
+
+		void PostShutdownEvent() {
+			if (g_shutdown_posted.exchange(true, std::memory_order_acq_rel))
+				return;
+			SDL_Event event{};
+			event.type = ShutdownEventType();
+			SDL_PushEvent(&event);
+		}
+
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
+		// The primary emulator is the stack-owned session registered by
+		// RegisterPrimary(); CloseSession() never removes index 0. Model paths
+		// are unique per session, so comparing against the front entry is a
+		// safe way to tell the primary from a closable secondary.
+		bool IsPrimarySession(const Emulator& emulator) {
+			const auto views = casioemu::session::List();
+			if (views.empty())
+				return false;
+			return views.front().modelPath == emulator.model_path &&
+				views.front().romPath == emulator.ModelDefinition.rom_path;
+		}
+
+		// Test hook: synthesize the exact close events the OS sends, so the
+		// red-button and Cmd+Q paths are testable headlessly.
+		void MaybePostTestClose(Emulator& emulator) {
+			static const char* mode = std::getenv("CASIOEMU_TEST_CLOSE");
+			if (!mode || !*mode)
+				return;
+			static const int delay_ms = []() {
+				const char* value = std::getenv("CASIOEMU_TEST_CLOSE_MS");
+				return value ? std::atoi(value) : 500;
+			}();
+			static const auto start = std::chrono::steady_clock::now();
+			static bool sent = false;
+			if (sent)
+				return;
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			if (elapsed < delay_ms)
+				return;
+			sent = true;
+			SDL_Event event{};
+			if (std::strcmp(mode, "quit") == 0) {
+				event.type = SDL_QUIT;
+			}
+			else {
+				event.type = SDL_WINDOWEVENT;
+				event.window.event = SDL_WINDOWEVENT_CLOSE;
+				event.window.windowID = emulator.window ? SDL_GetWindowID(emulator.window) : 0;
+			}
+			SDL_PushEvent(&event);
+		}
+#endif
 
 		// Bound the emulator's catch-up burst. The cycle rate is unchanged (the
 		// budget is derived from wall time), but work is sliced into 2 ms quanta
@@ -590,6 +661,15 @@ namespace casioemu {
 	}
 
 	void Emulator::UIEvent(SDL_Event event) {
+		if (event.type == ShutdownEventType()) {
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
+			// Runs on the main loop after PrepareActiveFrame()/Frame(), so it
+			// may clear the session vector safely. Every session's tick, LCD
+			// and ctl worker is joined inside Shutdown()/StopAndJoin().
+			casioemu::session::ShutdownAll();
+#endif
+			return;
+		}
 		if (headless)
 			return;
 		composite_dirty.store(true, std::memory_order_release);
@@ -771,6 +851,9 @@ namespace casioemu {
 		// starts the local control socket on the first frame and drains queued
 		// debugger requests here, where the debugger state is safe to touch.
 		ctl::OnFrame(*this);
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
+		MaybePostTestClose(*this);
+#endif
 		if (headless)
 			return;
 #ifdef SINGLE_WINDOW
@@ -794,6 +877,10 @@ namespace casioemu {
 		uint64_t frame_version = ~static_cast<uint64_t>(0);
 		if (auto* provider = chipset.QueryInterface<IScreenFrameProvider>())
 			frame_version = provider->FrameVersion();
+		// A newly published LCD frame always forces a composite refresh; input
+		// and window events mark composite_dirty as well.
+		if (frame_version != last_composite_version)
+			composite_dirty.store(true, std::memory_order_release);
 		const bool dirty = composite_dirty.exchange(false, std::memory_order_acq_rel);
 		if (!dirty && frame_version != ~static_cast<uint64_t>(0) &&
 			frame_version == last_composite_version &&
@@ -972,6 +1059,10 @@ namespace casioemu {
 
 	void Emulator::RequestQuit() {
 		RequestProcessQuit();
+		// Stop promptly, then let the main loop perform the actual session
+		// teardown. The shell-owned loop also waits for session::Count() == 0,
+		// so Running() alone is not enough to leave it.
+		PostShutdownEvent();
 	}
 
 	bool Emulator::GetPaused() {
@@ -999,6 +1090,14 @@ namespace casioemu {
 		// is the point where the owning session is going away, and it must be
 		// deterministic even if the Emulator itself is never destroyed.
 		chipset.StopWorkerThreads();
+#if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
+		// SDL_QUIT / the red close button only call Shutdown() on the emulator;
+		// the shell loop additionally waits for session::Count() == 0. Dispatch
+		// the session teardown through the main-loop event so the loop can exit
+		// instead of spinning on a stopped renderer (black frozen window).
+		if (IsPrimarySession(*this))
+			PostShutdownEvent();
+#endif
 	}
 
 	void Emulator::ResetToMainMenu() {

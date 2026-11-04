@@ -91,18 +91,27 @@ TransactionResult History::TryRecord(PrepareFn prepare, WriteFn write, void* con
 	// Sampling after taking the mutex makes timestamp order follow commit order.
 	event.steady_ns = SteadyNowNs();
 	event.sdl_ms = SDL_GetTicks64();
+	latest_event_steady_ns.store(event.steady_ns, std::memory_order_release);
 	// The original write runs under this short history lock, preserving the
 	// event/write order without taking Screen's state mutex.
 	write(context);
 	ring[(head + count) % ring.size()] = event;
 	++count;
-	if (count >= kBatchCapacity * 4) ready.notify_one();
+	// Wake the LCD worker as soon as the queue goes from empty to non-empty.
+	// Notifying on every event would wake it thousands of times per second;
+	// the worker coalesces everything that arrived by the time it ticks.
+	if (count == 1) {
+		pending_since_steady_ns.store(event.steady_ns, std::memory_order_release);
+		ready.notify_one();
+	}
 	return TransactionResult::Committed;
 }
 
 void History::WaitForWork(std::chrono::milliseconds interval, const std::atomic_bool& running) {
 	auto lock = Lock();
-	ready.wait_for(lock, interval, [&] { return !running.load() || count >= kBatchCapacity * 4 || Incomplete(); });
+	// Wake on the very first queued event, not only after a large batch: a
+	// sparse LCD write during an idle poll must be picked up immediately.
+	ready.wait_for(lock, interval, [&] { return !running.load() || count != 0 || Incomplete(); });
 }
 
 Cutoff History::CaptureCutoff() const {

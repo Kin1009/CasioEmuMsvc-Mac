@@ -95,6 +95,12 @@ namespace casioemu {
 		std::atomic<bool> composite_dirty{true};
 		uint64_t last_composite_version = ~0ull;
 
+		// LCD publish diagnostics (exposed through `casioctl status`).
+		std::atomic<uint64_t> lcd_publish_count{0};
+		std::atomic<uint64_t> lcd_latency_last_ns{0};
+		std::atomic<uint64_t> lcd_latency_max_ns{0};
+		std::atomic<uint32_t> lcd_last_changed_pixels{0};
+
 		SpriteInfo interface_background;
 		SDL_Rect emu_rect{};
 

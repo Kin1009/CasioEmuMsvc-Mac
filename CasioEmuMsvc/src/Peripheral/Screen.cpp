@@ -159,7 +159,8 @@ namespace casioemu {
 		std::unique_ptr<lcd_temporal::ReplaySession> temporal_replay;
 		bool temporal_valid = false;
 		std::chrono::steady_clock::time_point temporal_retry_after{};
-		static constexpr std::chrono::milliseconds kTemporalInterval{8};
+		static constexpr std::chrono::milliseconds kTemporalActiveInterval{2};
+		static constexpr std::chrono::milliseconds kTemporalIdleInterval{8};
 		static constexpr std::chrono::milliseconds kTemporalRecoveryInterval{50};
 		// Published LCD frame. The worker writes the back buffer and flips the
 		// atomic read index; consumers copy the front buffer, so no reader can
@@ -263,23 +264,62 @@ namespace casioemu {
 			return lock;
 		}
 
+		// Quantized (8-bit) comparison: the texture is uploaded as 8-bit alpha,
+		// so sub-level float drift is not a visible change. Exact float equality
+		// never converges for the exponential response, which used to publish
+		// forever on a static screen and keep the LCD worker at 2 ms.
+		static uint8_t QuantizeAlpha(float value) {
+			const long rounded = std::lround(value);
+			if (rounded <= 0)
+				return 0;
+			if (rounded >= 255)
+				return 255;
+			return static_cast<uint8_t>(rounded);
+		}
+
 		// Caller holds screen_state_mutex. Copies the worker's working alpha
-		// buffer into the back buffer and publishes it atomically. Skips the
-		// version bump when nothing changed so static LCDs stay upload-free.
-		void PublishLcdFrame() {
+		// buffer into the back buffer and publishes it atomically. Returns true
+		// only when at least one displayed (8-bit) pixel changed.
+		bool PublishLcdFrame() {
 			if constexpr (IsEpsFamily(hardware_id)) {
 				std::lock_guard<std::mutex> lock(eps_screen_alpha_mutex);
 				std::copy(eps_screen_ink_alpha.begin(), eps_screen_ink_alpha.end(), screen_ink_alpha);
 			}
 			const uint32_t read_index = lcd_frame_read.load(std::memory_order_acquire);
 			const auto& front = lcd_frame_buffers[read_index];
-			if (std::equal(front.begin(), front.end(), std::begin(screen_ink_alpha)))
-				return;
+			uint32_t changed_pixels = 0;
+			for (size_t i = 0; i != front.size(); ++i) {
+				if (QuantizeAlpha(front[i]) != QuantizeAlpha(screen_ink_alpha[i]))
+					++changed_pixels;
+			}
+			if (changed_pixels == 0)
+				return false;
+			emulator.lcd_last_changed_pixels.store(changed_pixels, std::memory_order_relaxed);
 			auto& back = lcd_frame_buffers[lcd_frame_write];
 			std::copy(std::begin(screen_ink_alpha), std::end(screen_ink_alpha), back.begin());
 			lcd_frame_read.store(lcd_frame_write, std::memory_order_release);
 			lcd_frame_write ^= 1u;
 			lcd_frame_version.fetch_add(1, std::memory_order_release);
+			emulator.lcd_publish_count.fetch_add(1, std::memory_order_relaxed);
+			if constexpr (kCaptureLcdHistory) {
+				const uint64_t pending_ns = lcd_history.PendingSinceSteadyNs();
+				if (pending_ns != 0) {
+					const uint64_t now_ns = static_cast<uint64_t>(
+						std::chrono::duration_cast<std::chrono::nanoseconds>(
+							std::chrono::steady_clock::now().time_since_epoch()).count());
+					if (now_ns > pending_ns) {
+						const uint64_t latency = now_ns - pending_ns;
+						emulator.lcd_latency_last_ns.store(latency, std::memory_order_relaxed);
+						uint64_t previous = emulator.lcd_latency_max_ns.load(std::memory_order_relaxed);
+						while (latency > previous &&
+							!emulator.lcd_latency_max_ns.compare_exchange_weak(
+								previous, latency, std::memory_order_relaxed)) {
+						}
+					}
+					lcd_history.ClearPendingSince();
+				}
+			}
+			return true;
 		}
 
 		// Caller holds screen_state_mutex; returns the front buffer the worker
@@ -1247,8 +1287,16 @@ namespace casioemu {
 		if constexpr (kCaptureLcdHistory) lcd_history.Activate();
 		screen_thread.Start([this](const std::atomic_bool& running) {
 			bool have_publication = false;
+			// True only once a full tick produced no pixel change and the
+			// history queue is empty. A cutoff being fully consumed is not
+			// enough: the LCD response can still be decaying toward its target,
+			// and skipping then freezes it half-way (ghosting/dim pixels).
+			bool settled = false;
+			auto interval = kTemporalActiveInterval;
+			(void)settled;
 			while (running.load(std::memory_order_acquire)) {
 				int temporal_status = -1;
+				bool skipped = false;
 				{
 					std::unique_lock<std::mutex> state_lock(screen_state_mutex);
 					screen_state_ready.wait(state_lock, [this, &running]() {
@@ -1257,12 +1305,10 @@ namespace casioemu {
 					if (!running.load())
 						break;
 					if constexpr (kCaptureLcdHistory) {
-						// Skip the replay entirely while the panel is static: the
-						// 8 ms poll then costs a history lock + predicate instead
-						// of a full 12k-pixel blend that cannot change the frame.
-						if (have_publication && !lcd_history.HasPending() &&
+						if (have_publication && settled && !lcd_history.HasPending() &&
 							!lcd_response_reset_requested.load(std::memory_order_acquire)) {
 							temporal_status = 1;
+							skipped = true;
 						}
 						else {
 							temporal_status = TemporalTick();
@@ -1279,13 +1325,18 @@ namespace casioemu {
 						auto settings_lock = ordinary_lcd_history::UntrackedChange::LockSettings();
 						tick();
 					}
-					PublishLcdFrame();
+					const bool changed = PublishLcdFrame();
+					if (temporal_status == 1 && !changed && !lcd_history.HasPending())
+						settled = true;
+					else
+						settled = false;
 					if (temporal_status == 1)
 						have_publication = true;
+					interval = (skipped && !changed) ? kTemporalIdleInterval : kTemporalActiveInterval;
 				}
 				if constexpr (kCaptureLcdHistory) {
 					if (temporal_status >= 0) {
-						if (temporal_status == 1) lcd_history.WaitForWork(kTemporalInterval, running);
+						if (temporal_status == 1) lcd_history.WaitForWork(interval, running);
 						continue;
 					}
 				}

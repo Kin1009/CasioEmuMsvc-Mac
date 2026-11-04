@@ -188,6 +188,19 @@ public:
 	// this to stay asleep when the panel is static instead of replaying an
 	// empty timeline every few milliseconds.
 	bool HasPending() const;
+	// Timestamp of the most recently committed event (steady clock, ns). Used
+	// for the emulated-write -> published-frame latency counter.
+	uint64_t LatestEventSteadyNs() const noexcept {
+		return latest_event_steady_ns.load(std::memory_order_acquire);
+	}
+	// Timestamp of the transition from an empty queue to the first pending
+	// event. Measures notification -> first published frame latency.
+	uint64_t PendingSinceSteadyNs() const noexcept {
+		return pending_since_steady_ns.load(std::memory_order_acquire);
+	}
+	void ClearPendingSince() noexcept {
+		pending_since_steady_ns.store(0, std::memory_order_release);
+	}
 	void InvalidateEpoch();
 	// Hold Lock across the baseline copy, Reset and CaptureCutoff. Every
 	// producer, including fallback writes, must use that same mutation lease.
@@ -209,6 +222,8 @@ private:
 	uint64_t next_seq = 0;
 	std::atomic_bool active{true};
 	std::atomic_bool incomplete{false};
+	std::atomic_uint64_t latest_event_steady_ns{0};
+	std::atomic_uint64_t pending_since_steady_ns{0};
 	std::atomic_uint64_t coverage_revision{UntrackedRevision()};
 };
 
@@ -220,6 +235,9 @@ struct DisabledHistory {
 	ConsumeResult ConsumeUntil(const Cutoff&, DisabledBatch&) { return {}; }
 	bool Incomplete() const { return false; }
 	bool HasPending() const { return false; }
+	uint64_t LatestEventSteadyNs() const noexcept { return 0; }
+	uint64_t PendingSinceSteadyNs() const noexcept { return 0; }
+	void ClearPendingSince() noexcept {}
 	void InvalidateEpoch() {}
 	void Reset() {}
 	void Deactivate() noexcept {}
