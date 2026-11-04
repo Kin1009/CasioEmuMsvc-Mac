@@ -232,51 +232,158 @@ private:
 	// ------------------------------------------------------------- appearance
 	void RenderAppearance(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
-		ToolUi::Section("Color theme");
-		ToolUi::Description("Built-in presets and theme plugins share one token schema. Choosing a preset replaces an active plugin theme.");
-		ImGui::Spacing();
+	// Cached palettes for the preset list swatches (preset files are static).
+	static std::map<std::string, casioemu::plugin::ThemePalette> palette_cache;
+	const auto palette_for = [&](const std::string& id) -> const casioemu::plugin::ThemePalette& {
+		auto it = palette_cache.find(id);
+		if (it == palette_cache.end()) {
+			casioemu::plugin::ThemeResult result;
+			std::string load_error;
+			if (casioemu::plugin::LoadThemeFile((ThemeManager::ThemeDirectory() / (id + ".json")).string(),
+					result, load_error))
+				it = palette_cache.emplace(id, result.colors).first;
+			else
+				it = palette_cache.emplace(id, casioemu::plugin::ThemePalette{}).first;
+		}
+		return it->second;
+	};
 
-		const auto themes = tm.AvailableThemes();
-		const std::string current = tm.CurrentThemeName();
-		std::string currentLabel = current;
+	// The requested darkness range leads the list; other shipped presets follow.
+	static const char* preferred_order[] = {
+		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite",
+		"high-contrast-dark", "solarized", "vscode-dark", "vscode-dark-plus",
+		"mono-green", "vscode-light"
+	};
+	const auto rank = [](const std::string& id) {
+		for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(preferred_order)); ++i)
+			if (id == preferred_order[i])
+				return i;
+		return static_cast<int>(IM_ARRAYSIZE(preferred_order));
+	};
+	auto themes = tm.AvailableThemes();
+	std::stable_sort(themes.begin(), themes.end(), [&](const ThemeInfo& lhs, const ThemeInfo& rhs) {
+		const int lr = rank(lhs.id);
+		const int rr = rank(rhs.id);
+		return lr == rr ? lhs.name < rhs.name : lr < rr;
+	});
+
+	ToolUi::Section("Color theme");
+	ToolUi::Description("Click a preset to apply it immediately; the choice is saved. "
+		"Swatches preview the background, surface, accent and foreground of each theme.");
+	ImGui::Spacing();
+
+	const std::string saved = tm.CurrentThemeName();
+	const std::string effective = saved == "classic" ? "dark" : saved;
+	std::string currentLabel = saved.empty() ? "(none)" : saved;
+	for (const auto& info : themes) {
+		if (info.id == effective) {
+			currentLabel = info.name;
+			break;
+		}
+	}
+	if (saved == "classic")
+		currentLabel = "Dark (built-in classic)";
+	if (tm.IsPluginThemeActive())
+		ToolUi::Status("A theme plugin currently owns the style; choosing a preset replaces it.", UIHelpers::kColorWarning);
+
+	{
+		ToolUi::PanelScope panel("##theme_list_panel");
+		const float row_height = 44.0f;
+		bool showed_dark_header = false;
+		bool showed_light_header = false;
 		for (const auto& info : themes) {
-			if (info.id == current) {
-				currentLabel = info.name + " (" + info.id + ")";
-				break;
+			if (info.dark && !showed_dark_header) {
+				ImGui::TextDisabled("Dark presets");
+				showed_dark_header = true;
 			}
-		}
-		if (tm.IsPluginThemeActive())
-			ToolUi::Status("A theme plugin currently owns the style.", UIHelpers::kColorWarning);
+			else if (!info.dark && !showed_light_header) {
+				ImGui::Spacing();
+				ImGui::TextDisabled("Light presets");
+				showed_light_header = true;
+			}
+			ImGui::PushID(info.id.c_str());
+			const bool selected = info.id == effective;
+			const ImVec2 row = ImGui::GetCursorScreenPos();
+			const float row_width = ToolUi::RemainingWidth();
+			const float text_x = row.x + 52.0f;
+			const float name_width = ImGui::CalcTextSize(info.name.c_str()).x;
+			const float name_available = std::max(24.0f, row.x + row_width - text_x - 8.0f);
+			const bool two_line_name = name_width > name_available;
+			const float this_row_height = two_line_name ? 58.0f : row_height;
+			ImGui::InvisibleButton("##theme_row", ImVec2(row_width, this_row_height));
+			const bool hovered = ImGui::IsItemHovered();
+			if (ImGui::IsItemClicked()) {
+				std::string error;
+				if (!tm.ApplyThemeByName(info.id, &error))
+					themeError = error;
+				else
+					themeError.clear();
+			}
+			ImDrawList* draw = ImGui::GetWindowDrawList();
+			const auto& palette = palette_for(info.id);
+			const float rounding = 6.0f;
+			draw->AddRectFilled(row, ImVec2(row.x + row_width, row.y + this_row_height),
+				ImGui::ColorConvertFloat4ToU32(selected ? ToolUi::WithAlpha(ToolUi::Palette().selection, 0.55f)
+					: (hovered ? ToolUi::Palette().hover : ImVec4(0, 0, 0, 0))), rounding);
+			draw->AddRect(row, ImVec2(row.x + row_width, row.y + this_row_height),
+				ImGui::ColorConvertFloat4ToU32(selected ? ToolUi::Palette().accent : ToolUi::Palette().border),
+				rounding, 0, selected ? 2.0f : 1.0f);
+			if (selected)
+				draw->AddRectFilled(ImVec2(row.x + 2.0f, row.y + 8.0f),
+					ImVec2(row.x + 5.0f, row.y + this_row_height - 8.0f),
+					ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().accent), 2.0f);
 
-		ToolUi::Field("Preset");
-		ImGui::SetNextItemWidth(std::min(360.0f, ImGui::GetContentRegionAvail().x));
-		if (ImGui::BeginCombo("##theme_preset", currentLabel.c_str())) {
-			for (const auto& info : themes) {
-				const bool selected = info.id == current;
-				const std::string label = info.name + "##" + info.id;
-				if (ImGui::Selectable(label.c_str(), selected)) {
-					std::string error;
-					if (!tm.ApplyThemeByName(info.id, &error))
-						themeError = error;
-					else
-						themeError.clear();
+			// Swatch: background, inner surface, accent stripe, foreground tick.
+			const ImVec2 swatch(row.x + 12.0f, row.y + 7.0f);
+			const ImVec2 swatch_end(swatch.x + 30.0f, swatch.y + 30.0f);
+			draw->AddRectFilled(swatch, swatch_end, ImGui::ColorConvertFloat4ToU32(palette.background), 4.0f);
+			draw->AddRectFilled(ImVec2(swatch.x + 4.0f, swatch.y + 4.0f),
+				ImVec2(swatch.x + 20.0f, swatch.y + 20.0f), ImGui::ColorConvertFloat4ToU32(palette.surface), 3.0f);
+			draw->AddRectFilled(ImVec2(swatch_end.x - 8.0f, swatch.y + 4.0f),
+				ImVec2(swatch_end.x - 4.0f, swatch_end.y - 4.0f), ImGui::ColorConvertFloat4ToU32(palette.accent), 2.0f);
+			draw->AddRectFilled(ImVec2(swatch.x + 4.0f, swatch_end.y - 6.0f),
+				ImVec2(swatch.x + 20.0f, swatch_end.y - 4.0f), ImGui::ColorConvertFloat4ToU32(palette.foreground), 1.0f);
+			draw->AddRect(swatch, swatch_end, ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().border), 4.0f);
+
+			const ImU32 text = ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().foreground);
+			const ImU32 muted = ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().muted);
+			// Wrap a long name at the last word that fits; never clip the label.
+			std::string line1 = info.name;
+			std::string line2;
+			if (two_line_name) {
+				const size_t split = info.name.find_last_of(' ', static_cast<size_t>(name_available / 7.0f));
+				if (split != std::string::npos) {
+					line1 = info.name.substr(0, split);
+					line2 = info.name.substr(split + 1);
 				}
-				if (selected)
-					ImGui::SetItemDefaultFocus();
 			}
-			ImGui::EndCombo();
+			draw->AddText(ImVec2(text_x, row.y + 5.0f), text, line1.c_str());
+			if (!line2.empty()) {
+				draw->AddText(ImVec2(text_x, row.y + 18.0f), text, line2.c_str());
+				draw->AddText(ImVec2(text_x, row.y + 36.0f), muted, info.id.c_str());
+			}
+			else {
+				// The id only: a variant tag made the line clip in a narrow dock.
+				draw->AddText(ImVec2(text_x, row.y + 24.0f), muted, info.id.c_str());
+			}
+			ImGui::PopID();
+			ImGui::Spacing();
 		}
-		if (!themeError.empty())
-			ToolUi::Status(themeError.c_str(), UIHelpers::kColorError);
+	}
+	if (!themeError.empty())
+		ToolUi::Status(themeError.c_str(), UIHelpers::kColorError);
+	{
+		char current_text[160];
+		std::snprintf(current_text, sizeof(current_text), "Current: %s", currentLabel.c_str());
+		ToolUi::Hint(current_text);
+	}
 
-		ToolUi::Field("Variant");
-		if (ImGui::Button("Dark Mode"))
-			tm.SetDarkMode();
-		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Light Mode").x + 20.0f);
-		if (ImGui::Button("Light Mode"))
-			tm.SetLightMode();
-		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Current: Dark").x + 20.0f);
-		ImGui::TextDisabled("Current: %s", tm.IsDarkMode() ? "Dark" : "Light");
+	ToolUi::Field("Variant");
+	if (ImGui::Button("Dark Mode"))
+		tm.SetDarkMode();
+	ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Light Mode").x + 20.0f);
+	if (ImGui::Button("Light Mode"))
+		tm.SetLightMode();
 
 		ToolUi::Section("Scale and typography");
 		{
@@ -1123,6 +1230,16 @@ public:
 		if (const char* requested = std::getenv("CASIOEMU_SETTINGS_CATEGORY")) {
 			category = std::clamp(std::atoi(requested), 0, static_cast<int>(kCategoryCount) - 1);
 		}
+		// Headless verification: apply a preset for a screenshot.  PREVIEW does
+		// not persist; APPLY persists (used with a portable settings folder).
+		if (const char* preview = std::getenv("CASIOEMU_PREVIEW_THEME")) {
+			std::string error;
+			ThemeManager::Instance().PreviewThemeByName(preview, &error);
+		}
+		if (const char* apply = std::getenv("CASIOEMU_APPLY_THEME")) {
+			std::string error;
+			ThemeManager::Instance().ApplyThemeByName(apply, &error);
+		}
 	}
 
 	bool showFileDialog = false;
@@ -1185,6 +1302,10 @@ public:
 		case kAdvanced: RenderAdvanced(tm, settings, data); break;
 		default: break;
 		}
+		// Verification hook: park the settings page at a scroll offset so a
+		// screenshot can show rows below the fold.
+		if (const char* scroll = std::getenv("CASIOEMU_SETTINGS_SCROLL"))
+			ImGui::SetScrollY(std::max(0.0f, static_cast<float>(std::atof(scroll))));
 		ImGui::EndChild();
 	}
 };

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Graphite",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#161616",
+      "surface": "#101010",
+      "surfaceAlt": "#1E1E1E",
+      "foreground": "#D6D6D6",
+      "muted": "#8F8F8F",
+      "border": "#2A2A2A",
+      "borderStrong": "#3A3A3A",
+      "accent": "#7FA7D9",
+      "accentHover": "#9BBBE6",
+      "selection": "#34383D",
+      "hover": "#262626",
+      "error": "#E66A6A",
+      "warning": "#D9B84A",
+      "success": "#7BC98A",
+      "link": "#9BBBE6",
+      "titleBar": "#101010",
+      "activityBar": "#101010",
+      "statusBar": "#161616",
+      "panel": "#101010",
+      "tabActive": "#262626",
+      "tabInactive": "#1A1A1A"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

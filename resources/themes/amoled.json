@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "AMOLED (Pure Black)",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#000000",
+      "surface": "#0A0A0A",
+      "surfaceAlt": "#121212",
+      "foreground": "#E8E8E8",
+      "muted": "#9A9A9A",
+      "border": "#1C1C1C",
+      "borderStrong": "#2E2E2E",
+      "accent": "#6EA8FF",
+      "accentHover": "#8DBBFF",
+      "selection": "#1F3556",
+      "hover": "#202020",
+      "error": "#FF6B6B",
+      "warning": "#E6C34D",
+      "success": "#7BD88F",
+      "link": "#8DBBFF",
+      "titleBar": "#000000",
+      "activityBar": "#0A0A0A",
+      "statusBar": "#000000",
+      "panel": "#0A0A0A",
+      "tabActive": "#151515",
+      "tabInactive": "#0F0F0F"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

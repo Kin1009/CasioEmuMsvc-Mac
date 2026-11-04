@@ -298,6 +298,10 @@ public:
 	/// Falls back to the legacy style and returns false when the preset cannot
 	/// be resolved or parsed.
 	bool ApplyThemeByName(const std::string& themeId, std::string* error = nullptr);
+	/// Applies a preset for a live preview without writing settings.json.
+	bool PreviewThemeByName(const std::string& themeId, std::string* error = nullptr) {
+		return ApplyThemeInternal(themeId, false, error);
+	}
 	/// Id of the currently applied built-in preset.
 	const std::string& CurrentThemeName() const { return m_themeName; }
 	/// Built-in presets discovered under resources/themes (sorted by id).

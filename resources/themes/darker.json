@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Darker",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#0A0A10",
+      "surface": "#060609",
+      "surfaceAlt": "#12121A",
+      "foreground": "#DEDEEA",
+      "muted": "#86869B",
+      "border": "#1E1E28",
+      "borderStrong": "#33334A",
+      "accent": "#6C86E8",
+      "accentHover": "#829BFF",
+      "selection": "#242C4E",
+      "hover": "#2B3557",
+      "error": "#FF5C5C",
+      "warning": "#E9C64A",
+      "success": "#56CF70",
+      "link": "#8098F2",
+      "titleBar": "#05050A",
+      "activityBar": "#060609",
+      "statusBar": "#0A0A10",
+      "panel": "#060609",
+      "tabActive": "#1B2340",
+      "tabInactive": "#101018"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

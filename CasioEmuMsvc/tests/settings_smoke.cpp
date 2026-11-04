@@ -9,6 +9,8 @@
 
 #include "../../McpPlugin/json.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -38,6 +41,41 @@ void Check(bool condition, const std::string& message) {
 
 bool NearlyEqual(float lhs, float rhs) {
 	return std::fabs(lhs - rhs) < 0.001f;
+}
+
+struct Rgb {
+	float r = 0.0f, g = 0.0f, b = 0.0f;
+};
+
+bool ParseHexColor(const std::string& text, Rgb& out) {
+	std::string hex = text;
+	if (!hex.empty() && hex.front() == '#')
+		hex.erase(hex.begin());
+	if (hex.size() != 6)
+		return false;
+	for (char ch : hex) {
+		if (!std::isxdigit(static_cast<unsigned char>(ch)))
+			return false;
+	}
+	out.r = static_cast<float>(std::stoi(hex.substr(0, 2), nullptr, 16)) / 255.0f;
+	out.g = static_cast<float>(std::stoi(hex.substr(2, 2), nullptr, 16)) / 255.0f;
+	out.b = static_cast<float>(std::stoi(hex.substr(4, 2), nullptr, 16)) / 255.0f;
+	return true;
+}
+
+float RelativeLuminance(const Rgb& color) {
+	const auto channel = [](float value) {
+		return value <= 0.03928f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
+	};
+	return 0.2126f * channel(color.r) + 0.7152f * channel(color.g) + 0.0722f * channel(color.b);
+}
+
+float ContrastRatio(const Rgb& lhs, const Rgb& rhs) {
+	const float a = RelativeLuminance(lhs);
+	const float b = RelativeLuminance(rhs);
+	const float hi = std::max(a, b);
+	const float lo = std::min(a, b);
+	return (hi + 0.05f) / (lo + 0.05f);
 }
 
 std::string ReadText(const std::filesystem::path& path) {
@@ -206,13 +244,26 @@ std::vector<std::filesystem::path> ThemeFiles() {
 void TestThemeFiles() {
 	using json = nlohmann::json;
 	const auto files = ThemeFiles();
-	Check(files.size() >= 5, "all five built-in presets exist");
+	// Darkness range requested for the second UI pass + the presets kept as-is.
+	const std::vector<std::pair<std::string, std::string>> required = {
+		{ "dark", "Dark" },
+		{ "dark-plus", "Dark+" },
+		{ "darker", "Darker" },
+		{ "amoled", "AMOLED (Pure Black)" },
+		{ "midnight-blue", "Midnight Blue" },
+		{ "graphite", "Graphite" },
+		{ "high-contrast-dark", "High Contrast Dark" },
+		{ "solarized", "Solarized" },
+		{ "vscode-light", "VS Code Light Modern" },
+	};
+	Check(files.size() >= required.size(), "all darkness presets exist");
 
 	const std::vector<std::string> requiredColors = {
 		"background", "surface", "surfaceAlt", "foreground", "muted", "border",
 		"accent", "accentHover", "selection", "hover", "error", "warning", "success"
 	};
 
+	std::map<std::string, json> by_id;
 	for (const auto& file : files) {
 		const std::string text = ReadText(file);
 		Check(text.size() < 3 || (unsigned char)text[0] != 0xEF, file.filename().string() + " has no UTF-8 BOM");
@@ -224,6 +275,8 @@ void TestThemeFiles() {
 			Check(false, file.filename().string() + " parses: " + parse_error.what());
 			continue;
 		}
+		const std::string id = file.stem().string();
+		by_id[id] = document;
 		Check(document.value("schema", 0) == 1, file.filename().string() + " schema is 1");
 		const std::string variant = document.value("variant", "");
 		Check(variant == "dark" || variant == "light", file.filename().string() + " variant is dark/light");
@@ -253,6 +306,73 @@ void TestThemeFiles() {
 				Check(false, file.filename().string() + " typography.scale is present");
 			}
 		}
+	}
+
+	// Exact names and the AMOLED spec.
+	for (const auto& [id, name] : required) {
+		auto it = by_id.find(id);
+		if (it == by_id.end()) {
+			Check(false, id + ".json is present");
+			continue;
+		}
+		Check(it->second.value("name", std::string()) == name, id + ".json is named '" + name + "'");
+		std::cout << "[theme] " << name << " (" << id << ") bg="
+			<< it->second["tokens"]["colors"].value("background", std::string())
+			<< " surface=" << it->second["tokens"]["colors"].value("surface", std::string()) << '\n';
+	}
+	if (auto it = by_id.find("amoled"); it != by_id.end()) {
+		const auto& colors = it->second["tokens"]["colors"];
+		Check(colors.value("background", std::string()) == "#000000", "AMOLED background is #000000");
+		Check(colors.value("surface", std::string()) == "#0A0A0A", "AMOLED surface is #0A0A0A");
+	}
+
+	// Darkness ordering: Dark -> Dark+ -> Darker.
+	const auto luminance_of = [&](const std::string& id) {
+		Rgb rgb;
+		if (!by_id.count(id) || !ParseHexColor(by_id[id]["tokens"]["colors"].value("background", std::string()), rgb))
+			return -1.0f;
+		return RelativeLuminance(rgb);
+	};
+	const float dark_lum = luminance_of("dark");
+	const float plus_lum = luminance_of("dark-plus");
+	const float darker_lum = luminance_of("darker");
+	Check(dark_lum > plus_lum && plus_lum > darker_lum, "Dark > Dark+ > Darker background luminance");
+
+	// Readability at every darkness level.  Presets that shipped before this
+	// pass (Solarized, VS Code) are kept byte-for-byte as-is, so the strict
+	// checks apply to the new darkness range only.
+	const std::vector<std::string> darkness_ids = {
+		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite", "high-contrast-dark"
+	};
+	for (const auto& [id, document] : by_id) {
+		if (std::find(darkness_ids.begin(), darkness_ids.end(), id) == darkness_ids.end())
+			continue;
+		if (!document.contains("tokens") || !document["tokens"].contains("colors"))
+			continue;
+		const auto& colors = document["tokens"]["colors"];
+		Rgb background, surface, foreground, muted, accent, selection, error, warning, success;
+		if (!ParseHexColor(colors.value("background", std::string()), background) ||
+			!ParseHexColor(colors.value("surface", std::string()), surface) ||
+			!ParseHexColor(colors.value("foreground", std::string()), foreground) ||
+			!ParseHexColor(colors.value("muted", std::string()), muted) ||
+			!ParseHexColor(colors.value("accent", std::string()), accent) ||
+			!ParseHexColor(colors.value("selection", std::string()), selection) ||
+			!ParseHexColor(colors.value("error", std::string()), error) ||
+			!ParseHexColor(colors.value("warning", std::string()), warning) ||
+			!ParseHexColor(colors.value("success", std::string()), success)) {
+			Check(false, id + " colors parse as hex");
+			continue;
+		}
+		const bool light = document.value("variant", "dark") == "light";
+		if (light)
+			continue;
+		Check(ContrastRatio(foreground, background) >= 7.0f, id + " foreground contrast >= 7");
+		Check(ContrastRatio(muted, background) >= 4.5f, id + " muted contrast >= 4.5");
+		Check(ContrastRatio(error, background) >= 4.5f, id + " error contrast >= 4.5");
+		Check(ContrastRatio(warning, background) >= 4.5f, id + " warning contrast >= 4.5");
+		Check(ContrastRatio(success, background) >= 4.5f, id + " success contrast >= 4.5");
+		Check(ContrastRatio(accent, background) >= 4.0f, id + " accent contrast >= 4.0");
+		Check(ContrastRatio(foreground, selection) >= 4.5f, id + " selected text contrast >= 4.5");
 	}
 }
 

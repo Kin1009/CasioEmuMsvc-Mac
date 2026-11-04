@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Dark",
+  "variant": "dark",
+  "tokens": {
+    "colors": {
+      "background": "#14141F",
+      "surface": "#0D0D12",
+      "surfaceAlt": "#1F1F2E",
+      "foreground": "#E6E6F0",
+      "muted": "#8C8C9E",
+      "border": "#2E2E3D",
+      "borderStrong": "#474761",
+      "accent": "#6680E6",
+      "accentHover": "#738CF2",
+      "selection": "#293359",
+      "hover": "#3D4D80",
+      "error": "#F24D4D",
+      "warning": "#F2CC33",
+      "success": "#4DCC4D",
+      "link": "#6680E6",
+      "titleBar": "#0F0F17",
+      "activityBar": "#0D0D12",
+      "statusBar": "#14141F",
+      "panel": "#0D0D12",
+      "tabActive": "#2E3D6B",
+      "tabInactive": "#1F2438"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}
