@@ -49,14 +49,17 @@ using casioemu::plugin::ThemePalette;
 using casioemu::settings::SettingsData;
 using casioemu::settings::SettingsStore;
 
+void PushMenuStyle(const ThemePalette& palette);
+void PopMenuStyle();
+
 // The chrome row is 28 px tall: AppKit centres the native traffic lights at
 // y = 14 from the top of a full-size content view.  Every chrome element is
 // drawn on that same centre line (title, menus, actions).
 constexpr float kTitleBarHeight = 28.0f;
 constexpr float kChromeControlHeight = 22.0f;
-constexpr float kTabStripHeight = 30.0f;
+constexpr float kTabStripHeight = 40.0f;
 constexpr float kBreadcrumbHeight = 22.0f;
-constexpr float kStatusBarHeight = 22.0f;
+constexpr float kStatusBarHeight = 36.0f;
 constexpr float kPanelHeaderHeight = 35.0f;
 constexpr float kSidebarHeaderHeight = 46.0f;
 constexpr float kActivityBarWidth = 48.0f;
@@ -164,7 +167,9 @@ struct State {
 	size_t mainTabSignature = 0;
 	std::vector<std::string> docTabLabels;
 	std::vector<float> docTabWidths;
+	std::vector<ImVec4> docTabRects;
 	size_t docTabSignature = 0;
+	float docStripHeight = 30.0f;
 	std::map<std::string, SidebarDirCache> sidebarCache;
 	int sidebarScanCount = 0;
 	double sidebarScanMs = 0.0;
@@ -273,6 +278,12 @@ struct State {
 	ImVec4 rectPanel{};
 	ImVec4 rectStatus{};
 	ImVec4 rectTools{};
+	ImVec4 rectSidebarBody{};
+	ImVec4 rectContentBody{};
+	ImVec4 rectPanelBody{};
+	ImVec4 rectToolsBody{};
+	ImVec4 rectStatusContent{};
+	ImVec4 rectTabsContent{};
 };
 
 State g;
@@ -993,6 +1004,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 			else if (std::strcmp(menu, "Session") == 0)
 				ImGui::OpenPopup("##session_menu");
 		}
+		PushMenuStyle(palette);
 		if (ImGui::BeginPopup("##file_menu")) {
 			if (ImGui::MenuItem("Open Model...")) RequestOpenModel();
 			if (ImGui::MenuItem("Import Model Package...")) RequestShellImport();
@@ -1003,6 +1015,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 			if (ImGui::MenuItem("Quit")) g.quitRequested = true;
 			ImGui::EndPopup();
 		}
+		PushMenuStyle(palette);
 		if (ImGui::BeginPopup("##view_menu")) {
 			if (ImGui::MenuItem("Toggle Sidebar")) ToggleSidebar();
 			if (ImGui::MenuItem("Toggle Panel")) ToggleBottomPanel();
@@ -1012,6 +1025,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 			if (ImGui::MenuItem("Command Palette")) OpenCommandPalette();
 			ImGui::EndPopup();
 		}
+		PushMenuStyle(palette);
 		if (ImGui::BeginPopup("##session_menu")) {
 			if (ImGui::MenuItem("Pause / Resume") && m_emu) m_emu->SetPaused(!m_emu->GetPaused());
 			if (ImGui::MenuItem("Reset") && m_emu) m_emu->ResetToMainMenu();
@@ -1020,6 +1034,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 			if (ImGui::MenuItem("Build & Run")) BuildToolchain(true);
 			ImGui::EndPopup();
 		}
+		PopMenuStyle();
 		ImGui::PopID();
 		menu_x += w + 2.0f;
 	}
@@ -1094,6 +1109,7 @@ void RenderTabStrip(const ThemePalette& palette) {
 	const ImGuiViewport* viewport = ImGui::GetMainViewport();
 	const ImVec2 pos(viewport->Pos.x, viewport->Pos.y + kTitleBarHeight);
 	const float width = viewport->Size.x;
+	g.rectTabsContent = ImVec4(pos.x + 8.0f, pos.y + 8.0f, width - 16.0f, kTabStripHeight - 16.0f);
 	DrawFlatPanel("##ShellTabs", pos, ImVec2(width, kTabStripHeight), palette.surface);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	draw->AddLine(ImVec2(pos.x, pos.y + kTabStripHeight - 1.0f),
@@ -1205,9 +1221,9 @@ void RenderTabStrip(const ThemePalette& palette) {
 		const float item_x = pos.x + x;
 		const bool visible = item_x + item.width > pos.x && item_x < pos.x + tabs_right;
 		if (visible) {
-			ImGui::SetCursorScreenPos(ImVec2(item_x, pos.y + 2.0f));
+			ImGui::SetCursorScreenPos(ImVec2(item_x, pos.y + 8.0f));
 			ImGui::PushID(item_index);
-			ImGui::InvisibleButton("##main_tab", ImVec2(item.width, kTabStripHeight - 3.0f));
+			ImGui::InvisibleButton("##main_tab", ImVec2(item.width, 24.0f));
 			const bool hovered = ImGui::IsItemHovered();
 			const ImVec2 min = ImGui::GetItemRectMin();
 			const ImVec2 max = ImGui::GetItemRectMax();
@@ -1277,7 +1293,7 @@ void RenderTabStrip(const ThemePalette& palette) {
 		else {
 			MainTabRect rect;
 			rect.label = item.label;
-			rect.rect = ImVec4(item_x, pos.y + 2.0f, item.width, kTabStripHeight - 3.0f);
+			rect.rect = ImVec4(item_x, pos.y + 8.0f, item.width, 24.0f);
 			rect.active = item.active;
 			rect.settings = item.kind == 3;
 			rect.kind = item.kind;
@@ -1293,15 +1309,14 @@ void RenderTabStrip(const ThemePalette& palette) {
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive, palette.selection);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + width - plus_area + 8.0f,
-		pos.y + (kTabStripHeight - 3.0f - plus_size) * 0.5f + 1.0f));
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + width - plus_area + 8.0f, pos.y + 8.0f));
 	if (ImGui::Button("+##newtab", ImVec2(plus_size, plus_size)))
 		open_welcome = true;
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("New tab (Welcome)");
 	ImGui::PopStyleColor(4);
-	draw->AddLine(ImVec2(pos.x + width - plus_area + 2.0f, pos.y + 6.0f),
-		ImVec2(pos.x + width - plus_area + 2.0f, pos.y + kTabStripHeight - 7.0f),
+	draw->AddLine(ImVec2(pos.x + width - plus_area + 2.0f, pos.y + 10.0f),
+		ImVec2(pos.x + width - plus_area + 2.0f, pos.y + kTabStripHeight - 10.0f),
 		ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
 
 	if (max_scroll > 0.0f) {
@@ -1429,6 +1444,7 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 				OpenFileInEditor(entry_path);
 			}
 		}
+		PushMenuStyle(palette);
 		if (ImGui::BeginPopupContextItem("##explorer_context")) {
 			g.selectedPath = entry_path;
 			g.selectedIsDir = is_directory;
@@ -1466,6 +1482,7 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 				ImGui::SetClipboardText(entry_path.string().c_str());
 			ImGui::EndPopup();
 		}
+		PopMenuStyle();
 		ImGui::PopStyleColor(3);
 		ImGui::PopID();
 		if (is_directory && g.expanded.count(key))
@@ -1539,8 +1556,10 @@ void RenderSidebar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 	ImGui::PopStyleColor(3);
 
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + header_height + 3.0f));
-	ImGui::BeginChild("##explorer_body", ImVec2(size.x - 32.0f, size.y - header_height - 14.0f), ImGuiChildFlags_None);
+	g.rectSidebarBody = ImVec4(pos.x + 16.0f, pos.y + header_height + 8.0f,
+		size.x - 32.0f, size.y - header_height - 24.0f);
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + header_height + 8.0f));
+	ImGui::BeginChild("##explorer_body", ImVec2(size.x - 32.0f, size.y - header_height - 24.0f), ImGuiChildFlags_None);
 	if (g.workspace.empty()) {
 		ImGui::TextWrapped("You have not yet opened a folder.");
 		ImGui::Spacing();
@@ -1669,7 +1688,7 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 		ImGui::ColorConvertFloat4ToU32(palette.titleBar));
 	ImGui::GetWindowDrawList()->AddText(ImVec2(window_pos.x + 12.0f, window_pos.y + 4.0f),
 		ImGui::ColorConvertFloat4ToU32(palette.muted), "CALCULATOR");
-	ImGui::SetCursorPos(ImVec2(size.x - 54.0f, 1.0f));
+	ImGui::SetCursorPos(ImVec2(size.x - 12.0f - 58.0f, 1.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
@@ -1677,8 +1696,9 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 		g.calculatorVisible = false;
 	ImGui::PopStyleColor(3);
 
-	ImGui::SetCursorPos(ImVec2(1.0f, 23.0f));
-	ImGui::BeginChild("##calculator_host", ImVec2(size.x - 2.0f, size.y - 24.0f), ImGuiChildFlags_None,
+	g.rectToolsBody = ImVec4(pos.x + 12.0f, pos.y + 30.0f, size.x - 24.0f, size.y - 38.0f);
+	ImGui::SetCursorPos(ImVec2(12.0f, 30.0f));
+	ImGui::BeginChild("##calculator_host", ImVec2(size.x - 24.0f, size.y - 38.0f), ImGuiChildFlags_None,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 	UIWindow* calculator = FindWindow("Calculator");
 	if (!calculator) {
@@ -1688,7 +1708,14 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 		ImGui::SetCursorPos(ImVec2(8.0f, 8.0f));
 		ImGui::BeginChild("##calculator_inner", ImVec2(-16.0f, -16.0f), ImGuiChildFlags_None,
 			ImGuiWindowFlags_NoScrollbar);
+		// Keep the calculator's own drawing inside the padded host even when a
+		// model's zoom makes it wider than the panel.
+		const ImVec2 calc_pos = ImGui::GetWindowPos();
+		const ImVec2 calc_size = ImGui::GetWindowSize();
+		ImGui::PushClipRect(ImVec2(calc_pos.x + 6.0f, calc_pos.y + 6.0f),
+			ImVec2(calc_pos.x + calc_size.x - 6.0f, calc_pos.y + calc_size.y - 6.0f), true);
 		calculator->RenderCore();
+		ImGui::PopClipRect();
 		ImGui::EndChild();
 		const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
 			ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -1835,7 +1862,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
 	doc.editor.SetPalette(ThemeManager::Instance().IsDarkMode()
 		? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
-	doc.editor.Render("##file_editor_body", ImVec2(size.x - 16.0f, size.y - toolbar_height - 8.0f), true);
+	doc.editor.Render("##file_editor_body", ImVec2(size.x - 24.0f, size.y - toolbar_height - 20.0f), true);
 	ImGui::PopStyleVar();
 
 	const std::string current_text = doc.editor.GetText();
@@ -1851,6 +1878,14 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellDocuments", pos, size, palette.background);
 	auto tools = ToolWindows();
+	if (const char* stress = std::getenv("CASIOEMU_STRESS_TOOLS")) {
+		const int wanted = std::max(0, std::atoi(stress));
+		if (wanted > 0 && !tools.empty()) {
+			const auto base = tools;
+			while (static_cast<int>(tools.size()) < wanted)
+				tools.push_back(base[tools.size() % base.size()]);
+		}
+	}
 	SortToolsByOrder(tools);
 	if (tools.empty()) {
 		RenderWelcome(palette);
@@ -1880,11 +1915,13 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 	g.toolIndex = std::clamp(g.toolIndex, 0, static_cast<int>(tools.size()) - 1);
 
-	// Document tabs: full labels, fixed-height strip.  All geometry comes from
-	// the state (tool order and scroll offset), never from the previous frame's
-	// cursor, so a resize cannot shuffle tabs.
-	constexpr float kDocStripHeight = 30.0f;
-	constexpr float kDocTabHeight = 26.0f;
+	// Document tabs wrap onto as many rows as needed.  There is no horizontal
+	// scroller: every tab stays visible with its full label, and the strip grows
+	// in height instead.
+	constexpr float kDocPad = 12.0f;
+	constexpr float kDocTop = 8.0f;
+	constexpr float kDocTabHeight = 24.0f;
+	constexpr float kDocRowGap = 2.0f;
 	size_t doc_signature = 1469598103934665603ull;
 	auto mix_doc = [&](size_t value) {
 		doc_signature ^= value + 0x9e3779b97f4a7c15ull;
@@ -1905,66 +1942,55 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 	const auto& labels = g.docTabLabels;
 	const auto& widths = g.docTabWidths;
-	float total_width = 12.0f;
-	for (const float tab_width : widths)
-		total_width += tab_width;
-	float max_scroll = std::max(0.0f, total_width - size.x);
-	if (g.lastToolIndex != g.toolIndex || std::fabs(g.lastDocStripWidth - size.x) > 0.5f) {
-		g.lastToolIndex = g.toolIndex;
-		g.lastDocStripWidth = size.x;
-		float left = 6.0f;
-		for (int index = 0; index < g.toolIndex && index < static_cast<int>(widths.size()); ++index)
-			left += widths[static_cast<size_t>(index)];
-		const float right = left + (g.toolIndex < static_cast<int>(widths.size()) ? widths[static_cast<size_t>(g.toolIndex)] : 0.0f);
-		if (left < g.docScroll)
-			g.docScroll = left;
-		else if (right > g.docScroll + size.x)
-			g.docScroll = right - size.x;
+	const float available = std::max(80.0f, size.x - kDocPad * 2.0f);
+	g.docTabRects.clear();
+	g.docTabRects.reserve(labels.size());
+	float row_x = kDocPad;
+	float row_y = kDocTop;
+	for (size_t index = 0; index < labels.size(); ++index) {
+		const float tab_width = std::min(widths[index], available);
+		if (row_x > kDocPad && row_x + tab_width > kDocPad + available) {
+			row_x = kDocPad;
+			row_y += kDocTabHeight + kDocRowGap;
+		}
+		g.docTabRects.push_back(ImVec4(row_x, row_y, tab_width, kDocTabHeight));
+		row_x += tab_width + kDocRowGap;
 	}
-	g.docScroll = std::clamp(g.docScroll, 0.0f, max_scroll);
+	const float strip_height = row_y + kDocTabHeight + kDocTop;
+	g.docStripHeight = strip_height;
 
 	ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, palette.surface);
-	ImGui::BeginChild("##doc_tabs", ImVec2(size.x, kDocStripHeight), ImGuiChildFlags_None,
+	ImGui::BeginChild("##doc_tabs", ImVec2(size.x, strip_height), ImGuiChildFlags_None,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-	if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f && max_scroll > 0.0f)
-		g.docScroll = std::clamp(g.docScroll - ImGui::GetIO().MouseWheel * 32.0f, 0.0f, max_scroll);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
-	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(pos.x + size.x, pos.y + kDocStripHeight), true);
-	float x = 6.0f - g.docScroll;
+	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(pos.x + size.x, pos.y + strip_height), true);
 	for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
-		const std::string& label = labels[static_cast<size_t>(index)];
-		const float tab_width = widths[static_cast<size_t>(index)];
-		// Draw every intersecting tab.  Skipping partially visible tabs made
-		// the strip look like items vanished while scrolling.
-		const bool visible = x + tab_width > 0.0f && x < size.x;
-		if (visible) {
-			ImGui::SetCursorPos(ImVec2(x, 2.0f));
-			ImGui::PushID(index);
-			const bool clicked = ImGui::InvisibleButton("##doc_tab", ImVec2(tab_width - 1.0f, kDocTabHeight));
-			const bool hovered = ImGui::IsItemHovered();
-			if (clicked)
-				g.toolIndex = index;
-			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
-				g.draggingTool = index;
-			if (g.draggingTool >= 0 && hovered && g.draggingTool != index)
-				g.dragTargetTool = index;
-			const ImVec2 min = ImGui::GetItemRectMin();
-			const ImVec2 max = ImGui::GetItemRectMax();
-			const bool selected = index == g.toolIndex;
-			draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(selected ? palette.tabActive :
-				(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
-			draw->AddLine(ImVec2(max.x - 1.0f, min.y + 4.0f), ImVec2(max.x - 1.0f, max.y - 4.0f),
-				ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
-			if (selected)
-				draw->AddRectFilled(ImVec2(min.x + 3.0f, min.y), ImVec2(max.x - 3.0f, min.y + 2.0f),
-					ImGui::ColorConvertFloat4ToU32(palette.accent));
-			draw->AddText(ImVec2(min.x + 15.0f, min.y + (kDocTabHeight - ImGui::GetTextLineHeight()) * 0.5f),
-				ImGui::ColorConvertFloat4ToU32(selected ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
-				label.c_str());
-			ImGui::PopID();
-		}
-		x += tab_width;
+		const ImVec4& rect = g.docTabRects[static_cast<size_t>(index)];
+		ImGui::SetCursorPos(ImVec2(rect.x, rect.y));
+		ImGui::PushID(index);
+		const bool clicked = ImGui::InvisibleButton("##doc_tab", ImVec2(rect.z - 1.0f, rect.w));
+		const bool hovered = ImGui::IsItemHovered();
+		if (clicked)
+			g.toolIndex = index;
+		if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 4.0f))
+			g.draggingTool = index;
+		if (g.draggingTool >= 0 && hovered && g.draggingTool != index)
+			g.dragTargetTool = index;
+		const ImVec2 min = ImGui::GetItemRectMin();
+		const ImVec2 max = ImGui::GetItemRectMax();
+		const bool selected = index == g.toolIndex;
+		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(selected ? palette.tabActive :
+			(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
+		draw->AddLine(ImVec2(max.x - 1.0f, min.y + 4.0f), ImVec2(max.x - 1.0f, max.y - 4.0f),
+			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
+		if (selected)
+			draw->AddRectFilled(ImVec2(min.x + 3.0f, min.y), ImVec2(max.x - 3.0f, min.y + 2.0f),
+				ImGui::ColorConvertFloat4ToU32(palette.accent));
+		draw->AddText(ImVec2(min.x + 15.0f, min.y + (kDocTabHeight - ImGui::GetTextLineHeight()) * 0.5f),
+			ImGui::ColorConvertFloat4ToU32(selected ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
+			labels[static_cast<size_t>(index)].c_str());
+		ImGui::PopID();
 	}
 	ImGui::PopClipRect();
 	if (g.draggingTool >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -1982,40 +2008,11 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		g.draggingTool = -1;
 		g.dragTargetTool = -1;
 	}
-	if (max_scroll > 0.0f) {
-		const float track_x = 8.0f;
-		const float track_w = std::max(40.0f, size.x - 16.0f);
-		const float thumb_w = std::max(28.0f, track_w * (size.x / total_width));
-		const float thumb_x = track_x + (g.docScroll / max_scroll) * (track_w - thumb_w);
-		const float bar_y = kDocStripHeight - 3.0f;
-		draw->AddRectFilled(ImVec2(pos.x + track_x, pos.y + bar_y),
-			ImVec2(pos.x + track_x + track_w, pos.y + bar_y + 2.0f),
-			ImGui::ColorConvertFloat4ToU32(palette.border));
-		draw->AddRectFilled(ImVec2(pos.x + thumb_x, pos.y + bar_y),
-			ImVec2(pos.x + thumb_x + thumb_w, pos.y + bar_y + 2.0f),
-			ImGui::ColorConvertFloat4ToU32(palette.muted));
-		ImGui::SetCursorScreenPos(ImVec2(pos.x + track_x, pos.y + bar_y - 2.0f));
-		ImGui::InvisibleButton("##doc_scrollbar", ImVec2(track_w, 6.0f));
-		if (ImGui::IsItemActivated()) {
-			g.docScrollbarDragging = true;
-			g.docScrollbarStartMouse = ImGui::GetIO().MousePos.x;
-			g.docScrollbarStartScroll = g.docScroll;
-		}
-		if (ImGui::IsItemActive() && g.docScrollbarDragging) {
-			const float delta = ImGui::GetIO().MousePos.x - g.docScrollbarStartMouse;
-			const float t = delta / std::max(1.0f, track_w - thumb_w);
-			g.docScroll = std::clamp(g.docScrollbarStartScroll + t * max_scroll, 0.0f, max_scroll);
-		}
-		if (ImGui::IsItemDeactivated())
-			g.docScrollbarDragging = false;
-		if (ImGui::IsItemHovered())
-			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-	}
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
 
-	ImGui::SetCursorPos(ImVec2(1.0f, kDocStripHeight + 1.0f));
-	ImGui::BeginChild("##doc_body", ImVec2(size.x - 2.0f, size.y - kDocStripHeight - 2.0f), ImGuiChildFlags_None);
+	ImGui::SetCursorPos(ImVec2(kDocPad, strip_height + 8.0f));
+	ImGui::BeginChild("##doc_body", ImVec2(size.x - kDocPad * 2.0f, size.y - strip_height - 20.0f), ImGuiChildFlags_None);
 	UIWindow* active = tools[static_cast<size_t>(g.toolIndex)];
 	if (active->open)
 		active->RenderCore();
@@ -2048,6 +2045,7 @@ void RenderSettingsDocument(const ThemePalette& palette, ImVec2 pos, ImVec2 size
 }
 
 void RenderContent(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
+	g.rectContentBody = ImVec4(pos.x + 12.0f, pos.y + 12.0f, size.x - 24.0f, size.y - 24.0f);
 	if (g.activeSettings)
 		RenderSettingsDocument(palette, pos, size);
 	else if (g.activeFile >= 0)
@@ -2227,7 +2225,11 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::ColorConvertFloat4ToU32(palette.surface));
 
 	const char* tabs[] = { "Output", "Problems", "Terminal" };
+	const bool compact_panel = size.x < 520.0f;
+	const float close_width = compact_panel ? 26.0f : 70.0f;
+	const float tabs_limit = pos.x + size.x - close_width - 24.0f;
 	float x = pos.x + 12.0f;
+	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(tabs_limit, pos.y + kPanelHeaderHeight), true);
 	for (int index = 0; index < 3; ++index) {
 		const float width = TextWidth(tabs[index]) + 26.0f +
 			((index == 1 && !g.problems.empty()) ? 34.0f : 0.0f);
@@ -2261,18 +2263,22 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::PopID();
 		x += width;
 	}
+	ImGui::PopClipRect();
 
-	// right-side chevron / close
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 78.0f, pos.y + 6.0f));
+	// right-side close (compact label on narrow editor columns)
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 12.0f - close_width, pos.y + 6.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	if (ImGui::Button("Close##panel_close", ImVec2(70, 22)))
+	if (ImGui::Button(compact_panel ? "x##panel_close" : "Close##panel_close",
+			ImVec2(close_width, 22)))
 		g.panelVisible = false;
 	ImGui::PopStyleColor(3);
 
-	ImGui::SetCursorScreenPos(ImVec2(pos.x + 1.0f, pos.y + kPanelHeaderHeight));
-	ImGui::BeginChild("##panel_content", ImVec2(size.x - 2.0f, size.y - kPanelHeaderHeight - 1.0f), ImGuiChildFlags_None);
+	g.rectPanelBody = ImVec4(pos.x + 12.0f, pos.y + kPanelHeaderHeight + 8.0f,
+		size.x - 24.0f, size.y - kPanelHeaderHeight - 20.0f);
+	ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, pos.y + kPanelHeaderHeight + 8.0f));
+	ImGui::BeginChild("##panel_content", ImVec2(size.x - 24.0f, size.y - kPanelHeaderHeight - 20.0f), ImGuiChildFlags_None);
 	if (g.panelTab == 0)
 		RenderOutputTab();
 	else if (g.panelTab == 1)
@@ -2304,6 +2310,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 }
 
 void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
+	g.rectStatusContent = ImVec4(pos.x + 12.0f, pos.y + 8.0f, size.x - 24.0f, size.y - 16.0f);
 	DrawFlatPanel("##ShellStatus", pos, size, palette.statusBar);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	const ImU32 fg = ImGui::ColorConvertFloat4ToU32(palette.statusBarForeground);
@@ -2313,9 +2320,9 @@ void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::PushFont(g_small_font);
 	float x = pos.x + 10.0f;
 	auto item = [&](const char* text, ImU32 color) {
-		draw->AddText(ImVec2(x, pos.y + 2.0f), color, text);
+		draw->AddText(ImVec2(x, pos.y + 8.0f), color, text);
 		x += TextWidth(text) + 8.0f;
-		draw->AddText(ImVec2(x, pos.y + 2.0f), dim, "|");
+		draw->AddText(ImVec2(x, pos.y + 8.0f), dim, "|");
 		x += TextWidth("|") + 8.0f;
 	};
 	const bool paused = m_emu && m_emu->GetPaused();
@@ -2332,12 +2339,12 @@ void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			(int)std::count_if(g.problems.begin(), g.problems.end(), [](const DiagLine& d) { return d.severity >= 2; }),
 			(int)std::count_if(g.problems.begin(), g.problems.end(), [](const DiagLine& d) { return d.severity == 1; }));
 		const float counts_w = TextWidth(counts);
-		draw->AddText(ImVec2(pos.x + size.x * 0.45f - counts_w * 0.5f, pos.y + 2.0f), fg, counts);
+		draw->AddText(ImVec2(pos.x + size.x * 0.45f - counts_w * 0.5f, pos.y + 8.0f), fg, counts);
 	}
 	std::string right = SettingsStore::Instance().Data().language + "  |  " +
 		ThemeManager::Instance().CurrentThemeName() + "  |  build " CASIOEMU_BUILD_COMMIT " " CASIOEMU_BUILD_TIME;
 	const float right_width = TextWidth(right.c_str());
-	draw->AddText(ImVec2(pos.x + size.x - right_width - 10.0f, pos.y + 2.0f), fg, right.c_str());
+	draw->AddText(ImVec2(pos.x + size.x - right_width - 12.0f, pos.y + 8.0f), fg, right.c_str());
 	if (small)
 		ImGui::PopFont();
 	EndFlatPanel();
@@ -2424,6 +2431,22 @@ const std::vector<PaletteCommand>& Commands() {
 		{ "theme.mono-green", "Preferences: Color Theme - Mono Green", "" },
 	};
 	return commands;
+}
+
+void PushMenuStyle(const ThemePalette& palette) {
+	ImGui::PushStyleColor(ImGuiCol_PopupBg, palette.surface);
+	ImGui::PushStyleColor(ImGuiCol_Border, palette.borderStrong);
+	ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+	ImGui::SetNextWindowSizeConstraints(ImVec2(200.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
+}
+
+void PopMenuStyle() {
+	ImGui::PopStyleVar(5);
+	ImGui::PopStyleColor(2);
 }
 
 void PushDialogStyle(const ThemePalette& palette) {
@@ -2890,10 +2913,21 @@ void RenderLayout() {
 	const float top = kTitleBarHeight + kTabStripHeight;
 	const float status_h = kStatusBarHeight;
 	const float panel_h = g.panelVisible ? std::min(g.panelHeight, height * 0.6f) : 0.0f;
-	const float calculator_w = g.calculatorVisible ? std::min(g.calculatorWidth, width * 0.55f) : 0.0f;
-	const float sidebar_w = g.sidebarVisible ? std::min(g.sidebarWidth, width * 0.40f) : 0.0f;
+	float calculator_w = g.calculatorVisible ? std::min(g.calculatorWidth, width * 0.55f) : 0.0f;
+	float sidebar_w = g.sidebarVisible ? std::min(g.sidebarWidth, width * 0.40f) : 0.0f;
+	// On a narrow window the fixed side panels must give way instead of pushing
+	// the main column past the right edge.
+	const float min_content_w = 220.0f;
+	if (sidebar_w + calculator_w + min_content_w > width) {
+		const float scale = std::max(0.0f, width - min_content_w) /
+			std::max(1.0f, sidebar_w + calculator_w);
+		sidebar_w = std::max(140.0f, sidebar_w * scale);
+		calculator_w = std::max(160.0f, calculator_w * scale);
+		if (sidebar_w + calculator_w + min_content_w > width)
+			calculator_w = std::max(120.0f, width - sidebar_w - min_content_w);
+	}
 	const float content_x = viewport->Pos.x + sidebar_w;
-	const float content_w = std::max(220.0f, width - sidebar_w - calculator_w);
+	const float content_w = std::max(200.0f, width - sidebar_w - calculator_w);
 	const float body_h = std::max(160.0f, height - top - status_h);
 	const float editor_h = std::max(80.0f, body_h - panel_h);
 	const float editor_y = viewport->Pos.y + top;
@@ -3336,7 +3370,7 @@ bool WriteLayoutReport(const std::string& path) {
 		if (previous_right >= 0.0f && tab.rect.x < previous_right - eps)
 			tab_layout_ok = false;
 		previous_right = tab.rect.x + tab.rect.z;
-		if (std::fabs(tab.rect.w - 27.0f) > eps || tab.rect.y < g.rectTabs.y - eps ||
+		if (std::fabs(tab.rect.w - 24.0f) > eps || tab.rect.y < g.rectTabs.y - eps ||
 			tab.rect.y + tab.rect.w > g.rectTabs.y + g.rectTabs.w + eps)
 			tab_size_ok = false;
 	}
@@ -3344,6 +3378,17 @@ bool WriteLayoutReport(const std::string& path) {
 		<< " file_tabs=" << file_tabs << " welcome_tabs=" << welcome_tabs
 		<< " settings_tabs=" << settings_tabs << " tab_scroll=" << g.tabScroll
 		<< " doc_scroll=" << g.docScroll << '\n';
+	auto inset_ok = [](const ImVec4& outer, const ImVec4& inner, float pad) {
+		return inner.x - outer.x >= pad - 0.5f && inner.y - outer.y >= pad - 0.5f &&
+			(outer.x + outer.z) - (inner.x + inner.z) >= pad - 0.5f &&
+			(outer.y + outer.w) - (inner.y + inner.w) >= pad - 0.5f;
+	};
+	check(inset_ok(g.rectSidebar, g.rectSidebarBody, 8.0f), "sidebar content keeps >= 8 px on all sides");
+	check(inset_ok(g.rectContent, g.rectContentBody, 8.0f), "main content keeps >= 8 px on all sides");
+	check(inset_ok(g.rectPanel, g.rectPanelBody, 8.0f), "bottom panel content keeps >= 8 px on all sides");
+	check(inset_ok(g.rectTools, g.rectToolsBody, 8.0f), "calculator content keeps >= 8 px on all sides");
+	check(inset_ok(g.rectStatus, g.rectStatusContent, 8.0f), "status bar content keeps >= 8 px on all sides");
+	check(inset_ok(g.rectTabs, g.rectTabsContent, 8.0f), "tab strip content keeps >= 8 px on all sides");
 	check(g.chromeTitleCenterY == g.chromeMenuCenterY && g.chromeTitleCenterY == g.chromeActionCenterY,
 		"title, menus and actions share one baseline");
 	check(std::fabs(g.chromeTitleCenterY - (g.rectTitle.y + 14.0f)) < 1.0f,
@@ -3396,7 +3441,7 @@ bool WriteLayoutReport(const std::string& path) {
 	check(g.rectTools.w >= 200.0f, "calculator side panel has usable width");
 	check(g.rectContent.z > 200.0f && g.rectContent.w > 80.0f, "content region is non-zero");
 	check(g.rectTitle.z > 0 && g.rectTabs.z > 0, "chrome and tab strip are non-zero");
-	check(g.rectStatus.w >= 20.0f, "status bar has the 22 px reference height");
+	check(g.rectStatus.w >= 36.0f, "status bar has the padded 36 px height");
 	auto font = ImGui::GetIO().Fonts->Fonts.empty() ? nullptr : ImGui::GetIO().Fonts->Fonts[0];
 	check(font != nullptr, "UI font is loaded");
 	check(g_small_font != nullptr, "12 px chrome font is loaded");
@@ -3750,6 +3795,50 @@ void Render() {
 	if (const char* panel = std::getenv("CASIOEMU_PANEL_TAB"))
 		g.panelTab = std::clamp(std::atoi(panel), 0, 2);
 	calculator_panel_focused = false;
+	if (std::getenv("CASIOEMU_UI_CONTEXT_MENU")) {
+		static int ctx_frame = 0;
+		++ctx_frame;
+		ImGuiIO& io = ImGui::GetIO();
+		if (ctx_frame == 18) {
+			io.AddMousePosEvent(110.0f, 400.0f);
+			io.AddMouseButtonEvent(1, true);
+		}
+		else if (ctx_frame == 20) {
+			io.AddMouseButtonEvent(1, false);
+		}
+	}
+	if (const char* drag_report = std::getenv("CASIOEMU_UI_DRAG_CALC")) {
+		static int drag_frame = 0;
+		static float drag_start_width = 0.0f;
+		static float drag_x = 0.0f;
+		static float drag_y = 0.0f;
+		++drag_frame;
+		ImGuiIO& io = ImGui::GetIO();
+		if (drag_frame == 12) {
+			drag_start_width = g.calculatorWidth;
+			drag_x = g.rectCalculatorGrip.x + g.rectCalculatorGrip.z * 0.5f;
+			drag_y = g.rectCalculatorGrip.y + g.rectCalculatorGrip.w * 0.5f;
+			io.AddMousePosEvent(drag_x, drag_y);
+			io.AddMouseButtonEvent(0, true);
+		}
+		else if (drag_frame > 12 && drag_frame <= 24) {
+			io.AddMousePosEvent(drag_x - (drag_frame - 12) * 6.0f, drag_y);
+		}
+		else if (drag_frame == 25) {
+			io.AddMouseButtonEvent(0, false);
+		}
+		else if (drag_frame == 31) {
+			std::ofstream report(drag_report, std::ios::trunc);
+			const float delta = g.calculatorWidth - drag_start_width;
+			if (report) {
+				report << "start_width=" << drag_start_width << '\n';
+				report << "end_width=" << g.calculatorWidth << '\n';
+				report << "delta=" << delta << '\n';
+				report << (std::fabs(delta) >= 30.0f ? "RESULT PASS\n" : "RESULT FAIL\n");
+			}
+			drag_frame = 100000;
+		}
+	}
 	RenderLayout();
 	if (!g.perfReportPath.empty()) {
 		const double elapsed = std::chrono::duration<double, std::milli>(

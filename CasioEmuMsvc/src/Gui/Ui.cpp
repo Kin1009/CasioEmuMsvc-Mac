@@ -415,6 +415,14 @@ CodeViewer* test_gui(bool* guiCreated, SDL_Window* wnd, SDL_Renderer* rnd) {
 		int winY = ThemeManager::Instance().Settings().windowY;
 		int winW = ThemeManager::Instance().Settings().windowW;
 		int winH = ThemeManager::Instance().Settings().windowH;
+		// Headless/visual verification can pin a deterministic window size.
+		if (const char* forced = std::getenv("CASIOEMU_WINDOW_SIZE")) {
+			int fw = 0, fh = 0;
+			if (std::sscanf(forced, "%dx%d", &fw, &fh) == 2 && fw >= 320 && fh >= 240 && fw <= 8192 && fh <= 8192) {
+				winW = fw;
+				winH = fh;
+			}
+		}
 		SDL_Rect bounds{0, 0, 0, 0};
 		if (SDL_GetDisplayUsableBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0) {
 			if (winW > bounds.w) winW = bounds.w;
