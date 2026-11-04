@@ -254,6 +254,10 @@ public:
 
 	// —— 字体重建 ——
 	void RequestFontRebuild();
+	/// Applies persisted emulator runtime settings (audio, LCD, capture, clock)
+	/// once an emulator exists.  Called from ProcessFontRebuild().
+	void ApplyEmulatorRuntimeSettings();
+	bool EmulatorSettingsApplied() const { return m_emulatorSettingsApplied; }
 #ifdef __ANDROID__
 	void RegisterInputGlyphs(const char* utf8_text);
 #endif
@@ -324,6 +328,7 @@ private:
 	bool m_fontRebuildRequested = false;
 	bool m_bgReloadRequested = false;
 	mutable std::unordered_map<uint64_t, ImVec4> m_harmonizeCache;
+	bool m_emulatorSettingsApplied = false;
 
 	// Data-driven theme state (Settings JSON + resources/themes/*.json)
 	std::string m_themeName;

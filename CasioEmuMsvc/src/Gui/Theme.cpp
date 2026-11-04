@@ -1,9 +1,14 @@
 #include "Theme.h"
 #include "Peripheral/OrdinaryLcdHistory.hpp"
+#include "Peripheral/ScreenGate.hpp"
 #include "FileDialog.hpp"
+#include "ModelInfo.h"
+#include "Models.h"
 #include "Settings/Settings.h"
 #include "Shell/Shell.h"
 #include "Shell/SessionHost.h"
+#include "SnapshotWindow.h"
+#include "ToolUi.hpp"
 #ifndef CASIOEMU_CORE_WEB
 #include "SysDialog.h"
 #else
@@ -12,6 +17,8 @@
 #include "Ui.hpp"
 #include <Gui.h>
 #include <Localization.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -24,16 +31,68 @@
 extern SDL_Surface* background;
 extern SDL_Texture* bg_txt;
 
-// Settings is organised into five categories that mirror the preview plan:
-// Theme / Editor / Emulator / Plugins / System.  The JSON document is the
-// source of truth; the theme manager keeps the legacy ThemeSettings fields in
-// sync so older call sites keep working unchanged.
+// Emulator display globals owned by Gui/HwController.cpp.
+extern bool audio_enable;
+extern int screen_buffer_select;
+extern float screen_flashing_brightness_coeff;
+extern bool screen_residual_enabled;
+
+// Settings is a complete, categorised view of every persisted option:
+// General, Appearance, Editor, Emulator, Calculator, Paths & Injections,
+// Plugins, Integrations, Language, Window & Layout, Advanced.  Every control
+// writes straight into the JSON settings store through ThemeManager so a
+// restart reproduces exactly what the user sees here.
 class SettingsWindow : public UIWindow {
 private:
-	bool showFileDialog = false;
-	char tempInjectionFilePath[256]{};
+	enum Category {
+		kGeneral = 0,
+		kAppearance,
+		kEditor,
+		kEmulator,
+		kCalculator,
+		kPaths,
+		kPlugins,
+		kIntegrations,
+		kLanguage,
+		kWindow,
+		kAdvanced,
+		kCategoryCount
+	};
+
+	int category = kGeneral;
 	bool tabsApplied = false;
 	std::string themeError;
+	std::string statusMessage;
+	double statusTime = 0.0;
+	bool confirmReset = false;
+	char tempInjectionFilePath[256]{};
+
+	// Short labels keep the navigation readable at 140 px; the full group name
+	// is shown as a tooltip on hover.
+	static const char* CategoryLabel(int value) {
+		switch (value) {
+		case kGeneral: return "General";
+		case kAppearance: return "Appearance";
+		case kEditor: return "Editor";
+		case kEmulator: return "Emulator";
+		case kCalculator: return "Calculator";
+		case kPaths: return "Paths";
+		case kPlugins: return "Plugins";
+		case kIntegrations: return "Integrations";
+		case kLanguage: return "Language";
+		case kWindow: return "Window";
+		case kAdvanced: return "Advanced";
+		default: return "Settings";
+		}
+	}
+
+	static const char* CategoryFullName(int value) {
+		switch (value) {
+		case kPaths: return "Paths & Injections";
+		case kWindow: return "Window & Layout";
+		default: return CategoryLabel(value);
+		}
+	}
 
 	std::string HiddenTabsValue() const {
 		std::string hidden;
@@ -70,12 +129,113 @@ private:
 		ThemeManager::Instance().SaveSettings();
 	}
 
-	void RenderThemeTab(ThemeManager& tm, ThemeSettings& settings,
+	void Notify(const char* message) {
+		statusMessage = message;
+		statusTime = ImGui::GetTime();
+	}
+
+	// ---------------------------------------------------------------- helpers
+	static void OpenInFinder(const std::filesystem::path& path) {
+#ifdef __APPLE__
+		if (path.empty())
+			return;
+		std::string text = path.string();
+		std::string encoded;
+		encoded.reserve(text.size() + 8);
+		for (char ch : text) {
+			if (ch == ' ')
+				encoded += "%20";
+			else
+				encoded += ch;
+		}
+		const std::string url = "file://" + encoded;
+		SDL_OpenURL(url.c_str());
+#else
+		(void)path;
+#endif
+	}
+
+	static UIWindow* FindTool(const char* name) {
+		for (auto* win : windows)
+			if (win && win->name && std::strcmp(win->name, name) == 0)
+				return win;
+		return nullptr;
+	}
+
+	// ---------------------------------------------------------------- general
+	void RenderGeneral(casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Application");
+		ToolUi::Description("CasioEmuMsvc debugger and calculator emulator. Settings are stored as JSON and survive restarts.");
+		ImGui::Spacing();
+		{
+			ToolUi::PanelScope panel("##settings_about");
+			const char* commit = "unknown";
+			const char* build_time = "unknown";
+#ifdef CASIOEMU_BUILD_COMMIT
+			commit = CASIOEMU_BUILD_COMMIT;
+#endif
+#ifdef CASIOEMU_BUILD_TIME
+			build_time = CASIOEMU_BUILD_TIME;
+#endif
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::Text("Build: %s (%s UTC)", commit, build_time);
+			ImGui::Text("Settings schema: %d", casioemu::settings::kSchemaVersion);
+			ImGui::PopTextWrapPos();
+		}
+
+		ToolUi::Section("Workspace");
+		{
+			ToolUi::PanelScope panel("##settings_workspace");
+			ImGui::TextWrapped("Folder: %s", data.workspace.folder.empty() ? "(not set)" : data.workspace.folder.c_str());
+			ImGui::Spacing();
+			if (ImGui::Button("Open Folder"))
+				casioemu::shell::RequestOpenFolder();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal").x + 20.0f);
+			if (ImGui::Button("Reveal"))
+				OpenInFinder(data.workspace.folder);
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Open Recent").x + 20.0f);
+			if (ImGui::Button("Open Recent"))
+				casioemu::shell::OpenQuickOpen();
+			if (!data.workspace.recentFolders.empty())
+				ToolUi::Hint("Recent folders are listed in the Explorer sidebar.");
+			else
+				ToolUi::Hint("No recent folders yet.");
+		}
+
+		ToolUi::Section("Sessions");
+		{
+			ToolUi::PanelScope panel("##settings_sessions");
+			const auto sessions = casioemu::session::List();
+			if (sessions.empty()) {
+				ToolUi::Hint("No live sessions. Open a model to start one.");
+			}
+			else {
+				for (const auto& session : sessions) {
+					ImGui::PushTextWrapPos(0.0f);
+					ImGui::Text("%s%s  -  %s", session.title.c_str(), session.active ? "  (active)" : "",
+						session.modelPath.c_str());
+					ImGui::PopTextWrapPos();
+				}
+			}
+			ImGui::Spacing();
+			if (ImGui::Button("New Session"))
+				casioemu::shell::RequestOpenModel();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reset Session").x + 20.0f);
+			if (ImGui::Button("Reset Session"))
+				casioemu::shell::ResetSession();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Pause / Resume").x + 20.0f);
+			if (ImGui::Button("Pause / Resume"))
+				casioemu::shell::TogglePause();
+		}
+	}
+
+	// ------------------------------------------------------------- appearance
+	void RenderAppearance(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
-		ImGui::TextWrapped("%s", "Settings.Theme.Description"_lc);
+		ToolUi::Section("Color theme");
+		ToolUi::Description("Built-in presets and theme plugins share one token schema. Choosing a preset replaces an active plugin theme.");
 		ImGui::Spacing();
 
-		UIHelpers::SectionHeader("Settings.Theme.Preset"_lc);
 		const auto themes = tm.AvailableThemes();
 		const std::string current = tm.CurrentThemeName();
 		std::string currentLabel = current;
@@ -86,9 +246,10 @@ private:
 			}
 		}
 		if (tm.IsPluginThemeActive())
-			ImGui::TextColored(UIHelpers::kColorWarning, "%s", "Settings.Theme.PluginActive"_lc);
+			ToolUi::Status("A theme plugin currently owns the style.", UIHelpers::kColorWarning);
 
-		ImGui::SetNextItemWidth(360.0f);
+		ToolUi::Field("Preset");
+		ImGui::SetNextItemWidth(std::min(360.0f, ImGui::GetContentRegionAvail().x));
 		if (ImGui::BeginCombo("##theme_preset", currentLabel.c_str())) {
 			for (const auto& info : themes) {
 				const bool selected = info.id == current;
@@ -106,68 +267,106 @@ private:
 			ImGui::EndCombo();
 		}
 		if (!themeError.empty())
-			ImGui::TextColored(UIHelpers::kColorError, "%s", themeError.c_str());
+			ToolUi::Status(themeError.c_str(), UIHelpers::kColorError);
 
-		if (ImGui::Button("Ui.DarkMode"_lc))
+		ToolUi::Field("Variant");
+		if (ImGui::Button("Dark Mode"))
 			tm.SetDarkMode();
-		ImGui::SameLine();
-		if (ImGui::Button("Ui.LightMode"_lc))
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Light Mode").x + 20.0f);
+		if (ImGui::Button("Light Mode"))
 			tm.SetLightMode();
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Current: Dark").x + 20.0f);
+		ImGui::TextDisabled("Current: %s", tm.IsDarkMode() ? "Dark" : "Light");
 
-		ImGui::Spacing();
-		float currentFontScale = tm.GetFontScale();
-		ImGui::SetNextItemWidth(240.0f);
-		if (ImGui::SliderFloat("Ui.Scale"_lc, &currentFontScale, 0.8f, 2.0f, "%.2f")) {
-			settings.scale = currentFontScale;
-			tm.SetFontScale(currentFontScale);
+		ToolUi::Section("Scale and typography");
+		{
+			ToolUi::PanelScope panel("##settings_scale");
+			float currentFontScale = tm.GetFontScale();
+			ToolUi::Field("UI scale");
+			ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.55f));
+			if (ImGui::SliderFloat("##ui_scale", &currentFontScale, 0.8f, 2.0f, "%.2f")) {
+				settings.scale = currentFontScale;
+				data.appearance.uiScale = currentFontScale;
+				tm.SetFontScale(currentFontScale);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit()) {
+				SaveNow();
+				tm.RequestFontRebuild();
+			}
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Apply").x + 20.0f);
+			if (ImGui::Button("Apply")) {
+				SaveNow();
+				tm.RequestFontRebuild();
+			}
+			ImGui::TextDisabled("Typography: %s / %s", tm.Typography().uiFamily.c_str(),
+				tm.Typography().monoFamily.c_str());
+			ToolUi::Hint("The UI must remain usable at 0.8 scale on a 13-inch display.");
 		}
-		if (ImGui::IsItemDeactivatedAfterEdit()) {
-			SaveNow();
-			tm.RequestFontRebuild();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Ui.ApplyScale"_lc)) {
-			tm.RequestFontRebuild();
-			SaveNow();
-		}
-		ImGui::TextDisabled("%s: %s / %s", "Settings.Theme.Typography"_lc,
-			tm.Typography().uiFamily.c_str(), tm.Typography().monoFamily.c_str());
 
-		UIHelpers::SectionHeader("Auto-Tint (MD3 Monet)");
-		if (ImGui::Checkbox("Theme.Tint"_lc, &settings.enableAutoTint))
-			SaveNow();
-		if (settings.enableAutoTint) {
-			ImVec4 seedColor = settings.seedColor;
-			if (ImGui::ColorEdit4("Theme.SeedColor"_lc, (float*)&seedColor, ImGuiColorEditFlags_NoAlpha))
-				tm.SetSeedColor(seedColor);
-			if (ImGui::Button("Theme.MD"_lc)) {
+		ToolUi::Section("Auto-tint");
+		{
+			ToolUi::PanelScope panel("##settings_tint");
+			if (ImGui::Checkbox("Enable auto-tint (MD3 Monet)", &settings.enableAutoTint)) {
+				data.appearance.autoTint = settings.enableAutoTint;
+				SaveNow();
+			}
+			if (settings.enableAutoTint) {
+				ImVec4 seedColor = settings.seedColor;
+				ToolUi::Field("Seed color");
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+				if (ImGui::ColorEdit4("##seed_color", (float*)&seedColor, ImGuiColorEditFlags_NoAlpha)) {
+					tm.SetSeedColor(seedColor);
+					data.appearance.seedColor = { seedColor.x, seedColor.y, seedColor.z, seedColor.w };
+				}
+				if (ImGui::Button("Extract")) {
 #if !defined(TEST_BUILD) && !defined(CASIOEMU_CORE_WEB)
-				seedColor = tm.ExtractDominantColor(bg_txt, renderer);
+					seedColor = tm.ExtractDominantColor(bg_txt, renderer);
 #endif
-				tm.SetSeedColor(seedColor);
+					tm.SetSeedColor(seedColor);
+					data.appearance.seedColor = { seedColor.x, seedColor.y, seedColor.z, seedColor.w };
+				}
+			}
+			else {
+				ToolUi::Hint("Auto-tint derives the accent palette from the background image.");
 			}
 		}
 
-		UIHelpers::SectionHeader("Background"_lc);
-		if (ImGui::Button("UI.ChangeBg"_lc)) {
+		ToolUi::Section("Background");
+		{
+			ToolUi::PanelScope panel("##settings_background");
+			const bool has_background = std::filesystem::exists("background.jpg");
+			ImGui::TextUnformatted(has_background ? "background.jpg is loaded." : "No custom background image.");
+			ImGui::Spacing();
+			if (ImGui::Button("Choose Image...")) {
 #ifdef CASIOEMU_CORE_WEB
-			WebDebuggerQueueOpenFile("/persist/background.jpg", "background.jpg");
+				WebDebuggerQueueOpenFile("/persist/background.jpg", "background.jpg");
 #else
-			SystemDialogs::OpenFileDialog([](std::filesystem::path pth) {
-				std::filesystem::copy_file(pth, "background.jpg", std::filesystem::copy_options::overwrite_existing);
-			});
-			tm.RequestBgReload();
+				SystemDialogs::OpenFileDialog([](std::filesystem::path pth) {
+					std::error_code ec;
+					std::filesystem::copy_file(pth, "background.jpg", std::filesystem::copy_options::overwrite_existing, ec);
+				});
+				tm.RequestBgReload();
 #endif
-		}
+			}
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Clear").x + 20.0f);
+			if (ImGui::Button("Clear")) {
+				std::error_code ec;
+				std::filesystem::remove("background.jpg", ec);
+				tm.RequestBgReload();
+			}
 #ifdef CASIOEMU_CORE_WEB
-		int bgResult = 0;
-		if (WebDebuggerConsumeFileResult("/persist/background.jpg", &bgResult) && bgResult == 0)
-			tm.RequestBgReload();
+			int bgResult = 0;
+			if (WebDebuggerConsumeFileResult("/persist/background.jpg", &bgResult) && bgResult == 0)
+				tm.RequestBgReload();
 #endif
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal").x + 20.0f);
+			if (ImGui::Button("Reveal"))
+				OpenInFinder(std::filesystem::absolute("background.jpg").parent_path());
+		}
 
-		ImGui::Spacing();
-		if (ImGui::CollapsingHeader("Settings.Theme.Advanced"_lc)) {
-			ImGui::TextWrapped("%s", "Settings.Theme.AdvancedHint"_lc);
+		ToolUi::Section("Advanced style editor");
+		if (ImGui::CollapsingHeader("Legacy ImGui style editor")) {
+			ImGui::TextWrapped("%s", "Preset colors are authoritative. Edits here are kept in the legacy theme.bin mirror and may be replaced when a preset is applied.");
 			auto& base = settings.isDarkMode ? settings.igs_dark : settings.igs_light;
 			ImGuiStyle ims_backup;
 			std::memcpy(&ims_backup, &ImGui::GetStyle(), sizeof(base));
@@ -175,135 +374,447 @@ private:
 			ImGui::ShowStyleEditor();
 			std::memcpy(&base, &ImGui::GetStyle(), sizeof(base));
 			std::memcpy(&ImGui::GetStyle(), &ims_backup, sizeof(base));
+			if (ImGui::Button("Save Style"))
+				SaveNow();
 		}
 	}
 
-	void RenderEditorTab(ThemeManager& tm, casioemu::settings::SettingsData& data) {
-		ImGui::TextWrapped("%s", "Settings.Editor.Description"_lc);
+	// ----------------------------------------------------------------- editor
+	void RenderEditor(ThemeManager& tm, casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Text editor");
+		ToolUi::Description("Defaults for source documents opened in the editor column. Changes apply to newly opened documents.");
 		ImGui::Spacing();
-		UIHelpers::SectionHeader("Settings.Editor.Text"_lc);
 		bool changed = false;
-		changed |= ImGui::Checkbox("Settings.Editor.ShowLineNumbers"_lc, &data.editor.showLineNumbers);
-		changed |= ImGui::Checkbox("Settings.Editor.WordWrap"_lc, &data.editor.wordWrap);
-		ImGui::SetNextItemWidth(200.0f);
-		changed |= ImGui::SliderFloat("Settings.Editor.FontSize"_lc, &data.editor.fontSize, 10.0f, 24.0f, "%.0f px");
-		ImGui::SetNextItemWidth(200.0f);
-		changed |= ImGui::SliderInt("Settings.Editor.TabSize"_lc, &data.editor.tabSize, 2, 8);
+		{
+			ToolUi::PanelScope panel("##settings_editor");
+			changed |= ImGui::Checkbox("Show line numbers", &data.editor.showLineNumbers);
+			changed |= ImGui::Checkbox("Word wrap", &data.editor.wordWrap);
+			ToolUi::Field("Font size");
+			ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x * 0.5f));
+			changed |= ImGui::SliderFloat("##editor_font", &data.editor.fontSize, 10.0f, 24.0f, "%.0f px");
+			ToolUi::Field("Tab size");
+			ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x * 0.3f));
+			changed |= ImGui::SliderInt("##editor_tab", &data.editor.tabSize, 1, 16);
+			ToolUi::Hint("The editor keeps indentation, undo history and scroll position per document.");
+		}
 		if (changed)
 			SaveNow();
-		ImGui::Spacing();
-		ImGui::TextDisabled("%s", "Settings.Editor.FutureHint"_lc);
+		ToolUi::Section("Diagnostics");
+		{
+			ToolUi::PanelScope panel("##settings_diag");
+			ImGui::TextDisabled("Lint runs on open, save, and a 650 ms debounce while typing.");
+			ImGui::TextDisabled("Problems are listed in the bottom panel and clicking one jumps to its location.");
+		}
+		(void)tm;
 	}
 
-	void RenderEmulatorTab(ThemeManager& tm, ThemeSettings& settings,
+	// --------------------------------------------------------------- emulator
+	void RenderEmulator(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
-		ImGui::TextWrapped("%s", "Settings.Emulator.Description"_lc);
+		auto& emu = data.emulator;
+		ToolUi::Section("Performance");
+		ToolUi::Description("The emulator runs the model's clock rate by default. Background sessions use the throttle below.");
 		ImGui::Spacing();
+		{
+			ToolUi::PanelScope panel("##settings_perf");
+			bool use_model_clock = emu.clockExponent <= 0;
+			if (ImGui::Checkbox("Use model clock rate", &use_model_clock)) {
+				emu.clockExponent = use_model_clock ? 0 : (m_emu ? static_cast<int>(std::lround(std::log2((double)m_emu->cycles.cycles_per_second))) : 20);
+				if (m_emu && !use_model_clock)
+					m_emu->cycles.Setup(Uint64{1} << std::clamp(emu.clockExponent, 1, 28), m_emu->cycles.timer_interval);
+				if (m_emu && use_model_clock)
+					m_emu->SetClockSpeed(1.0f);
+				SaveNow();
+			}
+			if (!use_model_clock) {
+				ToolUi::Field("Clock rate");
+				int exponent = emu.clockExponent;
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+				if (ImGui::SliderInt("##clock_exponent", &exponent, 1, 28, "2^%d CPS")) {
+					emu.clockExponent = exponent;
+					if (m_emu)
+						m_emu->cycles.Setup(Uint64{1} << exponent, m_emu->cycles.timer_interval);
+				}
+				if (ImGui::IsItemDeactivatedAfterEdit())
+					SaveNow();
+			}
+			if (m_emu) {
+				char clock[96];
+				std::snprintf(clock, sizeof(clock), "Current: %.3f MHz (%llu CPS)",
+					(double)m_emu->cycles.cycles_per_second / 1024.0 / 1024.0,
+					static_cast<unsigned long long>(m_emu->cycles.cycles_per_second));
+				ToolUi::Hint(clock);
+			}
 
-		UIHelpers::SectionHeader("Settings.Emulator.Performance"_lc);
-#ifndef __ANDROID__
-		bool low_performance = settings.lowPerformanceMode;
-		if (ImGui::Checkbox("Ui.LowPerformanceMode"_lc, &low_performance)) {
-			casioemu::ordinary_lcd_history::UntrackedChange change;
-			settings.lowPerformanceMode = low_performance;
-			SaveNow();
-		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::BeginTooltip();
-			ImGui::TextUnformatted("Ui.LowPerformanceTooltip"_lc);
-			ImGui::EndTooltip();
-		}
-#endif
-#ifdef __ANDROID__
-		ImGui::Checkbox("Ui.DisableVibration"_lc, &setting_DisableVibration);
-#endif
-		ImGui::SetNextItemWidth(240.0f);
-		if (ImGui::SliderFloat("Settings.Emulator.Throttle"_lc, &data.emulator.backgroundThrottle, 0.05f, 1.0f, "%.2f")) {
-			data.emulator.backgroundThrottle = ImClamp(data.emulator.backgroundThrottle, 0.05f, 1.0f);
-			casioemu::session::SetThrottle(data.emulator.backgroundThrottle);
-		}
-		if (ImGui::IsItemDeactivatedAfterEdit())
-			SaveNow();
-		if (ImGui::IsItemHovered()) {
-			ImGui::BeginTooltip();
-			ImGui::TextUnformatted("Settings.Emulator.ThrottleHint"_lc);
-			ImGui::EndTooltip();
+			ToolUi::Field("Background");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderFloat("##bg_throttle", &emu.backgroundThrottle, 0.05f, 1.0f, "%.2f x")) {
+				emu.backgroundThrottle = std::clamp(emu.backgroundThrottle, 0.05f, 1.0f);
+				casioemu::session::SetThrottle(emu.backgroundThrottle);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+			ToolUi::Hint("Fraction of the active session's cycle rate used by inactive sessions.");
+
+			bool low_performance = settings.lowPerformanceMode;
+			if (ImGui::Checkbox("Power saving mode", &low_performance)) {
+				casioemu::ordinary_lcd_history::UntrackedChange change;
+				settings.lowPerformanceMode = low_performance;
+				emu.lowPerformanceMode = low_performance;
+				SaveNow();
+			}
+			ToolUi::Hint("Caps the frame rate at 25 FPS to reduce CPU and battery use.");
 		}
 
-		UIHelpers::SectionHeader("Calculator panel"_lc);
-		bool calculator_visible = casioemu::shell::CalculatorVisible();
-		if (ImGui::Checkbox("Show calculator panel"_lc, &calculator_visible))
-			casioemu::shell::SetCalculatorVisible(calculator_visible);
-		int calculator_width = data.shell.calculator.width;
-		ImGui::SetNextItemWidth(200.0f);
-		if (ImGui::SliderInt("Calculator width"_lc, &calculator_width, 260, 700, "%d px"))
-			casioemu::shell::SetCalculatorWidth(calculator_width);
+		ToolUi::Section("Run state");
+		{
+			ToolUi::PanelScope panel("##settings_runstate");
+			if (!m_emu) {
+				ToolUi::Hint("No calculator is running.");
+			}
+			else {
+				bool paused = m_emu->GetPaused();
+				if (ImGui::Checkbox("Pause emulation", &paused))
+					m_emu->SetPaused(paused);
+				ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reboot").x + 20.0f);
+				if (ImGui::Button("Reboot"))
+					m_emu->ResetToMainMenu();
+				ToolUi::Hint("Reboot returns to the calculator's power-on main menu without closing the debugger.");
+			}
+		}
 
-		UIHelpers::SectionHeader("Ui.InjectionFilePath"_lc);
-		ImGui::SetNextItemWidth(360.0f);
-		ImGui::InputText("##injection_file_path", tempInjectionFilePath, sizeof(tempInjectionFilePath));
-		ImGui::SameLine();
+		ToolUi::Section("Audio");
+		{
+			ToolUi::PanelScope panel("##settings_audio");
+			if (ImGui::Checkbox("Enable audio", &emu.audioEnabled)) {
+				audio_enable = emu.audioEnabled;
+				SaveNow();
+			}
+			ToolUi::Hint("Turns the model's buzzer output on or off. The audio device stays open.");
+		}
+
+		ToolUi::Section("Display");
+		{
+			ToolUi::PanelScope panel("##settings_display");
+			const bool lcd_options = m_emu && !casioemu::IsEpsFamily(m_emu->hardware_id) &&
+				m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW;
+			ImGui::BeginDisabled(!lcd_options);
+			ToolUi::Field("Flash threshold");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##lcd_flash", &emu.lcdFlashThreshold, 0, 0x3F)) {
+				casioemu::screen_gate::SetFlashingThreshold(emu.lcdFlashThreshold);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+			ToolUi::Field("Flash brightness");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderFloat("##lcd_brightness", &emu.lcdFlashBrightness, 1.0f, 8.0f)) {
+				casioemu::ordinary_lcd_history::UntrackedChange change;
+				screen_flashing_brightness_coeff = emu.lcdFlashBrightness;
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+			ToolUi::Field("Screen buffer");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##lcd_buffer", &emu.lcdBuffer, 0, 2)) {
+				casioemu::ordinary_lcd_history::UntrackedChange change;
+				screen_buffer_select = emu.lcdBuffer;
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+			ImGui::EndDisabled();
+			if (!lcd_options)
+				ToolUi::Hint("These options apply to the ordinary LCD models only.");
+		}
+
+		ToolUi::Section("Screenshots and recording");
+		{
+			ToolUi::PanelScope panel("##settings_capture");
+			ToolUi::Field("Capture scale");
+			ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x * 0.3f));
+			if (ImGui::SliderInt("##capture_scale", &emu.captureScale, 1, 16, "%d x")) {
+				emu.captureScale = std::clamp(emu.captureScale, 1, 16);
+				if (m_emu) m_emu->capture_scale.store(emu.captureScale);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			ToolUi::Field("Background");
+			uint32_t rgb = static_cast<uint32_t>(emu.captureBackgroundRgb) & 0xFFFFFFu;
+			float color[3] = {
+				static_cast<float>((rgb >> 16) & 0xff) / 255.0f,
+				static_cast<float>((rgb >> 8) & 0xff) / 255.0f,
+				static_cast<float>(rgb & 0xff) / 255.0f };
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::ColorEdit3("##capture_bg", color)) {
+				const auto channel = [](float value) {
+					return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(value * 255.0f)), 0, 255));
+				};
+				emu.captureBackgroundRgb = static_cast<int>((channel(color[0]) << 16) | (channel(color[1]) << 8) | channel(color[2]));
+				if (m_emu) m_emu->capture_background_rgb.store(static_cast<uint32_t>(emu.captureBackgroundRgb));
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			ImGui::Spacing();
 #ifndef CASIOEMU_CORE_WEB
-		if (ImGui::Button("Ui.Browse"_lc))
-			showFileDialog = true;
-		if (showFileDialog) {
-			if (FileDialog::ShowFileOpenDialog("Select Injection File", "Text Files (*.txt){.txt},All Files (*.*){.*}",
-					tempInjectionFilePath, sizeof(tempInjectionFilePath))) {
-				showFileDialog = false;
+			if (!m_emu) ImGui::BeginDisabled();
+			if (ToolUi::AccentButton("Take Screenshot")) {
+				if (m_emu) m_emu->screenshot_requested.store(true);
 			}
-		}
-#else
-		if (ImGui::Button("Ui.Browse"_lc))
-			WebDebuggerQueueOpenFile(tempInjectionFilePath, "hc-inj.txt");
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Start Recording").x + 20.0f);
+			if (!m_emu) ImGui::EndDisabled();
+			const bool recording = m_emu && m_emu->recording_active.load();
+			if (!m_emu) ImGui::BeginDisabled();
+			if (ImGui::Button(recording ? "Stop Recording" : "Start Recording")) {
+				if (m_emu) {
+					if (recording)
+						m_emu->recording_stop_requested.store(true);
+					else
+						m_emu->recording_requested.store(true);
+				}
+			}
+			if (!m_emu) ImGui::EndDisabled();
+			if (recording) {
+				ImGui::SameLine();
+				ToolUi::Status("Recording", UIHelpers::kColorWarning);
+			}
 #endif
-		if (ImGui::Button("Files.Save"_lc)) {
-			strncpy(settings.injectionFilePath, tempInjectionFilePath, sizeof(settings.injectionFilePath));
-			settings.injectionFilePath[sizeof(settings.injectionFilePath) - 1] = '\0';
-			SaveNow();
-			tm.RequestFontRebuild();
 		}
+		(void)tm;
 	}
 
-	void RenderPluginsTab(ThemeManager& tm, casioemu::settings::SettingsData& data) {
-		ImGui::TextWrapped("%s", "Settings.Plugins.Description"_lc);
+	// ------------------------------------------------------------- calculator
+	void RenderCalculator(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Model");
+		ToolUi::Description("The active session's calculator model and ROM. Switching models creates or activates a session.");
 		ImGui::Spacing();
-
-		UIHelpers::SectionHeader("Settings.Plugins.Theme"_lc);
-		if (tm.IsPluginThemeActive())
-			ImGui::TextColored(UIHelpers::kColorSuccess, "%s", "Settings.Plugins.ThemeActive"_lc);
-		else
-			ImGui::TextDisabled("%s", "Settings.Plugins.ThemeInactive"_lc);
-		ImGui::Text("%s: %s", "Settings.Plugins.ActivePreset"_lc,
-			tm.CurrentThemeName().empty() ? "(none)" : tm.CurrentThemeName().c_str());
-
-		UIHelpers::SectionHeader("Settings.Plugins.Registry"_lc);
-		UIWindow* manager = nullptr;
-		for (auto* win : windows) {
-			if (win && win->name && std::strcmp(win->name, "Plugin Manager") == 0) {
-				manager = win;
-				break;
+		{
+			ToolUi::PanelScope panel("##settings_model");
+			if (!m_emu) {
+				ToolUi::Hint("No calculator is running.");
+			}
+			else {
+				const auto& info = m_emu->ModelDefinition;
+				ImGui::Text("Model: %s", info.model_name.empty() ? "(unknown)" : info.model_name.c_str());
+				ImGui::Text("Hardware: %s", casioemu::HardwareDisplayName(m_emu->hardware_id));
+				ImGui::TextWrapped("ROM: %s", info.rom_path.empty() ? "(built in)" : info.rom_path.c_str());
+				ImGui::TextWrapped("Model folder: %s", m_emu->model_path.c_str());
+				ImGui::Spacing();
+				if (ImGui::Button("Open Model..."))
+					casioemu::shell::RequestOpenModel();
+				ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal Folder").x + 20.0f);
+				if (ImGui::Button("Reveal Folder"))
+					OpenInFinder(m_emu->model_path);
 			}
 		}
-		if (manager) {
-			if (ImGui::Button("Settings.Plugins.OpenManager"_lc))
-				manager->BringToFront();
+
+		ToolUi::Section("Save state and RAM");
+		{
+			ToolUi::PanelScope panel("##settings_save");
+			if (!m_emu) {
+				ToolUi::Hint("No calculator is running.");
+			}
+			else {
+				const size_t ram_size = casioemu::GetRamSize(m_emu->hardware_id);
+				ImGui::Text("RAM window: %zu bytes, base 0x%zX", ram_size,
+					casioemu::GetRamBaseAddr(m_emu->hardware_id));
+				ImGui::TextDisabled("The battery-backed RAM image is written to the model folder on exit.");
+				ImGui::Spacing();
+				if (ToolUi::AccentButton("Save Snapshot Now")) {
+					auto* snapshot = dynamic_cast<SnapshotWindow*>(FindTool("Snapshots"));
+					if (snapshot && m_emu) {
+						try {
+							snapshot->DebugEnsureLoaded();
+							snapshot->DebugManager().SaveSnapshot(*m_emu, 0, "Settings state");
+							Notify("Snapshot saved.");
+						}
+						catch (const std::exception& error) {
+							Notify(error.what());
+						}
+					}
+				}
+				ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reboot").x + 20.0f);
+				if (ImGui::Button("Reboot"))
+					m_emu->ResetToMainMenu();
+			}
 		}
-		else {
-			ImGui::TextDisabled("%s", "Settings.Plugins.ManagerMissing"_lc);
+
+		ToolUi::Section("Calculator panel");
+		{
+			ToolUi::PanelScope panel("##settings_calc_panel");
+			bool calculator_visible = casioemu::shell::CalculatorVisible();
+			if (ImGui::Checkbox("Show calculator panel", &calculator_visible))
+				casioemu::shell::SetCalculatorVisible(calculator_visible);
+			ToolUi::Field("Panel width");
+			int calculator_width = data.shell.calculator.width;
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##calculator_width", &calculator_width, 260, 700, "%d px")) {
+				data.shell.calculator.width = calculator_width;
+				casioemu::shell::SetCalculatorWidth(calculator_width);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			ToolUi::Field("Face zoom");
+			float zoom_percent = data.calculator.zoom <= 0.0f ? 0.0f : data.calculator.zoom * 100.0f;
+			bool zoom_fit = data.calculator.zoom <= 0.0f;
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderFloat("##calculator_zoom", &zoom_percent, 0.0f, 400.0f,
+					zoom_fit ? "Fit" : "%.0f%%")) {
+				data.calculator.zoom = zoom_percent < 25.0f ? 0.0f : std::clamp(zoom_percent / 100.0f, 0.25f, 4.0f);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Fit").x + 20.0f);
+			if (ImGui::Button("Fit")) {
+				data.calculator.zoom = 0.0f;
+				SaveNow();
+			}
+			ToolUi::Hint("The calculator keeps the model's aspect ratio. Zoom is nearest-neighbour sampled, so it stays crisp. The shell owns the resizer.");
 		}
-		ImGui::Spacing();
-		ImGui::TextWrapped("%s", "Settings.Plugins.TrustHint"_lc);
+		(void)tm;
+		(void)settings;
 	}
 
-	void RenderSystemTab(ThemeManager& tm, ThemeSettings& settings,
+	// ----------------------------------------------------- paths and injections
+	void RenderPaths(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
-		ImGui::TextWrapped("%s", "Settings.System.Description"_lc);
+		ToolUi::Section("Injection file");
+		ToolUi::Description("Hex payloads and custom injections are read from this file. The Payload tool reloads it when it changes.");
 		ImGui::Spacing();
+		{
+			ToolUi::PanelScope panel("##settings_paths");
+			ToolUi::Field("File");
+			ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x - 90.0f));
+			ImGui::InputText("##injection_path", tempInjectionFilePath, sizeof(tempInjectionFilePath));
+			ImGui::SameLine();
+#ifndef CASIOEMU_CORE_WEB
+			if (ImGui::Button("Browse"))
+				showFileDialog = true;
+			if (showFileDialog) {
+				if (FileDialog::ShowFileOpenDialog("Select Injection File", "Text Files (*.txt){.txt},All Files (*.*){.*}",
+						tempInjectionFilePath, sizeof(tempInjectionFilePath))) {
+					showFileDialog = false;
+				}
+			}
+#else
+			if (ImGui::Button("Browse"))
+				WebDebuggerQueueOpenFile(tempInjectionFilePath, "hc-inj.txt");
+#endif
+			if (ImGui::Button("Save Path")) {
+				strncpy(settings.injectionFilePath, tempInjectionFilePath, sizeof(settings.injectionFilePath));
+				settings.injectionFilePath[sizeof(settings.injectionFilePath) - 1] = '\0';
+				data.calculator.injectionFilePath = tempInjectionFilePath;
+				SaveNow();
+				tm.RequestFontRebuild();
+				Notify("Injection path saved.");
+			}
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal").x + 20.0f);
+			if (ImGui::Button("Reveal"))
+				OpenInFinder(std::filesystem::path(tempInjectionFilePath).parent_path());
 
-		UIHelpers::SectionHeader("Language");
-		if (strlen(settings.language) == 0)
-			strncpy(settings.language, g_local.GetCurrentLanguage().c_str(), sizeof(settings.language));
+			bool auto_reload = data.calculator.injectionAutoReload;
+			if (ImGui::Checkbox("Reload automatically when the file changes", &auto_reload)) {
+				data.calculator.injectionAutoReload = auto_reload;
+				SaveNow();
+			}
+		}
 
+		ToolUi::Section("Configuration folder");
+		{
+			ToolUi::PanelScope panel("##settings_config");
+			auto& store = casioemu::settings::SettingsStore::Instance();
+			ImGui::TextWrapped("Settings file: %s", store.FilePath().string().c_str());
+			ImGui::TextWrapped("Portable mode: %s", casioemu::settings::SettingsStore::PortableModeEnabled() ? "on" : "off");
+			ImGui::Spacing();
+			if (ImGui::Button("Open Config Folder"))
+				OpenInFinder(store.FilePath().parent_path());
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal File").x + 20.0f);
+			if (ImGui::Button("Reveal File"))
+				OpenInFinder(store.FilePath());
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Save Settings").x + 20.0f);
+			if (ImGui::Button("Save Settings")) {
+				SaveNow();
+				Notify("Settings saved.");
+			}
+		}
+
+		ToolUi::Section("Workspace");
+		{
+			ToolUi::PanelScope panel("##settings_paths_workspace");
+			ImGui::TextWrapped("%s", data.workspace.folder.empty() ? "(no workspace folder)" : data.workspace.folder.c_str());
+			ImGui::Spacing();
+			if (ImGui::Button("Change Workspace..."))
+				casioemu::shell::RequestOpenFolder();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reveal").x + 20.0f);
+			if (ImGui::Button("Reveal"))
+				OpenInFinder(data.workspace.folder);
+		}
+	}
+
+	// ---------------------------------------------------------------- plugins
+	void RenderPlugins(ThemeManager& tm, casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Theme plugin");
+		{
+			ToolUi::PanelScope panel("##settings_plugin_theme");
+			if (tm.IsPluginThemeActive())
+				ToolUi::Status("A theme plugin currently owns the ImGui style.", UIHelpers::kColorSuccess);
+			else
+				ToolUi::Hint("No theme plugin is active; the built-in preset is in use.");
+			ImGui::Text("Active preset: %s", tm.CurrentThemeName().empty() ? "(none)" : tm.CurrentThemeName().c_str());
+		}
+
+		ToolUi::Section("Registry");
+		{
+			ToolUi::PanelScope panel("##settings_plugin_registry");
+			ImGui::Text("Enabled plugins: %d", static_cast<int>(data.plugins.enabled.size()));
+			ImGui::Text("Disabled plugins: %d", static_cast<int>(data.plugins.disabled.size()));
+			ImGui::TextWrapped("Trust store: %s", data.plugins.trustPath.c_str());
+			ImGui::Spacing();
+			if (ImGui::Button("Install Plugin..."))
+				casioemu::shell::RequestInstallPlugin();
+			ToolUi::Hint("Switch to a session tab to open the Plugin Manager document; Settings keeps its own tab.");
+		}
+
+		ToolUi::Section("Safety");
+		ToolUi::Hint("Native plugin code runs in-process. Review the permissions in the trust prompt before approving a plugin. "
+			"Declarative plugins (theme, inject, layout, tool) never execute native code.");
+	}
+
+	// ----------------------------------------------------------- integrations
+	void RenderIntegrations(casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Discord");
+		{
+			ToolUi::PanelScope panel("##settings_discord");
+			if (ImGui::Checkbox("Show activity in Discord", &data.integrations.discordRPC)) {
+				ThemeManager::Instance().Settings().enableDiscordRPC = data.integrations.discordRPC;
+				SaveNow();
+#ifndef CASIOEMU_CORE_WEB
+				if (m_emu)
+					DiscordRPC::UpdatePresence(m_emu->ModelDefinition.model_name);
+				else
+					DiscordRPC::UpdatePresence("");
+#endif
+			}
+			ToolUi::Hint("Publishes the active model name and session state through Discord Rich Presence.");
+		}
+
+		ToolUi::Section("Updates");
+		{
+			ToolUi::PanelScope panel("##settings_updates");
+			if (ImGui::Checkbox("Check for updates on launch", &data.integrations.updateChecker)) {
+				ThemeManager::Instance().Settings().enableUpdateChecker = data.integrations.updateChecker;
+				SaveNow();
+			}
+			ToolUi::Hint("Update checks are read-only: the release page opens in your browser and nothing is installed automatically.");
+		}
+	}
+
+	// --------------------------------------------------------------- language
+	void RenderLanguage(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
 		static const struct {
 			const char* code;
 			const char* badge;
@@ -320,6 +831,13 @@ private:
 			{"es_ES", "ES", "Localization.Lang.es_ES"}
 		};
 
+		ToolUi::Section("Language");
+		ToolUi::Description("The interface language. Missing translations fall back to English.");
+		ImGui::Spacing();
+
+		if (strlen(settings.language) == 0)
+			strncpy(settings.language, g_local.GetCurrentLanguage().c_str(), sizeof(settings.language));
+
 		std::string currentLangStr(settings.language);
 		std::string currentDisplayName = "Localization.LanguageName"_l;
 		std::string currentBadge = "??";
@@ -331,7 +849,8 @@ private:
 			}
 		}
 		const std::string currentLabel = std::string("[") + currentBadge + "] " + currentDisplayName;
-		ImGui::SetNextItemWidth(300.0f);
+		ToolUi::Field("Language");
+		ImGui::SetNextItemWidth(std::min(320.0f, ImGui::GetContentRegionAvail().x));
 		if (ImGui::BeginCombo("##language_combo", currentLabel.c_str())) {
 			for (const auto& lang : availableLanguages) {
 				const std::string dispName = g_local.Get(lang.displayNameKey);
@@ -340,6 +859,7 @@ private:
 				if (ImGui::Selectable(itemLabel.c_str(), isSelected)) {
 					strncpy(settings.language, lang.code, sizeof(settings.language));
 					settings.language[sizeof(settings.language) - 1] = '\0';
+					data.language = lang.code;
 					g_local.ChangeLanguage(settings.language);
 					tm.RequestFontRebuild();
 					SaveNow();
@@ -349,8 +869,7 @@ private:
 			}
 			ImGui::EndCombo();
 		}
-		ImGui::SameLine();
-		if (ImGui::Button("Ui.ForceUpdateLang"_lc)) {
+		if (ImGui::Button("Reset Language Files")) {
 			if (strlen(settings.language) > 0) {
 				const std::string langFile = "./locales/" + std::string(settings.language) + ".lc";
 				std::error_code ec;
@@ -358,61 +877,240 @@ private:
 					std::filesystem::remove(langFile, ec);
 				g_local.ChangeLanguage(settings.language);
 				tm.RequestFontRebuild();
+				Notify("Language files reset.");
 			}
 		}
-		if (ImGui::IsItemHovered()) {
-			ImGui::BeginTooltip();
-			ImGui::TextUnformatted("Ui.ForceUpdateLangDesc"_lc);
-			ImGui::EndTooltip();
-		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Delete the cached language file and reload the built-in translation.");
+		ToolUi::Hint("Some plugin-provided strings are English-only.");
+	}
 
-#ifndef CASIOEMU_CORE_WEB
-		UIHelpers::SectionHeader("Integrations");
-		if (ImGui::Checkbox("Theme.EnableDiscordRPC"_lc, &settings.enableDiscordRPC)) {
-			SaveNow();
-			if (m_emu)
-				DiscordRPC::UpdatePresence(m_emu->ModelDefinition.model_name);
-			else
-				DiscordRPC::UpdatePresence("");
-		}
-		if (ImGui::Checkbox("Theme.EnableUpdateChecker"_lc, &settings.enableUpdateChecker))
-			SaveNow();
-#endif
-
-		UIHelpers::SectionHeader("Settings.System.Tabs"_lc);
-		ImGui::TextWrapped("%s", "Settings.System.TabsHint"_lc);
-		bool tabVisibilityChanged = false;
-		for (auto* win : windows) {
-			if (!win || !win->name) continue;
-			const bool isSettings = std::strcmp(win->name, "Settings") == 0;
-			if (isSettings) {
-				bool alwaysVisible = true;
-				ImGui::BeginDisabled();
-				ImGui::Checkbox(win->name, &alwaysVisible);
-				ImGui::EndDisabled();
-				continue;
+	// ------------------------------------------------------------ window/layout
+	void RenderWindowLayout(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		auto& shell = data.shell;
+		ToolUi::Section("Panels");
+		ToolUi::Description("Visibility changes apply immediately. Width and height changes apply now or on next launch where the shell owns the splitter.");
+		ImGui::Spacing();
+		{
+			ToolUi::PanelScope panel("##settings_panels");
+			bool sidebar_visible = shell.sidebar.visible;
+			if (ImGui::Checkbox("Explorer sidebar", &sidebar_visible)) {
+				if (sidebar_visible != shell.sidebar.visible)
+					casioemu::shell::ToggleSidebar();
+				shell.sidebar.visible = sidebar_visible;
+				SaveNow();
 			}
-			if (ImGui::Checkbox(win->name, &win->open))
-				tabVisibilityChanged = true;
-		}
-		const std::string hiddenTabs = HiddenTabsValue();
-		if (tabVisibilityChanged || hiddenTabs != settings.hiddenTabs) {
-			strncpy(settings.hiddenTabs, hiddenTabs.c_str(), sizeof(settings.hiddenTabs));
-			settings.hiddenTabs[sizeof(settings.hiddenTabs) - 1] = '\0';
-			SaveNow();
+			ToolUi::Field("Sidebar width");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##sidebar_width", &shell.sidebar.width, 200, 600, "%d px"))
+				shell.sidebar.width = std::clamp(shell.sidebar.width, 200, 600);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			bool bottom_visible = shell.bottom.visible;
+			if (ImGui::Checkbox("Bottom panel", &bottom_visible)) {
+				if (bottom_visible != shell.bottom.visible)
+					casioemu::shell::ToggleBottomPanel();
+				shell.bottom.visible = bottom_visible;
+				SaveNow();
+			}
+			ToolUi::Field("Panel height");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##panel_height", &shell.bottom.height, 120, 600, "%d px"))
+				shell.bottom.height = std::clamp(shell.bottom.height, 120, 600);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			ToolUi::Field("Panel tab");
+			ImGui::SetNextItemWidth(std::min(220.0f, ImGui::GetContentRegionAvail().x));
+			if (ImGui::BeginCombo("##panel_tab", shell.bottom.active.c_str())) {
+				for (const char* tab : { "output", "problems", "terminal" }) {
+					if (ImGui::Selectable(tab, shell.bottom.active == tab)) {
+						shell.bottom.active = tab;
+						SaveNow();
+					}
+				}
+				ImGui::EndCombo();
+			}
+
+			if (ImGui::Checkbox("Tool dock (next launch)", &shell.tools.visible))
+				SaveNow();
+			ToolUi::Field("Tool dock width");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##tools_width", &shell.tools.width, 200, 800, "%d px"))
+				shell.tools.width = std::clamp(shell.tools.width, 200, 800);
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
+
+			if (ImGui::Checkbox("Calculator panel", &shell.calculator.visible))
+				casioemu::shell::SetCalculatorVisible(shell.calculator.visible);
+			ToolUi::Hint("Sidebar and bottom-panel visibility apply immediately; width and height changes are kept for the next launch because the shell owns those splitters.");
+			ToolUi::Field("Calculator width");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			if (ImGui::SliderInt("##calc_width", &shell.calculator.width, 260, 700, "%d px")) {
+				casioemu::shell::SetCalculatorWidth(shell.calculator.width);
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit())
+				SaveNow();
 		}
 
-		UIHelpers::SectionHeader("Settings.System.Storage"_lc);
-		auto& store = casioemu::settings::SettingsStore::Instance();
-		ImGui::TextDisabled("%s: %s", "Settings.System.SettingsFile"_lc, store.FilePath().string().c_str());
-		ImGui::TextDisabled("%s: %s", "Settings.System.Schema"_lc, "1");
-		if (ImGui::Button("Settings.System.SaveNow"_lc))
-			SaveNow();
-		ImGui::SameLine();
-		if (ImGui::Button("Settings.System.Reload"_lc)) {
-			tm.LoadSettings();
-			tabsApplied = false;
+		ToolUi::Section("Window");
+		{
+			ToolUi::PanelScope panel("##settings_window");
+			int w = 0, h = 0;
+			if (window)
+				SDL_GetWindowSize(window, &w, &h);
+			ImGui::Text("Window: %d x %d", w, h);
+			ImGui::Text("Saved size: %d x %d at (%d, %d)", shell.window.width, shell.window.height,
+				shell.window.x, shell.window.y);
+			ImGui::Spacing();
+			bool fullscreen = (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
+			if (ImGui::Checkbox("Full screen", &fullscreen) && window) {
+				SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+				shell.window.fullscreen = fullscreen;
+				SaveNow();
+			}
+			if (ImGui::Button("Minimise") && window)
+				SDL_MinimizeWindow(window);
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reset Layout").x + 20.0f);
+			if (ImGui::Button("Reset Layout")) {
+				casioemu::shell::SetCalculatorWidth(360);
+				shell.calculator.width = 360;
+				SaveNow();
+				Notify("Layout reset. Restart to restore the default panel sizes.");
+			}
 		}
+
+		ToolUi::Section("Tool documents");
+		ToolUi::Description("Hidden tools stay listed here so they can always be restored. Settings is always available.");
+		{
+			ToolUi::PanelScope panel("##settings_tabs");
+			bool tabVisibilityChanged = false;
+			bool first_tab = true;
+			for (auto* win : windows) {
+				if (!win || !win->name) continue;
+				const bool isSettings = std::strcmp(win->name, "Settings") == 0;
+				if (isSettings) {
+					bool alwaysVisible = true;
+					ImGui::BeginDisabled();
+					ToolUi::CheckboxFlow("Settings (always available)", &alwaysVisible, first_tab);
+					ImGui::EndDisabled();
+					first_tab = false;
+					continue;
+				}
+				if (ToolUi::CheckboxFlow(win->name, &win->open, first_tab))
+					tabVisibilityChanged = true;
+				first_tab = false;
+			}
+			const std::string hiddenTabs = HiddenTabsValue();
+			if (tabVisibilityChanged || hiddenTabs != settings.hiddenTabs) {
+				strncpy(settings.hiddenTabs, hiddenTabs.c_str(), sizeof(settings.hiddenTabs));
+				settings.hiddenTabs[sizeof(settings.hiddenTabs) - 1] = '\0';
+				SaveNow();
+			}
+		}
+		(void)tm;
+	}
+
+	// ---------------------------------------------------------------- advanced
+	void RenderAdvanced(ThemeManager& tm, ThemeSettings& settings,
+		casioemu::settings::SettingsData& data) {
+		ToolUi::Section("Storage");
+		{
+			ToolUi::PanelScope panel("##settings_storage");
+			auto& store = casioemu::settings::SettingsStore::Instance();
+			ImGui::TextWrapped("File: %s", store.FilePath().string().c_str());
+			ImGui::Text("Schema: %d", data.schema);
+			ImGui::Text("Last load: %s", store.LastLoadStatus() == casioemu::settings::LoadStatus::Loaded ? "loaded"
+				: store.LastLoadStatus() == casioemu::settings::LoadStatus::Missing ? "defaults (no file)" : "error (defaults)");
+			if (!store.LastError().empty())
+				ToolUi::Status(store.LastError().c_str(), UIHelpers::kColorWarning);
+			ImGui::Spacing();
+			if (ImGui::Button("Save Now")) {
+				SaveNow();
+				Notify("Settings saved.");
+			}
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reload From Disk").x + 20.0f);
+			if (ImGui::Button("Reload From Disk")) {
+				tm.LoadSettings();
+				tabsApplied = false;
+				Notify("Settings reloaded.");
+			}
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Open Config Folder").x + 20.0f);
+			if (ImGui::Button("Open Config Folder"))
+				OpenInFinder(store.FilePath().parent_path());
+		}
+
+		ToolUi::Section("Renderer");
+		{
+			ToolUi::PanelScope panel("##settings_renderer");
+			static const char* renderers[] = { "default", "software", "metal", "opengl" };
+			int current = 0;
+			for (int i = 0; i < IM_ARRAYSIZE(renderers); ++i)
+				if (data.advanced.renderer == renderers[i])
+					current = i;
+			ToolUi::Field("Backend");
+			ImGui::SetNextItemWidth(std::min(220.0f, ImGui::GetContentRegionAvail().x));
+			if (ImGui::BeginCombo("##renderer", renderers[current])) {
+				for (int i = 0; i < IM_ARRAYSIZE(renderers); ++i) {
+					if (ImGui::Selectable(renderers[i], i == current)) {
+						data.advanced.renderer = renderers[i];
+						// casioemu.cpp reads .renderer_hint.cfg before creating the
+						// renderer; persist the hint for the next launch.
+						std::ofstream hint(".renderer_hint.cfg", std::ios::trunc);
+						if (hint)
+							hint << data.advanced.renderer;
+						SaveNow();
+						Notify("Renderer saved. Restart to apply.");
+					}
+				}
+				ImGui::EndCombo();
+			}
+			ToolUi::Hint("The renderer is chosen before the window exists, so the change applies on the next launch. "
+				"A crash switches the backend automatically.");
+		}
+
+		ToolUi::Section("Reset");
+		{
+			ToolUi::PanelScope panel("##settings_reset");
+			ImGui::TextWrapped("Reset every setting to its built-in default. Themes, paths, layout and plugin state are cleared. "
+				"The settings file is rewritten; open documents and snapshots are not touched.");
+			ImGui::Spacing();
+			if (ImGui::Button("Reset All Settings"))
+				confirmReset = true;
+			if (!confirmReset)
+				ToolUi::Hint("This cannot be undone.");
+		}
+
+		if (confirmReset)
+			ImGui::OpenPopup("Reset settings###settings_reset_confirm");
+		{
+			ToolUi::DialogScope dialog("Reset settings###settings_reset_confirm", "Reset all settings", 460.0f);
+			if (dialog) {
+				ImGui::TextUnformatted("Reset every setting to its default value?");
+				ImGui::Spacing();
+				if (ToolUi::AccentButton("Reset", ImVec2(120, 0))) {
+					auto& store = casioemu::settings::SettingsStore::Instance();
+					store.ResetToDefaults();
+					std::string error;
+					store.Save(&error);
+					settings = ThemeSettings{};
+					tm.LoadSettings();
+					tm.RequestFontRebuild();
+					tabsApplied = false;
+					confirmReset = false;
+					Notify("All settings reset to defaults.");
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(120, 0)) || dialog.CloseRequested()) {
+					confirmReset = false;
+					ImGui::CloseCurrentPopup();
+				}
+			}
+		}
+		(void)data;
 	}
 
 public:
@@ -420,7 +1118,14 @@ public:
 		auto& settings = ThemeManager::Instance().Settings();
 		strncpy(tempInjectionFilePath, settings.injectionFilePath, sizeof(tempInjectionFilePath));
 		tempInjectionFilePath[sizeof(tempInjectionFilePath) - 1] = '\0';
+		// Headless verification: CASIOEMU_SETTINGS_CATEGORY=<n> opens a category
+		// directly so each settings page can be screenshotted and probed.
+		if (const char* requested = std::getenv("CASIOEMU_SETTINGS_CATEGORY")) {
+			category = std::clamp(std::atoi(requested), 0, static_cast<int>(kCategoryCount) - 1);
+		}
 	}
+
+	bool showFileDialog = false;
 
 	void RenderCore() override {
 		if (!casioemu::settings::SettingsStore::Instance().IsLoaded())
@@ -434,25 +1139,53 @@ public:
 			tabsApplied = true;
 		}
 
-		if (ImGui::BeginTabBar("##settings_categories")) {
-			if (ImGui::BeginTabItem("Settings.Tab.Theme"_lc)) {
-				RenderThemeTab(tm, settings, data);
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Settings.Tab.Emulator"_lc)) {
-				RenderEmulatorTab(tm, settings, data);
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Settings.Tab.Plugins"_lc)) {
-				RenderPluginsTab(tm, data);
-				ImGui::EndTabItem();
-			}
-			if (ImGui::BeginTabItem("Settings.Tab.System"_lc)) {
-				RenderSystemTab(tm, settings, data);
-				ImGui::EndTabItem();
-			}
-			ImGui::EndTabBar();
+		// Left navigation + right content.  A category list scales better than a
+		// tab bar once every settings group exists.  The nav shrinks with the
+		// panel so the content column never drops below a usable width.
+		const float nav_width = std::min(190.0f, std::max(140.0f, ImGui::GetContentRegionAvail().x * 0.24f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
+		ImGui::BeginChild("##settings_nav", ImVec2(nav_width, 0), ImGuiChildFlags_Border);
+		for (int index = 0; index < kCategoryCount; ++index) {
+			const bool selected = category == index;
+			ImGui::PushStyleColor(ImGuiCol_Button, selected ? ToolUi::Palette().selection : ImVec4(0, 0, 0, 0));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ToolUi::Palette().hover);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ToolUi::Palette().selection);
+			ImGui::PushStyleColor(ImGuiCol_Text, selected ? ToolUi::Palette().foreground : ToolUi::Palette().muted);
+			if (ImGui::Button(CategoryLabel(index), ImVec2(-1.0f, 28.0f)))
+				category = index;
+			ImGui::PopStyleColor(4);
+			if (std::strcmp(CategoryFullName(index), CategoryLabel(index)) != 0 && ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", CategoryFullName(index));
 		}
+		if (!statusMessage.empty() && ImGui::GetTime() - statusTime < 4.0) {
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::PushTextWrapPos(0.0f);
+			ToolUi::Status(statusMessage.c_str(), UIHelpers::kColorSuccess);
+			ImGui::PopTextWrapPos();
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleVar(2);
+
+		ImGui::SameLine();
+		ImGui::BeginChild("##settings_content", ImVec2(0, 0));
+		ToolUi::PageScope page("Settings");
+		switch (category) {
+		case kGeneral: RenderGeneral(data); break;
+		case kAppearance: RenderAppearance(tm, settings, data); break;
+		case kEditor: RenderEditor(tm, data); break;
+		case kEmulator: RenderEmulator(tm, settings, data); break;
+		case kCalculator: RenderCalculator(tm, settings, data); break;
+		case kPaths: RenderPaths(tm, settings, data); break;
+		case kPlugins: RenderPlugins(tm, data); break;
+		case kIntegrations: RenderIntegrations(data); break;
+		case kLanguage: RenderLanguage(tm, settings, data); break;
+		case kWindow: RenderWindowLayout(tm, settings, data); break;
+		case kAdvanced: RenderAdvanced(tm, settings, data); break;
+		default: break;
+		}
+		ImGui::EndChild();
 	}
 };
 

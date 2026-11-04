@@ -5,6 +5,7 @@
 #include "Chipset/T4xCore.hpp"
 #include "Emulator.hpp"
 #include "Gui/Hooks.h"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #include "imgui/imgui.h"
 #include <Localization.h>
@@ -43,28 +44,40 @@ Breakpoints* membp_cv = 0;
 
 void Breakpoints::DrawContent() {
 	if (break_point_hash.empty()) {
-		ImGui::PushStyleColor(ImGuiCol_Text, UIHelpers::kColorMuted);
-		ImGui::TextWrapped("No memory breakpoints set. Enter an address in hex and click 'Add' below to monitor memory access.");
-		ImGui::PopStyleColor();
+		ToolUi::PanelScope panel("##bp_empty");
+		ToolUi::EmptyState("No memory breakpoints set. Enter an address in hex and click Add below to monitor memory access.");
 		return;
 	}
-	ImGuiListClipper c;
 	static int selected = -1;
-	c.Begin(break_point_hash.size());
-	char buf[5] = {0};
-	while (c.Step()) {
+	int remove_index = -1;
+	if (ToolUi::TableScope table{"##bp_list", 5, ToolUi::TableFlags() | ImGuiTableFlags_ScrollY,
+			ImGui::GetContentRegionAvail().y}) {
+		ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+		ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 76.0f);
+		ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 78.0f);
+		ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+		ImGui::TableSetupScrollFreeze(0, 1);
+		ImGui::TableHeadersRow();
 
-		for (int i = c.DisplayStart; i < c.DisplayEnd; i++) {
-			MemBPData_t& data = break_point_hash[i];
-			snprintf(buf, sizeof(buf), "%lx", (unsigned long)data.addr);
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(break_point_hash.size()));
+		while (clipper.Step()) {
+		for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+			MemBPData_t& data = break_point_hash[static_cast<size_t>(i)];
 			ImGui::PushID(i);
-			if (ImGui::Selectable(buf, selected == i)) {
-				selected = i;
-			}
-			ImGui::PopID();
-			if (ImGui::BeginPopupContextItem()) {
-				selected = i;
+			ImGui::TableNextRow();
 
+			ImGui::TableSetColumnIndex(0);
+			char buf[16];
+			snprintf(buf, sizeof(buf), "%05X", (unsigned)data.addr);
+			if (ImGui::Selectable(buf, selected == i, ImGuiSelectableFlags_SpanAllColumns,
+					ImVec2(0, ImGui::GetFrameHeight())))
+				selected = i;
+			const bool row_hovered = ImGui::IsItemHovered();
+			ToolUi::ContextPopupScope popup;
+			if (popup) {
+				selected = i;
 				ImGui::TextUnformatted("MemBP.BPType"_lc);
 				if (ImGui::Button("HexEditors.ContextMenu.MonitorRead"_lc)) {
 					target_addr = i;
@@ -82,7 +95,7 @@ void Breakpoints::DrawContent() {
 				}
 				if (m_emu && (m_emu->chipset.epscpu || m_emu->chipset.t4x)) {
 					bool configuration_changed = false;
-					configuration_changed |= ImGui::Checkbox("Enabled", &data.enabled);
+					configuration_changed |= ImGui::Checkbox("Enabled##ctx", &data.enabled);
 					configuration_changed |= ImGui::Checkbox("Compare data", &data.compareData);
 					if (data.compareData) {
 						int compare_data = data.data;
@@ -96,50 +109,64 @@ void Breakpoints::DrawContent() {
 							configuration_changed = true;
 						}
 					}
-					{
-						int skip_count = static_cast<int>(std::min<uint64_t>(data.skipCount, 0x7fffffffu));
-						if (ImGui::InputInt("Skip count", &skip_count, 1, 10)) {
-							data.skipCount = static_cast<uint64_t>(std::max(skip_count, 0));
-							configuration_changed = true;
-						}
+					int skip_count = static_cast<int>(std::min<uint64_t>(data.skipCount, 0x7fffffffu));
+					if (ImGui::InputInt("Skip count", &skip_count, 1, 10)) {
+						data.skipCount = static_cast<uint64_t>(std::max(skip_count, 0));
+						configuration_changed = true;
 					}
 					if (configuration_changed)
 						SyncCoreBreakpoints();
 				}
 				ImGui::Separator();
-				if (ImGui::Button("MemBP.Delete"_lc)) {
-					data.records.clear();
-					if (target_addr == i) {
-						target_addr = -1;
-					}
-					break_point_hash.erase(break_point_hash.begin() + i);
-					SyncCoreBreakpoints();
-					ImGui::CloseCurrentPopup();
-				}
-				ImGui::EndPopup();
+				if (ImGui::Button("MemBP.Delete"_lc))
+					remove_index = i;
 			}
+			(void)row_hovered;
+
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextDisabled("%s", data.enableWrite ? "Write" : "Read");
+
+			ImGui::TableSetColumnIndex(2);
+			bool enabled = data.enabled;
+			if (ImGui::Checkbox("##enabled", &enabled)) {
+				data.enabled = enabled;
+				SyncCoreBreakpoints();
+			}
+
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%d", static_cast<int>(data.records.size()));
+
+			ImGui::TableSetColumnIndex(4);
+			if (ToolUi::CloseButton("##remove_bp", "Delete breakpoint"))
+				remove_index = i;
+			ImGui::PopID();
 		}
+		}
+	}
+	if (remove_index >= 0 && remove_index < static_cast<int>(break_point_hash.size())) {
+		break_point_hash[static_cast<size_t>(remove_index)].records.clear();
+		if (target_addr == remove_index)
+			target_addr = -1;
+		break_point_hash.erase(break_point_hash.begin() + remove_index);
+		if (selected == remove_index)
+			selected = -1;
+		SyncCoreBreakpoints();
 	}
 }
 
 void Breakpoints::DrawFindContent() {
 	if (target_addr == -1) {
-		ImGui::TextColored(~UIHelpers::kColorWarning, "%s", "MemBP.NoBPHint"_lc);
+		ToolUi::Hint("MemBP.NoBPHint"_lc);
 		return;
 	}
 	int write = break_point_hash[target_addr].enableWrite;
-	static ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable;
-	ImGui::Text("MemBP.MonitoringHint"_lc,
-		break_point_hash[target_addr].addr);
-	ImGui::SameLine();
-	static const char* fx = "";
-	if (ImGui::Button("MemBP.ClearRec"_lc)) {
-		break_point_hash[target_addr].records.clear();
-	}
+	static ImGuiTableFlags flags = ToolUi::TableFlags() | ImGuiTableFlags_ScrollY;
+	char header[128];
+	snprintf(header, sizeof(header), "MemBP.MonitoringHint"_lc, break_point_hash[target_addr].addr);
 	if (ImGui::BeginTable("##outputtable", 2, flags)) {
 		ImGui::TableSetupScrollFreeze(0, 1);
-		ImGui::TableSetupColumn("MemBP.ColPC"_lc);
-		ImGui::TableSetupColumn("");
+		ImGui::TableSetupColumn(header, ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Access", ImGuiTableColumnFlags_WidthFixed, 90.0f);
 		ImGui::TableHeadersRow();
 		int i = 0;
 		if (m_emu && (m_emu->chipset.epscpu || m_emu->chipset.t4x)) {
@@ -157,13 +184,12 @@ void Breakpoints::DrawFindContent() {
 			uint32_t pc_addr = kv.first;
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
-			// Clickable address → left-click navigates CodeViewer; right-click offers memory jump
 			UIHelpers::ClickableAddress(pc_addr, UIHelpers::JumpTarget::Code);
 			ImGui::TableSetColumnIndex(1);
 			ImGui::PushID(i++);
-			if (ImGui::Button("MemBP.ViewCallstack"_lc)) {
-				fx = kv.second.stacktrace.c_str();
-				SDL_ShowSimpleMessageBox(0, "", fx, 0);
+			if (ImGui::SmallButton("MemBP.ViewCallstack"_lc)) {
+				const std::string& fx = kv.second.stacktrace;
+				SDL_ShowSimpleMessageBox(0, "Call stack", fx.c_str(), 0);
 			}
 			ImGui::PopID();
 		}
@@ -239,6 +265,7 @@ void Breakpoints::TryTrigBp(uint32_t addr, bool write) {
 
 void Breakpoints::RenderCore() {
 	std::lock_guard lock(breakpoints_mutex);
+	ToolUi::PageScope page("Breakpoints");
 	if (m_emu && (m_emu->chipset.epscpu || m_emu->chipset.t4x)) {
 		const uint64_t version = m_emu->chipset.t4x ? m_emu->chipset.t4x->MemoryBreakpointsVersion() : m_emu->chipset.epscpu->MemoryBreakpointsVersion();
 		if (version != last_core_breakpoint_version) {
@@ -248,50 +275,70 @@ void Breakpoints::RenderCore() {
 	}
 	if (ImGui::BeginTabBar("Breakpoints")) {
 		if (ImGui::BeginTabItem("Memory")) {
-			static char buf[10] = {0};
-			ImGui::BeginChild("##srcollingmbp", ImVec2(0, break_on_cv ? ImGui::GetWindowHeight() - ImGui::GetTextLineHeightWithSpacing() * 6 : ImGui::GetWindowHeight() / 3));
+			ToolUi::Section("Memory Breakpoints");
+			ToolUi::Description("Break on a read or write to a memory address, or record the program counter of every hit.");
+			ImGui::Spacing();
+			{
+				ToolUi::PanelScope panel("##bp_add_panel");
+				static char buf[10] = {0};
+				ToolUi::Field("Address (hex)");
+				ImGui::SetNextItemWidth(ImGui::CalcTextSize("00000000").x + 24.0f);
+				ImGui::InputText("##addressin", buf, 10, ImGuiInputTextFlags_CharsHexadecimal);
+				ImGui::SameLine();
+				if (ToolUi::AccentButton("MemBP.AddAddr"_lc)) {
+					break_point_hash.push_back({.addr = (uint32_t)strtol(buf, nullptr, 16)});
+					SyncCoreBreakpoints();
+				}
+				ToolUi::SameLineOrWrap(ImGui::GetContentRegionAvail().x + 1.0f);
+				ImGui::Checkbox("MemBP.BreakWhenHit"_lc, &break_on_cv);
+				if (target_addr >= 0 && static_cast<size_t>(target_addr) < break_point_hash.size() &&
+					break_point_hash[target_addr].breakWhenHit != break_on_cv) {
+					break_point_hash[target_addr].breakWhenHit = break_on_cv;
+					SyncCoreBreakpoints();
+				}
+			}
+			ImGui::Spacing();
+			const float list_height = break_on_cv ? std::max(120.0f, ImGui::GetContentRegionAvail().y - 90.0f)
+												  : std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.40f);
+			ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+			ImGui::BeginChild("##srcollingmbp", ImVec2(0, list_height), ImGuiChildFlags_Border);
 			DrawContent();
 			ImGui::EndChild();
-			ImGui::SetNextItemWidth(ImGui::CalcTextSize("F").x * 8);
-			ImGui::InputText(
-				"##addressin",
-				buf, 10, ImGuiInputTextFlags_CharsHexadecimal);
-			ImGui::SameLine();
-			if (ImGui::Button("MemBP.AddAddr"_lc)) {
-				break_point_hash.push_back({.addr = (uint32_t)strtol(buf, nullptr, 16)});
-				SyncCoreBreakpoints();
-			}
-			ImGui::Checkbox("MemBP.BreakWhenHit"_lc,
-				&break_on_cv);
-			if (target_addr >= 0 && static_cast<size_t>(target_addr) < break_point_hash.size() &&
-				break_point_hash[target_addr].breakWhenHit != break_on_cv) {
-				break_point_hash[target_addr].breakWhenHit = break_on_cv;
-				SyncCoreBreakpoints();
-			}
+			ImGui::PopStyleVar();
 			if (!break_on_cv) {
-				ImGui::BeginChild("##findoutput");
+				ToolUi::Section("Recorded Hits");
+				if (target_addr >= 0 && static_cast<size_t>(target_addr) < break_point_hash.size()) {
+					if (ImGui::Button("MemBP.ClearRec"_lc))
+						break_point_hash[target_addr].records.clear();
+					ImGui::SameLine();
+				}
+				ImGui::BeginChild("##findoutput", ImVec2(0, std::max(100.0f, ImGui::GetContentRegionAvail().y - 8.0f)));
 				DrawFindContent();
 				ImGui::EndChild();
 			}
 			ImGui::EndTabItem();
 		}
 		if (!m_emu->chipset.t4x && ImGui::BeginTabItem("Register")) {
+			ToolUi::Section("Register Breakpoint");
+			ToolUi::Description("Stop when the stack pointer matches the comparison you choose.");
+			ImGui::Spacing();
+			ToolUi::PanelScope panel("##bp_register_panel");
 			const bool eps6800 = m_emu && m_emu->chipset.epscpu;
 			static char buf[10] = {0};
-			ImGui::Combo("BP.RegCmpMode"_lc, &reg_compare_mode, "Disabled\0Equal\0Not Equal\0Greater\0Less\0Greater or Equal\0Less or Equal\0");
+			ToolUi::Field("Comparison");
+			ImGui::SetNextItemWidth(std::min(260.0f, std::max(140.0f, ImGui::GetContentRegionAvail().x)));
+			ImGui::Combo("##regcmp", &reg_compare_mode, "Disabled\0Equal\0Not Equal\0Greater\0Less\0Greater or Equal\0Less or Equal\0");
 			if (eps6800)
-				ImGui::TextDisabled("EPS6800 STKPTR (00-1F)");
-			ImGui::Separator();
-			ImGui::SetNextItemWidth(ImGui::CalcTextSize("F").x * 8);
-			if (ImGui::InputText(
-					"##addressin2",
-					buf, 10, ImGuiInputTextFlags_CharsHexadecimal)) {
+				ToolUi::Hint("EPS6800 STKPTR (00-1F)");
+			ToolUi::Field(eps6800 ? "STKPTR (hex)" : "SP value (hex)");
+			ImGui::SetNextItemWidth(ImGui::CalcTextSize("00000000").x);
+			if (ImGui::InputText("##addressin2", buf, 10, ImGuiInputTextFlags_CharsHexadecimal)) {
 				target_sp = (uint16_t)strtol(buf, nullptr, 16);
 				if (eps6800)
 					target_sp &= 0x1f;
 			}
 			ImGui::SameLine();
-			ImGui::Checkbox(eps6800 ? "STKPTR" : "BP.SPHint"_lc, &break_on_sp);
+			ImGui::Checkbox(eps6800 ? "Break on STKPTR" : "BP.SPHint"_lc, &break_on_sp);
 			UpdateRegisterBreakpointConfig();
 			ImGui::EndTabItem();
 		}

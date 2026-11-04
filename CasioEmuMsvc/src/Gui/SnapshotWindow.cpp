@@ -1,6 +1,7 @@
 #include "SnapshotWindow.h"
 #include "Snapshot.h"
 #include "Emulator.hpp"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #ifdef CASIOEMU_CORE_WEB
 #include "WebDebuggerGui.h"
@@ -151,136 +152,134 @@ void SnapshotWindow::EnsureAutoSaveLoaded() {
 
 void SnapshotWindow::RenderToolbar() {
     bool hasEmu = (::m_emu != nullptr);
-
-    // --- Save button ---
-    if (!hasEmu) ImGui::BeginDisabled();
-    if (ImGui::Button("SnapshotWindow.Save"_lc)) {
-        try {
-            std::string lbl(m_LabelBuf);
-            if (lbl.empty()) lbl = std::string("SnapshotWindow.SnapshotPrefix"_lc) + std::to_string(m_Manager.Nodes.size() + 1);
-            uint32_t newId = m_Manager.SaveSnapshot(*::m_emu, m_SelectedId, lbl);
-            RequestSnapshotFsSync();
-            m_SelectedId = newId;
-            TryLoadPreview(newId);
-            memset(m_LabelBuf, 0, sizeof(m_LabelBuf));
-        } catch (const std::exception& e) {
-            ShowError(e.what());
-        }
-    }
-    if (!hasEmu) ImGui::EndDisabled();
-    ImGui::SameLine();
-
-    // --- Load button ---
     bool hasSelected = (m_SelectedId != 0 && hasEmu);
-    if (!hasSelected) ImGui::BeginDisabled();
-    if (ImGui::Button("SnapshotWindow.Load"_lc)) {
-        try {
-            m_Manager.LoadSnapshot(*::m_emu, m_SelectedId);
-            m_LoadSuccessTime = ImGui::GetTime();
-        } catch (const std::exception& e) {
-            ShowError(e.what());
+
+    ToolUi::Section("Snapshots");
+    ToolUi::Description("Save the full machine state, branch from an existing snapshot, and export or import snapshot files.");
+    ImGui::Spacing();
+
+    {
+        ToolUi::PanelScope panel("##snapshot_actions");
+
+        // --- Save / load / delete ---
+        if (!hasEmu) ImGui::BeginDisabled();
+        if (ToolUi::AccentButton("SnapshotWindow.Save"_lc)) {
+            try {
+                std::string lbl(m_LabelBuf);
+                if (lbl.empty()) lbl = std::string("SnapshotWindow.SnapshotPrefix"_lc) + std::to_string(m_Manager.Nodes.size() + 1);
+                uint32_t newId = m_Manager.SaveSnapshot(*::m_emu, m_SelectedId, lbl);
+                RequestSnapshotFsSync();
+                m_SelectedId = newId;
+                TryLoadPreview(newId);
+                memset(m_LabelBuf, 0, sizeof(m_LabelBuf));
+            } catch (const std::exception& e) {
+                ShowError(e.what());
+            }
         }
-    }
-    if (!hasSelected) ImGui::EndDisabled();
-    ImGui::SameLine();
+        if (!hasEmu) ImGui::EndDisabled();
+        ToolUi::SameLineOrWrap(ImGui::CalcTextSize("SnapshotWindow.Load"_lc).x + 20.0f);
 
-    // --- Delete button ---
-    if (!hasSelected) ImGui::BeginDisabled();
-    if (ImGui::Button("SnapshotWindow.Delete"_lc)) {
-        if (m_SelectedId != 0) {
-            m_NodeToDelete = m_SelectedId;
-            ImGui::OpenPopup("Delete Confirmation");
+        if (!hasSelected) ImGui::BeginDisabled();
+        if (ImGui::Button("SnapshotWindow.Load"_lc)) {
+            try {
+                m_Manager.LoadSnapshot(*::m_emu, m_SelectedId);
+                m_LoadSuccessTime = ImGui::GetTime();
+            } catch (const std::exception& e) {
+                ShowError(e.what());
+            }
         }
-    }
-    if (!hasSelected) ImGui::EndDisabled();
-    ImGui::SameLine();
+        if (!hasSelected) ImGui::EndDisabled();
+        ToolUi::SameLineOrWrap(ImGui::CalcTextSize("SnapshotWindow.Delete"_lc).x + 20.0f);
 
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-    ImGui::SameLine();
+        if (!hasSelected) ImGui::BeginDisabled();
+        if (ImGui::Button("SnapshotWindow.Delete"_lc)) {
+            if (m_SelectedId != 0) {
+                m_NodeToDelete = m_SelectedId;
+                ImGui::OpenPopup("Delete Confirmation###snapshot_delete");
+            }
+        }
+        if (!hasSelected) ImGui::EndDisabled();
 
-    // --- Export selected ---
-    if (!hasSelected) ImGui::BeginDisabled();
-    if (ImGui::Button("SnapshotWindow.ExportNode"_lc)) {
-        if (m_SelectedId != 0) {
-            uint32_t exportId = m_SelectedId;
+        ImGui::Spacing();
+        ToolUi::Hint("Selected snapshots can be exported alone or with their child snapshots.");
+
+        // --- Export / import ---
+        if (!hasSelected) ImGui::BeginDisabled();
+        if (ImGui::Button("SnapshotWindow.ExportNode"_lc)) {
+            if (m_SelectedId != 0) {
+                uint32_t exportId = m_SelectedId;
+#ifdef CASIOEMU_CORE_WEB
+                try {
+                    auto path = WebSnapshotExportPath("snapshot.snapshot");
+                    m_Manager.ExportNode(path, exportId);
+                    WebDebuggerQueueDownload(path.string().c_str(), "snapshot.snapshot");
+                } catch (const std::exception& e) { ShowError(e.what()); }
+#else
+                SystemDialogs::SaveFileDialog("snapshot.snapshot", [this, exportId](std::filesystem::path path) {
+                    try { m_Manager.ExportNode(path, exportId); }
+                    catch (const std::exception& e) { ShowError(e.what()); }
+                });
+#endif
+            }
+        }
+        if (!hasSelected) ImGui::EndDisabled();
+        ToolUi::SameLineOrWrap(ImGui::CalcTextSize("SnapshotWindow.ExportSubtree"_lc).x + 20.0f);
+
+        if (!hasSelected) ImGui::BeginDisabled();
+        if (ImGui::Button("SnapshotWindow.ExportSubtree"_lc)) {
+            if (m_SelectedId != 0) {
+                uint32_t exportId = m_SelectedId;
+#ifdef CASIOEMU_CORE_WEB
+                try {
+                    auto path = WebSnapshotExportPath("snapshot.snapshot");
+                    m_Manager.ExportSubtree(path, exportId);
+                    WebDebuggerQueueDownload(path.string().c_str(), "snapshot.snapshot");
+                } catch (const std::exception& e) { ShowError(e.what()); }
+#else
+                SystemDialogs::SaveFileDialog("snapshot.snapshot", [this, exportId](std::filesystem::path path) {
+                    try { m_Manager.ExportSubtree(path, exportId); }
+                    catch (const std::exception& e) { ShowError(e.what()); }
+                });
+#endif
+            }
+        }
+        if (!hasSelected) ImGui::EndDisabled();
+        ToolUi::SameLineOrWrap(ImGui::CalcTextSize("SnapshotWindow.ExportAll"_lc).x + 20.0f);
+
+        if (ImGui::Button("SnapshotWindow.ExportAll"_lc)) {
 #ifdef CASIOEMU_CORE_WEB
             try {
-                auto path = WebSnapshotExportPath("snapshot.snapshot");
-                m_Manager.ExportNode(path, exportId);
-                WebDebuggerQueueDownload(path.string().c_str(), "snapshot.snapshot");
+                auto path = WebSnapshotExportPath("snapshots.snapshot");
+                m_Manager.ExportAll(path);
+                WebDebuggerQueueDownload(path.string().c_str(), "snapshots.snapshot");
             } catch (const std::exception& e) { ShowError(e.what()); }
 #else
-            SystemDialogs::SaveFileDialog("snapshot.snapshot", [this, exportId](std::filesystem::path path) {
-                try { m_Manager.ExportNode(path, exportId); }
+            SystemDialogs::SaveFileDialog("snapshots.snapshot", [this](std::filesystem::path path) {
+                try { m_Manager.ExportAll(path); }
                 catch (const std::exception& e) { ShowError(e.what()); }
             });
 #endif
         }
-    }
-    if (!hasSelected) ImGui::EndDisabled();
-    ImGui::SameLine();
+        ToolUi::SameLineOrWrap(ImGui::CalcTextSize("SnapshotWindow.Import"_lc).x + 20.0f);
 
-    // --- Export subtree ---
-    if (!hasSelected) ImGui::BeginDisabled();
-    if (ImGui::Button("SnapshotWindow.ExportSubtree"_lc)) {
-        if (m_SelectedId != 0) {
-            uint32_t exportId = m_SelectedId;
+        if (ImGui::Button("SnapshotWindow.Import"_lc)) {
 #ifdef CASIOEMU_CORE_WEB
-            try {
-                auto path = WebSnapshotExportPath("snapshot.snapshot");
-                m_Manager.ExportSubtree(path, exportId);
-                WebDebuggerQueueDownload(path.string().c_str(), "snapshot.snapshot");
-            } catch (const std::exception& e) { ShowError(e.what()); }
+            m_WebImportPath = WebSnapshotImportPath();
+            WebDebuggerQueueOpenFile(m_WebImportPath.string().c_str(), "snapshot.snapshot");
 #else
-            SystemDialogs::SaveFileDialog("snapshot.snapshot", [this, exportId](std::filesystem::path path) {
-                try { m_Manager.ExportSubtree(path, exportId); }
+            SystemDialogs::OpenFileDialog([this](std::filesystem::path path) {
+                try { m_Manager.ImportFromFile(path); }
                 catch (const std::exception& e) { ShowError(e.what()); }
+                RequestSnapshotFsSync();
             });
 #endif
         }
     }
-    if (!hasSelected) ImGui::EndDisabled();
-    ImGui::SameLine();
-
-    // --- Export all ---
-    if (ImGui::Button("SnapshotWindow.ExportAll"_lc)) {
-#ifdef CASIOEMU_CORE_WEB
-        try {
-            auto path = WebSnapshotExportPath("snapshots.snapshot");
-            m_Manager.ExportAll(path);
-            WebDebuggerQueueDownload(path.string().c_str(), "snapshots.snapshot");
-        } catch (const std::exception& e) { ShowError(e.what()); }
-#else
-        SystemDialogs::SaveFileDialog("snapshots.snapshot", [this](std::filesystem::path path) {
-            try { m_Manager.ExportAll(path); }
-            catch (const std::exception& e) { ShowError(e.what()); }
-        });
-#endif
-    }
-    ImGui::SameLine();
-
-    // --- Import ---
-    if (ImGui::Button("SnapshotWindow.Import"_lc)) {
-#ifdef CASIOEMU_CORE_WEB
-        m_WebImportPath = WebSnapshotImportPath();
-        WebDebuggerQueueOpenFile(m_WebImportPath.string().c_str(), "snapshot.snapshot");
-#else
-        SystemDialogs::OpenFileDialog([this](std::filesystem::path path) {
-            try { m_Manager.ImportFromFile(path); }
-            catch (const std::exception& e) { ShowError(e.what()); }
-            RequestSnapshotFsSync();
-        });
-#endif
-    }
-
-    ImGui::Separator();
 
     // --- Label input ---
-    ImGui::SetNextItemWidth(320);
-    ImGui::InputText("SnapshotWindow.Label"_lc, m_LabelBuf, sizeof(m_LabelBuf));
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", "SnapshotWindow.LabelHint"_lc);
-    ImGui::Separator();
+    ToolUi::Field("Label");
+    ImGui::SetNextItemWidth(std::min(300.0f, ToolUi::RemainingWidth()));
+    ImGui::InputTextWithHint("##snapshot_label", "SnapshotWindow.LabelHint"_lc, m_LabelBuf, sizeof(m_LabelBuf));
 }
 
 // ============================================================
@@ -315,7 +314,8 @@ void SnapshotWindow::RenderTreeNode(uint32_t parentId, int depth) {
         }
 
         // Right-click context menu
-        if (ImGui::BeginPopupContextItem()) {
+        ToolUi::ContextPopupScope popup;
+        if (popup) {
             if (ImGui::MenuItem("SnapshotWindow.SaveChild"_lc)) {
                 if (::m_emu) {
                     try {
@@ -338,9 +338,8 @@ void SnapshotWindow::RenderTreeNode(uint32_t parentId, int depth) {
             ImGui::Separator();
             if (ImGui::MenuItem("SnapshotWindow.DeleteWithChildren"_lc)) {
                 m_NodeToDelete = node.Id;
-                ImGui::OpenPopup("Delete Confirmation");
+                ImGui::OpenPopup("Delete Confirmation###snapshot_delete");
             }
-            ImGui::EndPopup();
         }
 
         if (open) {
@@ -351,15 +350,21 @@ void SnapshotWindow::RenderTreeNode(uint32_t parentId, int depth) {
 }
 
 void SnapshotWindow::RenderTree() {
-    float width = ImGui::GetContentRegionAvail().x * 0.35f;
-    if (width < 250.0f) width = 250.0f; // min width
-    ImGui::BeginChild("##snap_tree", ImVec2(width, 0), true);
+    const float avail = ToolUi::RemainingWidth();
+    const bool side_by_side = avail >= 520.0f;
+    float width = side_by_side ? std::max(250.0f, avail * 0.35f) : 0.0f;
+    float height = side_by_side ? 0.0f : 190.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+    ImGui::BeginChild("##snap_tree", ImVec2(width, height), ImGuiChildFlags_Border);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
     if (m_Manager.Nodes.empty()) {
-        ImGui::TextDisabled("%s", "SnapshotWindow.NoSnapshots"_lc);
+        ToolUi::EmptyState("SnapshotWindow.NoSnapshots"_lc);
     } else {
         RenderTreeNode(0, 0);
     }
+    ImGui::PopStyleVar();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 }
 
 // ============================================================
@@ -367,7 +372,7 @@ void SnapshotWindow::RenderTree() {
 // ============================================================
 
 void SnapshotWindow::RenderDetails() {
-    ImGui::BeginChild("##snap_detail", ImVec2(0, 0), false);
+    ImGui::BeginChild("##snap_detail", ImVec2(0, 0), ImGuiChildFlags_None);
 
     // Find selected node
     const SnapshotNode* sel = nullptr;
@@ -375,7 +380,7 @@ void SnapshotWindow::RenderDetails() {
         if (n.Id == m_SelectedId) { sel = &n; break; }
 
     if (!sel) {
-        ImGui::TextDisabled("%s", "SnapshotWindow.SelectToSeeDetails"_lc);
+        ToolUi::EmptyState("SnapshotWindow.SelectToSeeDetails"_lc);
         ImGui::EndChild();
         return;
     }
@@ -390,23 +395,25 @@ void SnapshotWindow::RenderDetails() {
         ImGui::Image(reinterpret_cast<ImTextureID>(m_Preview.Tex),
                      ImVec2(imgW * scale, imgH * scale));
     } else {
-        ImGui::TextDisabled("%s", "SnapshotWindow.NoPreview"_lc);
+        ToolUi::EmptyState("SnapshotWindow.NoPreview"_lc);
     }
 
-    ImGui::Separator();
-
-    ImGui::Text("SnapshotWindow.ID"_lc, sel->Id);
-    ImGui::Text("SnapshotWindow.ParentID"_lc, sel->ParentId);
-    ImGui::Text("SnapshotWindow.LabelFmt"_lc, sel->Label.c_str());
-    ImGui::Text("SnapshotWindow.SavedFmt"_lc, FormatTimestamp(sel->Timestamp).c_str());
-    ImGui::Text("SnapshotWindow.StateFmt"_lc,
-                static_cast<size_t>(sel->UncompressedStateSize),
-                sel->CompressedState.size());
-    ImGui::Text("SnapshotWindow.PreviewFmt"_lc, sel->PreviewPng.size());
+    ImGui::Spacing();
+    {
+        ToolUi::PanelScope panel("##snapshot_meta");
+        ImGui::Text("SnapshotWindow.ID"_lc, sel->Id);
+        ImGui::Text("SnapshotWindow.ParentID"_lc, sel->ParentId);
+        ImGui::Text("SnapshotWindow.LabelFmt"_lc, sel->Label.c_str());
+        ImGui::Text("SnapshotWindow.SavedFmt"_lc, FormatTimestamp(sel->Timestamp).c_str());
+        ImGui::Text("SnapshotWindow.StateFmt"_lc,
+                    static_cast<size_t>(sel->UncompressedStateSize),
+                    sel->CompressedState.size());
+        ImGui::Text("SnapshotWindow.PreviewFmt"_lc, sel->PreviewPng.size());
+    }
 
     if (ImGui::GetTime() - m_LoadSuccessTime < 3.0) {
         ImGui::Spacing();
-        ImGui::TextColored(UIHelpers::kColorSuccess, "✔ Loaded");
+        ToolUi::Status("Loaded", UIHelpers::kColorSuccess);
     }
 
     ImGui::EndChild();
@@ -417,6 +424,7 @@ void SnapshotWindow::RenderDetails() {
 // ============================================================
 
 void SnapshotWindow::RenderCore() {
+    ToolUi::PageScope page("Snapshots");
     EnsureAutoSaveLoaded();
     CheckWebImportResult();
     RenderToolbar();
@@ -426,47 +434,57 @@ void SnapshotWindow::RenderCore() {
         ImGui::OpenPopup("SnapshotWindow.ErrorTitle"_lc);
         m_ShowError = false;
     }
-    if (ImGui::BeginPopupModal("SnapshotWindow.ErrorTitle"_lc, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("%s", m_ErrorMsg.c_str());
-        if (ImGui::Button("Button.Positive"_lc, ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+    {
+        ToolUi::DialogScope dialog("SnapshotWindow.ErrorTitle"_lc, "Snapshot error", 480.0f);
+        if (dialog) {
+            ImGui::TextWrapped("%s", m_ErrorMsg.c_str());
+            ImGui::Spacing();
+            if (ToolUi::AccentButton("Button.Positive"_lc, ImVec2(120, 0)) || dialog.CloseRequested())
+                ImGui::CloseCurrentPopup();
+        }
     }
 
     // Delete Confirmation Popup
-    if (ImGui::BeginPopupModal("Delete Confirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("Are you sure you want to delete this snapshot?");
-        if (m_NodeToDelete != 0) {
-            for (const auto& node : m_Manager.Nodes) {
-                if (node.Id == m_NodeToDelete) {
-                    ImGui::TextDisabled("Snapshot: %s", node.Label.empty() ? (std::string("Node ") + std::to_string(node.Id)).c_str() : node.Label.c_str());
-                    break;
-                }
-            }
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Button.Positive"_lc, ImVec2(120, 0))) {
+    {
+        ToolUi::DialogScope dialog("Delete Confirmation###snapshot_delete", "Delete snapshot", 480.0f);
+        if (dialog) {
+            ImGui::TextUnformatted("Are you sure you want to delete this snapshot?");
             if (m_NodeToDelete != 0) {
-                m_Manager.DeleteNode(m_NodeToDelete);
-                RequestSnapshotFsSync();
-                if (m_SelectedId == m_NodeToDelete) {
-                    m_SelectedId = 0;
-                    m_Preview.Free();
+                for (const auto& node : m_Manager.Nodes) {
+                    if (node.Id == m_NodeToDelete) {
+                        ImGui::TextDisabled("Snapshot: %s", node.Label.empty() ? (std::string("Node ") + std::to_string(node.Id)).c_str() : node.Label.c_str());
+                        break;
+                    }
                 }
-                m_NodeToDelete = 0;
             }
-            ImGui::CloseCurrentPopup();
+            ImGui::Spacing();
+            if (ToolUi::AccentButton("Button.Positive"_lc, ImVec2(120, 0))) {
+                if (m_NodeToDelete != 0) {
+                    m_Manager.DeleteNode(m_NodeToDelete);
+                    RequestSnapshotFsSync();
+                    if (m_SelectedId == m_NodeToDelete) {
+                        m_SelectedId = 0;
+                        m_Preview.Free();
+                    }
+                    m_NodeToDelete = 0;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Button.Negative"_lc, ImVec2(120, 0)) || dialog.CloseRequested()) {
+                m_NodeToDelete = 0;
+                ImGui::CloseCurrentPopup();
+            }
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Button.Negative"_lc, ImVec2(120, 0))) {
-            m_NodeToDelete = 0;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
     }
 
-    // Two-panel layout: tree | details
+    // Tree | details side by side when there is room; stacked when the dock is
+    // narrow so the details pane is never squeezed to nothing.
+    ToolUi::Section("Snapshot Tree");
+    const bool side_by_side = ToolUi::RemainingWidth() >= 520.0f;
     RenderTree();
-    ImGui::SameLine();
+    if (side_by_side)
+        ImGui::SameLine();
     RenderDetails();
 }
 

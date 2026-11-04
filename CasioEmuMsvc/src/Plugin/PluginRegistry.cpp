@@ -959,15 +959,18 @@ void PluginRegistry::RenderTrustModal() {
 		ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground |
 		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
 
+	// The modal is closable through the title-bar X as well as the Later button.
+	static bool trust_modal_open = true;
 	if (m_openModalRequested) {
 		ImGui::OpenPopup("Plugin Trust###plugin_trust");
 		m_openModalRequested = false;
 		m_modalActive = true;
+		trust_modal_open = true;
 	}
 
 	ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 	ImGui::SetNextWindowSizeConstraints(ImVec2(520, 0), ImVec2(760, FLT_MAX));
-	if (m_modalActive && ImGui::BeginPopupModal("Plugin Trust###plugin_trust", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+	if (m_modalActive && ImGui::BeginPopupModal("Plugin Trust###plugin_trust", &trust_modal_open, ImGuiWindowFlags_AlwaysAutoResize)) {
 		if (m_modalIndex < 0 || m_modalIndex >= static_cast<int>(m_entries.size()) || m_entries[m_modalIndex].removed) {
 			m_modalActive = false;
 			m_modalIndex = -1;
@@ -1057,8 +1060,18 @@ void PluginRegistry::RenderTrustModal() {
 		ImGui::EndPopup();
 	}
 	else if (m_modalActive) {
-		// The popup was dismissed without one of our buttons (for example with
-		// Escape).  Clear the flag so the next pending plugin can prompt.
+		// The popup was dismissed without one of our buttons (the title-bar X or
+		// Escape).  Defer the entry, matching the Later button, and clear the
+		// flag so the next pending plugin can prompt.
+		if (!trust_modal_open) {
+			trust_modal_open = true;
+			if (m_modalIndex >= 0 && m_modalIndex < static_cast<int>(m_entries.size()) &&
+				!m_entries[m_modalIndex].removed) {
+				m_entries[m_modalIndex].pendingTrust = false;
+				m_entries[m_modalIndex].state = "Deferred";
+			}
+			m_modalIndex = -1;
+		}
 		m_modalActive = false;
 	}
 

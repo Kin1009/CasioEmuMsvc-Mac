@@ -1,5 +1,6 @@
 ﻿#include "Localization.h"
 #include "ThemeManager.h"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 
 #include <algorithm>
@@ -26,59 +27,58 @@ public:
 	double wheeldelta = 0;
 
 	void RenderCore() override {
-		// Labels come first, chooser second, matching the rest of the debugger.
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Address");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140.0f);
-		ImGui::InputText("##bitmap_address", bufaddr, sizeof(bufaddr),
-						 ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
-
+		ToolUi::PageScope page("Bitmap Viewer");
+		ToolUi::Section("Bitmap Viewer");
+		ToolUi::Description("Bit-addressable view of memory. Scroll over the grid or use the arrow keys to move.");
+		ImGui::Spacing();
 		uint32_t addr = static_cast<uint32_t>(std::strtoul(bufaddr, nullptr, 16)) & 0xfffff;
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(120.0f);
-		int address_edit = static_cast<int>(addr);
-		if (ImGui::InputInt("##bitmap_address_int", &address_edit, 1, 16,
-							ImGuiInputTextFlags_CharsHexadecimal)) {
-			addr = static_cast<uint32_t>(address_edit) & 0xfffff;
-			std::snprintf(bufaddr, sizeof(bufaddr), "%06X", addr);
+		{
+			ToolUi::PanelScope panel("##bitmap_controls");
+			ToolUi::Field("Address");
+			ImGui::SetNextItemWidth(ImGui::CalcTextSize("000000").x + 24.0f);
+			ImGui::InputText("##bitmap_address", bufaddr, sizeof(bufaddr),
+							 ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
+			addr = static_cast<uint32_t>(std::strtoul(bufaddr, nullptr, 16)) & 0xfffff;
+			ImGui::SameLine();
+			int address_edit = static_cast<int>(addr);
+			ImGui::SetNextItemWidth(ImGui::CalcTextSize("000000").x + 24.0f);
+			if (ImGui::InputInt("##bitmap_address_int", &address_edit, 1, 16,
+								ImGuiInputTextFlags_CharsHexadecimal)) {
+				addr = static_cast<uint32_t>(address_edit) & 0xfffff;
+				std::snprintf(bufaddr, sizeof(bufaddr), "%06X", addr);
+			}
+
+			ToolUi::Field("Bits / row");
+			ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.5f));
+			if (ImGui::SliderInt("##bitmap_width", &width, 1, 256))
+				width = std::max(1, width);
+
+			ToolUi::Field("Rows (0 = auto)");
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			ImGui::InputInt("##bitmap_rows", &rows, 1, 4);
+			if (rows < 0)
+				rows = 0;
+
+			ToolUi::Field("Pixel size");
+			if (autoSize)
+				ImGui::BeginDisabled();
+			ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.5f));
+			ImGui::SliderInt("##bitmap_size", &size, 1, 64);
+			if (autoSize)
+				ImGui::EndDisabled();
+			ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Auto size").x + 20.0f);
+			ImGui::Checkbox("Auto size", &autoSize);
+			if (size < 1)
+				size = 1;
+
+			ToolUi::Field("Bit offset");
+			ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.5f));
+			ImGui::SliderInt("##bitmap_bitoffset", &bitOffset, 0, 7);
 		}
 
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Bits / row");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140.0f);
-		if (ImGui::SliderInt("##bitmap_width", &width, 1, 256))
-			width = std::max(1, width);
-
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Rows (0 = auto)");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140.0f);
-		ImGui::InputInt("##bitmap_rows", &rows, 1, 4);
-		if (rows < 0)
-			rows = 0;
-
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Pixel size");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140.0f);
-		if (autoSize)
-			ImGui::BeginDisabled();
-		ImGui::SliderInt("##bitmap_size", &size, 1, 64);
-		if (autoSize)
-			ImGui::EndDisabled();
-		ImGui::SameLine();
-		ImGui::Checkbox("Auto size", &autoSize);
-		if (size < 1)
-			size = 1;
-
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("Bit offset");
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140.0f);
-		ImGui::SliderInt("##bitmap_bitoffset", &bitOffset, 0, 7);
-		ImGui::Separator();
+		ToolUi::Section("Memory Bits");
+		const float frame_height = std::max(180.0f, ImGui::GetContentRegionAvail().y - 8.0f);
+		ToolUi::PanelScope frame("##bitmap_frame", frame_height);
 
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
 		const float scrollWidth = 16.0f;

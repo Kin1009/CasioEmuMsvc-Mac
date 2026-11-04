@@ -79,6 +79,16 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
 	data.ui.showImPComplex = false;
 	data.ui.alwaysShowImP = true;
 	data.calculator.scale = 9.0f; // Normalize must resync it to appearance.uiScale.
+	data.calculator.injectionAutoReload = false;
+	data.calculator.zoom = 1.75f;
+	data.emulator.clockExponent = 20;
+	data.emulator.audioEnabled = false;
+	data.emulator.captureScale = 4;
+	data.emulator.captureBackgroundRgb = 0x102030;
+	data.emulator.lcdFlashThreshold = 12;
+	data.emulator.lcdFlashBrightness = 2.5f;
+	data.emulator.lcdBuffer = 2;
+	data.advanced.renderer = "software";
 
 	std::string error;
 	Check(store.Save(&error), "save succeeds: " + error);
@@ -103,6 +113,16 @@ void TestSettingsRoundTrip(const std::filesystem::path& root) {
 	Check(store.Data().ui.displayHex, "Display Hex checkbox persists");
 	Check(!store.Data().ui.showImPComplex, "Show ImP checkbox persists");
 	Check(store.Data().ui.alwaysShowImP, "Always Show ImP checkbox persists");
+	Check(!store.Data().calculator.injectionAutoReload, "injection auto-reload persists");
+	Check(NearlyEqual(store.Data().calculator.zoom, 1.75f), "calculator zoom persists");
+	Check(store.Data().emulator.clockExponent == 20, "clock exponent persists");
+	Check(!store.Data().emulator.audioEnabled, "audio toggle persists");
+	Check(store.Data().emulator.captureScale == 4, "capture scale persists");
+	Check(store.Data().emulator.captureBackgroundRgb == 0x102030, "capture background persists");
+	Check(store.Data().emulator.lcdFlashThreshold == 12, "LCD flash threshold persists");
+	Check(NearlyEqual(store.Data().emulator.lcdFlashBrightness, 2.5f), "LCD flash brightness persists");
+	Check(store.Data().emulator.lcdBuffer == 2, "LCD buffer persists");
+	Check(store.Data().advanced.renderer == "software", "renderer hint persists");
 }
 
 void TestMalformedDocument(const std::filesystem::path& root) {

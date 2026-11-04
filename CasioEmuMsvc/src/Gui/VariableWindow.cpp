@@ -1,10 +1,13 @@
 #include "VariableWindow.h"
 #include "CwiiHelp.h"
 #include "Models.h"
-#include "Ui.hpp"
 #include "Settings/Settings.h"
+#include "ToolUi.hpp"
+#include "Ui.hpp"
 #include "imgui/imgui.h"
+#include <algorithm>
 #include <string>
+
 std::string to_hex(unsigned int num) {
 	std::string hex_digits = "0123456789ABCDEF";
 	std::string result;
@@ -24,10 +27,34 @@ std::string to_hex(unsigned int num) {
 
 	return result;
 }
+
+namespace {
+
+// The variable map is static per hardware id; rebuilding the vector every frame
+// was pure allocation.  The values still come from RAM each frame.
+const std::vector<casioemu::Variable>& CachedVariables(casioemu::HardwareId hardware) {
+	static casioemu::HardwareId cached_hardware = static_cast<casioemu::HardwareId>(-1);
+	static std::vector<casioemu::Variable> cached;
+	if (cached.empty() || cached_hardware != hardware) {
+		cached = casioemu::GetVariableOffsets(hardware);
+		cached_hardware = hardware;
+	}
+	return cached;
+}
+
+} // namespace
+
 void VariableWindow::RenderCore() {
-	auto vars = casioemu::GetVariableOffsets(m_emu->hardware_id);
-	if (!n_ram_buffer || vars.empty()) {
-		ImGui::TextUnformatted("No known variable map for this hardware.");
+	ToolUi::PageScope page("Variables");
+	if (!n_ram_buffer) {
+		ToolUi::Section("Variables");
+		ToolUi::EmptyState("No known variable map for this hardware.");
+		return;
+	}
+	const auto& vars = CachedVariables(m_emu->hardware_id);
+	if (vars.empty()) {
+		ToolUi::Section("Variables");
+		ToolUi::EmptyState("No known variable map for this hardware.");
 		return;
 	}
 
@@ -49,14 +76,20 @@ void VariableWindow::RenderCore() {
 	bool is_in_im = (*(base_addr + casioemu::GetModeOffset(m_emu->hardware_id)) & 0xFF) == 0xC4;
 	bool s_im = showimg_f ? 1 : (showimg_auto ? is_in_im : 0);
 
+	ToolUi::Section("Variables");
+	ToolUi::Description("Decoded BCD values for the active model. Click an address to jump to it in the memory editor.");
+
 	int cols = 2;
 	if (s_im) cols++;
 	if (showhex) cols += (s_im ? 2 : 1);
 	if (showaddr) cols += (s_im ? 2 : 1);
 
-	if (ImGui::BeginTable("##vars_table", cols,
-			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
-			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable | ImGuiTableFlags_NoSavedSettings)) {
+	const bool has_theta = m_emu->hardware_id == casioemu::HW_CLASSWIZ_II;
+	const int theta_index = has_theta ? static_cast<int>(vars.size()) : -1;
+	const int total_rows = static_cast<int>(vars.size()) + (has_theta ? 1 : 0);
+	const float table_height = std::max(140.0f, ImGui::GetContentRegionAvail().y - 200.0f);
+
+	if (ToolUi::TableScope table{"##vars_table", cols, ToolUi::TableFlags() | ImGuiTableFlags_ScrollY, table_height}) {
 		ImGui::TableSetupColumn("VarWindow.Variable"_lc, ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("VarWindow.ReP"_lc, ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		if (s_im) {
@@ -74,106 +107,100 @@ void VariableWindow::RenderCore() {
 				ImGui::TableSetupColumn("Imag Addr", ImGuiTableColumnFlags_WidthStretch, 1.2f);
 			}
 		}
+		ImGui::TableSetupScrollFreeze(0, 1);
 		ImGui::TableHeadersRow();
 
-		for (const auto& v : vars) {
-			if (is_in_im && !strcmp(v.Name, "PreAns"))
-				continue;
+		auto draw_row = [&](int row_index) {
+			const bool theta = row_index == theta_index;
+			const casioemu::Variable* variable = theta ? nullptr : &vars[static_cast<size_t>(row_index)];
+			if (!theta && is_in_im && !strcmp(variable->Name, "PreAns"))
+				return;
 			ImGui::TableNextRow();
-			
-			// Column 0: Variable Name
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(v.Name);
 
-			// Column 1: Real BCD
 			ImGui::TableNextColumn();
-			std::string s = casioemu::BCD2Str(base_addr + v.RealPartOffset);
-			ImGui::TextUnformatted(s.c_str());
+			ImGui::TextUnformatted(theta ? "Theta" : variable->Name);
 
-			// Column 2: Imag BCD (if s_im)
-			if (s_im) {
-				ImGui::TableNextColumn();
-				s = casioemu::BCD2Str(base_addr + v.RealPartOffset + casioemu::GetReImOffset(m_emu->hardware_id));
-				ImGui::TextUnformatted(s.c_str());
+			const size_t real_offset = theta ? 0xBDEC : variable->RealPartOffset;
+			const size_t imag_offset = real_offset + casioemu::GetReImOffset(m_emu->hardware_id);
+
+			ImGui::TableNextColumn();
+			if (theta) {
+				auto value = casioemu::BCD2Str(n_ram_buffer + 0xBDEC - 0x9000);
+				ImGui::TextUnformatted(value.c_str());
 			}
-
-			// Hex
-			if (showhex) {
-				ImGui::TableNextColumn();
-				s = casioemu::ConvHex(base_addr + v.RealPartOffset, casioemu::GetVariableSize(m_emu->hardware_id));
-				ImGui::TextUnformatted(s.c_str());
-				if (s_im) {
-					ImGui::TableNextColumn();
-					s = casioemu::ConvHex(base_addr + v.RealPartOffset + casioemu::GetReImOffset(m_emu->hardware_id), casioemu::GetVariableSize(m_emu->hardware_id));
-					ImGui::TextUnformatted(s.c_str());
-				}
+			else {
+				auto value = casioemu::BCD2Str(base_addr + real_offset);
+				ImGui::TextUnformatted(value.c_str());
 			}
-
-			// Addr
-			if (showaddr) {
-				ImGui::TableNextColumn();
-				UIHelpers::ClickableAddress(v.RealPartOffset);
-				if (s_im) {
-					ImGui::TableNextColumn();
-					UIHelpers::ClickableAddress(v.RealPartOffset + casioemu::GetReImOffset(m_emu->hardware_id));
-				}
-			}
-		}
-
-		if (m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) {
-			ImGui::TableNextRow();
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted("Theta");
-
-			ImGui::TableNextColumn();
-			auto a = casioemu::BCD2Str(n_ram_buffer + 0xBDEC - 0x9000);
-			ImGui::TextUnformatted(a.c_str());
 
 			if (s_im) {
 				ImGui::TableNextColumn();
-				ImGui::TextUnformatted("");
-			}
-
-			if (showhex) {
-				ImGui::TableNextColumn();
-				ImGui::TextUnformatted("");
-				if (s_im) {
-					ImGui::TableNextColumn();
+				if (theta)
 					ImGui::TextUnformatted("");
+				else {
+					auto value = casioemu::BCD2Str(base_addr + imag_offset);
+					ImGui::TextUnformatted(value.c_str());
+				}
+			}
+
+			if (showhex) {
+				ImGui::TableNextColumn();
+				if (theta)
+					ImGui::TextUnformatted("");
+				else {
+					auto value = casioemu::ConvHex(base_addr + real_offset, casioemu::GetVariableSize(m_emu->hardware_id));
+					ImGui::TextUnformatted(value.c_str());
+				}
+				if (s_im) {
+					ImGui::TableNextColumn();
+					if (theta)
+						ImGui::TextUnformatted("");
+					else {
+						auto value = casioemu::ConvHex(base_addr + imag_offset, casioemu::GetVariableSize(m_emu->hardware_id));
+						ImGui::TextUnformatted(value.c_str());
+					}
 				}
 			}
 
 			if (showaddr) {
 				ImGui::TableNextColumn();
-				UIHelpers::ClickableAddress(0xBDEC);
+				UIHelpers::ClickableAddress(static_cast<uint32_t>(real_offset));
 				if (s_im) {
 					ImGui::TableNextColumn();
-					ImGui::TextUnformatted("");
+					if (theta)
+						ImGui::TextUnformatted("");
+					else
+						UIHelpers::ClickableAddress(static_cast<uint32_t>(imag_offset));
 				}
 			}
-		}
+		};
 
-		ImGui::EndTable();
+		ImGuiListClipper clipper;
+		clipper.Begin(total_rows);
+		while (clipper.Step()) {
+			for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+				draw_row(row);
+		}
 	}
 
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	bool changed = false;
-	changed |= ImGui::Checkbox("VarWindow.ShowAddrOpt"_lc, &showaddr);
-	changed |= UIHelpers::CheckboxFlow("VarWindow.ShowHexOpt"_lc, &showhex, false);
-	// The ImP options are longer; give them their own row so labels never clip.
-	ImGui::NewLine();
-	changed |= ImGui::Checkbox("VarWindow.ShowImPWhenComplex"_lc, &showimg_auto);
-	changed |= UIHelpers::CheckboxFlow("VarWindow.AlwaysShowImP"_lc, &showimg_f, false);
-	if (changed) {
-		auto& ui = casioemu::settings::SettingsStore::Instance().Data().ui;
-		ui.displayAddress = showaddr;
-		ui.displayHex = showhex;
-		ui.showImPComplex = showimg_auto;
-		ui.alwaysShowImP = showimg_f;
-		std::string error;
-		casioemu::settings::SettingsStore::Instance().Save(&error);
+	ToolUi::Section("Display Options");
+	{
+		ToolUi::PanelScope panel("##var_options");
+		bool changed = false;
+		changed |= ToolUi::CheckboxFlow("VarWindow.ShowAddrOpt"_lc, &showaddr, true);
+		changed |= ToolUi::CheckboxFlow("VarWindow.ShowHexOpt"_lc, &showhex, false);
+		// The ImP options are longer; give them their own row so labels never clip.
+		ImGui::NewLine();
+		changed |= ToolUi::CheckboxFlow("VarWindow.ShowImPWhenComplex"_lc, &showimg_auto, true);
+		changed |= ToolUi::CheckboxFlow("VarWindow.AlwaysShowImP"_lc, &showimg_f, false);
+		if (changed) {
+			auto& ui = casioemu::settings::SettingsStore::Instance().Data().ui;
+			ui.displayAddress = showaddr;
+			ui.displayHex = showhex;
+			ui.showImPComplex = showimg_auto;
+			ui.alwaysShowImP = showimg_f;
+			std::string error;
+			casioemu::settings::SettingsStore::Instance().Save(&error);
+		}
 	}
 }

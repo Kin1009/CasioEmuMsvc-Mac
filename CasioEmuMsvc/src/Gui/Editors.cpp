@@ -6,10 +6,12 @@
 #include "Localization.h"
 #include "MemBreakPoint.hpp"
 #include "Models.h"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #include "hex.hpp"
 #include "ePSCpu.h"
 #include "Chipset/T4xCore.hpp"
+#include <algorithm>
 
 namespace {
 	constexpr uint32_t kEpsFlashBaseWord = 0x18000;
@@ -23,13 +25,20 @@ float ram_edit_ov[0x100000]{};
 // the ASCII pane).  Keeping the label on the left matches the rest of the
 // debugger's choosers.
 static void DrawColumnSelector(MemoryEditor& editor) {
-	ImGui::AlignTextToFramePadding();
-	ImGui::TextUnformatted("Columns");
-	ImGui::SameLine();
-	ImGui::SetNextItemWidth(120.0f);
+	// The hex row is address + hex bytes + ASCII pane.  Cap the column count so
+	// a narrow tool dock shows complete rows instead of clipping the line, and
+	// let the Columns control shrink it further.
+	const float char_width = std::max(1.0f, ImGui::CalcTextSize("0").x);
+	const int max_columns = std::clamp(
+		static_cast<int>((ImGui::GetContentRegionAvail().x - char_width * 22.0f) / (char_width * 4.0f)),
+		2, 64);
+	if (editor.Cols > max_columns)
+		editor.Cols = max_columns;
+	ToolUi::Field("Columns");
+	ImGui::SetNextItemWidth(std::min(160.0f, std::max(90.0f, ImGui::GetContentRegionAvail().x * 0.4f)));
 	int cols = editor.Cols;
 	if (ImGui::InputInt("##hex_columns", &cols, 1, 4)) {
-		editor.Cols = cols < 1 ? 1 : (cols > 64 ? 64 : cols);
+		editor.Cols = std::clamp(cols, 1, max_columns);
 	}
 	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
 		ImGui::BeginTooltip();
@@ -37,8 +46,8 @@ static void DrawColumnSelector(MemoryEditor& editor) {
 		ImGui::EndTooltip();
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("bytes / line");
-	ImGui::Separator();
+	ImGui::TextDisabled("bytes per line");
+	ImGui::Spacing();
 }
 
 struct HexEditor : public UIWindow, public MemoryEditor {
@@ -57,16 +66,22 @@ struct HexEditor : public UIWindow, public MemoryEditor {
 		};
 	}
 	void RenderCore() override {
+		ToolUi::PageScope page("Memory Editor");
+		ToolUi::Section(name);
 		this->HighlightColor = ThemeManager::Instance().IsDarkMode()
 			? IM_COL32(255, 255, 255, 45)
 			: IM_COL32(0, 0, 0, 32);
 		DrawColumnSelector(*this);
+		ImGui::Spacing();
+		const float body_height = std::max(200.0f, ImGui::GetContentRegionAvail().y);
+		ToolUi::PanelScope frame("##hex_frame", body_height);
 		this->DrawContents(data, size, display_base);
 		if (open_popup) {
 			ImGui::OpenPopup("ContextMenu");
 			open_popup = false;
 		}
-		if (ImGui::BeginPopup("ContextMenu")) {
+		ToolUi::PopupScope popup("ContextMenu");
+		if (popup) {
 			UIHelpers::ClickableAddress(popup_p, UIHelpers::JumpTarget::Memory);
 			if (ImGui::MenuItem("HexEditors.ContextMenu.MonitorWrite"_lc)) {
 				SetMemBp(popup_p, true);
@@ -74,7 +89,6 @@ struct HexEditor : public UIWindow, public MemoryEditor {
 			if (ImGui::MenuItem("HexEditors.ContextMenu.MonitorRead"_lc)) {
 				SetMemBp(popup_p, false);
 			}
-			ImGui::EndPopup();
 		}
 	}
 	void GotoMemoryAddress(uint32_t addr) override {
@@ -101,16 +115,22 @@ struct SpansHexEditor : public UIWindow, public MemoryEditor {
 		};
 	}
 	void RenderCore() override {
+		ToolUi::PageScope page("Memory Editor");
+		ToolUi::Section(name);
 		this->HighlightColor = ThemeManager::Instance().IsDarkMode()
 			? IM_COL32(255, 255, 255, 45)
 			: IM_COL32(0, 0, 0, 32);
 		DrawColumnSelector(*this);
+		ImGui::Spacing();
+		const float body_height = std::max(200.0f, ImGui::GetContentRegionAvail().y);
+		ToolUi::PanelScope frame("##hex_frame", body_height);
 		this->DrawContents(data, size, display_base, spans);
 		if (open_popup) {
 			ImGui::OpenPopup("ContextMenu");
 			open_popup = false;
 		}
-		if (ImGui::BeginPopup("ContextMenu")) {
+		ToolUi::PopupScope popup("ContextMenu");
+		if (popup) {
 			UIHelpers::ClickableAddress(popup_p, UIHelpers::JumpTarget::Memory);
 			if (ImGui::MenuItem("HexEditors.ContextMenu.MonitorWrite"_lc)) {
 				SetMemBp(popup_p, true);
@@ -118,7 +138,6 @@ struct SpansHexEditor : public UIWindow, public MemoryEditor {
 			if (ImGui::MenuItem("HexEditors.ContextMenu.MonitorRead"_lc)) {
 				SetMemBp(popup_p, false);
 			}
-			ImGui::EndPopup();
 		}
 	}
 	void GotoMemoryAddress(uint32_t addr) override {

@@ -1,5 +1,7 @@
 ﻿#include "FileDialog.hpp"
+#include "ToolUi.hpp"
 #include <Localization.h>
+#include <cstdlib>
 
 namespace FileDialog {
     struct FileFilter {
@@ -59,106 +61,114 @@ namespace FileDialog {
             currentFilters = ParseFilters(filters);
             initialized = true;
         }
-        
+
         bool dialogClosed = false;
 
-        ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_FirstUseEver);
-        if (ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_Modal)) {
-
-            ImGui::Text("%s: %s", "Files.CurrentPath"_lc, currentPath.c_str());
-
-            if (ImGui::Button("Files.Back"_lc)) {
-                std::filesystem::path path(currentPath);
-                currentPath = path.parent_path().string();
-                if (currentPath.empty()) {
-                    currentPath = ".";
-                }
-            }
-            
-            ImGui::BeginChild("Files", ImVec2(0, -80), true);
-            
-            try {
-                for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
-                    const bool isDirectory = entry.is_directory();
-                    const std::string filename = entry.path().filename().string();
-                    
-                    if (isDirectory) {
-                        if (ImGui::Selectable((filename + "/").c_str(), false)) {
-                            currentPath = entry.path().string();
-                        }
+        {
+            ToolUi::DialogScope dialog(title, title, 560.0f);
+            if (dialog) {
+                ToolUi::Section("Location");
+                {
+                    ToolUi::PanelScope panel("##file_location");
+                    ImGui::TextWrapped("%s: %s", "Files.CurrentPath"_lc, currentPath.c_str());
+                    ImGui::Spacing();
+                    if (ImGui::Button("Files.Back"_lc)) {
+                        std::filesystem::path path(currentPath);
+                        currentPath = path.parent_path().string();
+                        if (currentPath.empty())
+                            currentPath = ".";
+                    }
+                    ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Home").x + 20.0f);
+                    if (ImGui::Button("Home")) {
+                        const char* home = std::getenv("HOME");
+                        if (home && *home)
+                            currentPath = home;
                     }
                 }
-                
-                for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
-                    const bool isDirectory = entry.is_directory();
-                    const std::string filename = entry.path().filename().string();
-                    
-                    if (!isDirectory) {
-                        bool showFile = currentFilters.empty();
-                        
-                        if (!showFile && selectedFilterIndex < currentFilters.size()) {
-                            for (const auto& ext : currentFilters[selectedFilterIndex].extensions) {
-                                std::string fileExt = entry.path().extension().string();
-                                if (ext == ".*" || (ext.length() > 0 && ext[0] == '.' && fileExt == ext)) {
-                                    showFile = true;
-                                    break;
+
+                ToolUi::Section("Files");
+                ImGui::BeginChild("Files", ImVec2(0, std::max(160.0f, ImGui::GetContentRegionAvail().y - 96.0f)), ImGuiChildFlags_Border);
+
+                try {
+                    for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
+                        const bool isDirectory = entry.is_directory();
+                        const std::string filename = entry.path().filename().string();
+
+                        if (isDirectory) {
+                            if (ImGui::Selectable((filename + "/").c_str(), false))
+                                currentPath = entry.path().string();
+                        }
+                    }
+
+                    for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
+                        const bool isDirectory = entry.is_directory();
+                        const std::string filename = entry.path().filename().string();
+
+                        if (!isDirectory) {
+                            bool showFile = currentFilters.empty();
+
+                            if (!showFile && selectedFilterIndex < (int)currentFilters.size()) {
+                                for (const auto& ext : currentFilters[selectedFilterIndex].extensions) {
+                                    std::string fileExt = entry.path().extension().string();
+                                    if (ext == ".*" || (!ext.empty() && ext[0] == '.' && fileExt == ext)) {
+                                        showFile = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (showFile) {
+                                if (ImGui::Selectable(filename.c_str(), false)) {
+                                    strncpy(selectedFilePath, (currentPath + "/" + filename).c_str(), pathBufferSize);
+                                    selectedFilePath[pathBufferSize - 1] = '\0';
+                                    doneSelection = true;
                                 }
                             }
                         }
-                        
-                        if (showFile) {
-                            if (ImGui::Selectable(filename.c_str(), false)) {
-                                strncpy(selectedFilePath, (currentPath + "/" + filename).c_str(), pathBufferSize);
-                                selectedFilePath[pathBufferSize - 1] = '\0';
-                                doneSelection = true;
-                            }
-                        }
                     }
+                } catch (const std::exception& e) {
+                    std::string error = std::string("Cannot read this folder: ") + e.what();
+                    ToolUi::Status(error.c_str(), ToolUi::Palette().error);
                 }
-            } catch (const std::exception& e) {
-                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Error: %s", e.what());
-            }
-            
-            ImGui::EndChild();
-            
-            // Filter selection
-            if (!currentFilters.empty()) {
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                if (ImGui::BeginCombo("##FilterCombo", currentFilters[selectedFilterIndex].name.c_str())) {
-                    for (int i = 0; i < currentFilters.size(); i++) {
-                        const bool isSelected = (selectedFilterIndex == i);
-                        if (ImGui::Selectable(currentFilters[i].name.c_str(), isSelected)) {
-                            selectedFilterIndex = i;
-                        }
-                        if (isSelected) {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-            }
+                ImGui::EndChild();
 
-            if (ImGui::Button(isSaveDialog ? "Files.Save"_lc : "Files.Open"_lc)) {
-                if (doneSelection) {
+                // Filter selection
+                if (!currentFilters.empty()) {
+                    ToolUi::Field("Filter");
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::BeginCombo("##FilterCombo", currentFilters[selectedFilterIndex].name.c_str())) {
+                        for (int i = 0; i < (int)currentFilters.size(); i++) {
+                            const bool isSelected = (selectedFilterIndex == i);
+                            if (ImGui::Selectable(currentFilters[i].name.c_str(), isSelected))
+                                selectedFilterIndex = i;
+                            if (isSelected)
+                                ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+
+                ImGui::Spacing();
+                const bool accept = ImGui::Button(isSaveDialog ? "Files.Save"_lc : "Files.Open"_lc, ImVec2(110, 0));
+                ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Files.Cancel"_lc).x + 20.0f);
+                const bool cancel = ImGui::Button("Files.Cancel"_lc, ImVec2(110, 0)) || dialog.CloseRequested();
+
+                if (accept && doneSelection) {
+                    ImGui::CloseCurrentPopup();
+                    initialized = false;
+                    dialogClosed = true;
+                }
+                else if (cancel) {
                     ImGui::CloseCurrentPopup();
                     initialized = false;
                     dialogClosed = true;
                 }
             }
-            
-            ImGui::SameLine();
-            
-            if (ImGui::Button("Files.Cancel"_lc)) {
-                ImGui::CloseCurrentPopup();
-                initialized = false;
-                dialogClosed = true;
+            else if (!ImGui::IsPopupOpen(title)) {
+                ImGui::OpenPopup(title);
             }
-            
-            ImGui::EndPopup();
-        } else {
-            ImGui::OpenPopup(title);
         }
-        
+
         return dialogClosed;
     }
 

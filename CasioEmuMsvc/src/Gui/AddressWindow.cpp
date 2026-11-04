@@ -2,6 +2,7 @@
 #include <Hooks.h>
 #include <Localization.h>
 #include <mutex>
+#include "ToolUi.hpp"
 struct AddressInfo {
 	uint32_t address;
 	uint8_t value;
@@ -17,13 +18,28 @@ public:
 
 	void RenderCore() override {
 		std::lock_guard lock(addresses_mutex);
-		ImGui::TextUnformatted("AddressWindow.Header"_lc);
-		ImGui::Separator();
+		ToolUi::PageScope page("Memory");
+		ToolUi::Section("AddressWindow.Header"_lc);
+		ToolUi::Description("Pin a memory address to inspect its value every frame. Locked addresses force their value on reads and writes.");
+		ImGui::Spacing();
 
 		RenderAddressTable();
-		ImGui::Separator();
 
-		RenderAddAddressControls();
+		ToolUi::Section("Add Address");
+		{
+			ToolUi::PanelScope panel("##add_address_panel");
+			ToolUi::Field("Address (hex)");
+			ImGui::SetNextItemWidth(ImGui::CalcTextSize("00000000").x + 24.0f);
+			ImGui::InputScalar("##new_address", ImGuiDataType_U32, &newAddress, 0, 0, "%X",
+				ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
+			ImGui::SameLine();
+			ImGui::BeginDisabled(newAddress == 0);
+			if (ToolUi::AccentButton("AddressWindow.AddBtn"_lc))
+				addresses.emplace_back(newAddress, 0, false);
+			ImGui::EndDisabled();
+			if (addresses.empty())
+				ToolUi::Hint("No addresses are watched yet.");
+		}
 	}
 
 	std::vector<DebugAddressLockInfo> DebugList() const {
@@ -72,10 +88,17 @@ private:
 	uint32_t newAddress = 0;
 
 	void RenderAddressTable() {
-		if (ImGui::BeginTable("Addresses", 3, pretty_table)) {
-			ImGui::TableSetupColumn("AddressWindow.Address"_lc);
-			ImGui::TableSetupColumn("AddressWindow.Value"_lc);
-			ImGui::TableSetupColumn("AddressWindow.Fixed"_lc);
+		if (addresses.empty()) {
+			ToolUi::PanelScope panel("##address_empty");
+			ToolUi::EmptyState("No watched addresses. Add one below.");
+			return;
+		}
+		int remove_index = -1;
+		if (ToolUi::TableScope table{"Addresses", 4}) {
+			ImGui::TableSetupColumn("AddressWindow.Address"_lc, ImGuiTableColumnFlags_WidthFixed, 110.0f);
+			ImGui::TableSetupColumn("AddressWindow.Value"_lc, ImGuiTableColumnFlags_WidthFixed, 90.0f);
+			ImGui::TableSetupColumn("AddressWindow.Fixed"_lc, ImGuiTableColumnFlags_WidthFixed, 80.0f);
+			ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableHeadersRow();
 
 			for (size_t i = 0; i < addresses.size(); ++i) {
@@ -90,6 +113,7 @@ private:
 				uint8_t value = info.value;
 				if (!info.locked)
 					value = m_emu->chipset.mmu.ReadData(info.address);
+				ImGui::SetNextItemWidth(-1.0f);
 				if (ImGui::InputScalar("##value", ImGuiDataType_U8, &value, 0, 0, "%x")) {
 					info.value = value;
 					UpdateMemoryValue(info.address, info.value);
@@ -100,26 +124,18 @@ private:
 				if (ImGui::Checkbox("##lock", &locked)) {
 					info.locked = locked;
 				}
+
+				ImGui::TableSetColumnIndex(3);
+				if (ToolUi::CloseButton("##remove_address", "Stop watching this address"))
+					remove_index = static_cast<int>(i);
 				ImGui::PopID();
 			}
-
-			ImGui::EndTable();
 		}
+		if (remove_index >= 0 && remove_index < static_cast<int>(addresses.size()))
+			addresses.erase(addresses.begin() + remove_index);
 	}
 
-	void RenderAddAddressControls() {
-		ImGui::TextUnformatted("AddressWindow.Add"_lc);
-
-		ImGui::InputScalar("Address", ImGuiDataType_U32, &newAddress, 0, 0, "%x");
-		// ImGui::InputScalar("Value", ImGuiDataType_U8, &newValue);
-
-		if (ImGui::Button("AddressWindow.AddBtn"_lc)) {
-			if (newAddress) {
-				addresses.emplace_back(newAddress, 0, false);
-				// UpdateMemoryValue(*newAddress, *newValue);
-			}
-		}
-	}
+	void RenderAddAddressControls() {}
 
 	void UpdateMemoryValue(uint32_t address, uint8_t value) {
 		m_emu->chipset.mmu.WriteData(address, value);

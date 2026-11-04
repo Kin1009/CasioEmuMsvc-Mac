@@ -7,6 +7,7 @@
 #include "Config.hpp"
 #include "Models.h"
 #include "Peripheral/BatteryBackedRAM.hpp"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #include "imgui/imgui.h"
 #include <algorithm>
@@ -16,6 +17,16 @@
 #include <cstdlib>
 #include <iomanip>
 #include <stdlib.h>
+
+namespace {
+
+// Registers are laid out in a real table so eight values per row line up and a
+// narrow tool dock gets four per row instead of clipping.
+int RegistersPerRow() {
+	return ImGui::GetContentRegionAvail().x >= 620.0f ? 8 : 4;
+}
+
+} // namespace
 
 void WatchWindow::PrepareRX() {
 	auto eps = m_emu->chipset.epscpu;
@@ -52,73 +63,67 @@ void WatchWindow::PrepareRX() {
 }
 
 void WatchWindow::ShowRX() {
-	char id[10];
 	if (m_emu->chipset.epscpu) {
 	}
 	else {
-		ImGui::TextColored(~UIHelpers::kColorSuccess, "RXn: ");
-		for (int i = 0; i < 16; i++) {
-			ImGui::SameLine();
-            snprintf(id, sizeof(id), "##data%d", i);
-			ImGui::SetNextItemWidth(char_width * 3);
-			ImGui::TextUnformatted((char*)&reg_rx[i][0]);
+		const int per_row = RegistersPerRow();
+		if (ToolUi::TableScope table{"##rx_grid", per_row}) {
+			for (int base = 0; base < 16; base += per_row) {
+				ImGui::TableNextRow();
+				for (int col = 0; col < per_row && base + col < 16; ++col) {
+					ImGui::TableNextColumn();
+					ImGui::TextColored(~UIHelpers::kColorMuted, "R%d", base + col);
+					ImGui::SameLine();
+					ImGui::TextUnformatted((char*)&reg_rx[base + col][0]);
+				}
+			}
 		}
-		ImGui::TextUnformatted("ERn: ");
-		for (int i = 0; i < 16; i += 2) {
-			ImGui::SameLine();
-			uint16_t val = m_emu->chipset.cpu.reg_r[i + 1]
-							   << 8 |
-						   m_emu->chipset.cpu.reg_r[i];
-			ImGui::Text("%04x ", val);
+		if (ToolUi::TableScope table{"##er_grid", per_row / 2}) {
+			for (int base = 0; base < 16; base += per_row) {
+				ImGui::TableNextRow();
+				for (int col = 0; col + 1 < per_row && base + col + 1 < 16; col += 2) {
+					ImGui::TableNextColumn();
+					uint16_t val = m_emu->chipset.cpu.reg_r[base + col + 1] << 8 |
+						m_emu->chipset.cpu.reg_r[base + col];
+					ImGui::TextColored(~UIHelpers::kColorMuted, "ER%d", base + col);
+					ImGui::SameLine();
+					ImGui::Text("%04x", val);
+				}
+			}
 		}
 	}
-	auto show_sfr = ([&](char* ptr, const char* label, int i, int width = 4) {
-		ImGui::TextColored(~UIHelpers::kColorSuccess, "%s", label);
+	auto show_sfr = ([&](char* ptr, const char* label) {
+		ImGui::TextColored(~UIHelpers::kColorMuted, "%s", label);
 		ImGui::SameLine();
-        snprintf(id, sizeof(id), "##sfr%d", i);
-		ImGui::SetNextItemWidth(char_width * width + 5);
 		ImGui::TextUnformatted(ptr);
 	});
-	show_sfr(reg_pc, "PC: ", 1, 6);
-	ImGui::SameLine();
-	if (m_emu->chipset.epscpu) {
-		show_sfr(reg_lr, "INDF0: ", 2, 6);
-		ImGui::SameLine();
-		show_sfr(reg_ea, "INDF1: ", 3, 6);
-		ImGui::SameLine();
-		show_sfr(reg_ex1, "INDF2: ", 7, 6);
-		ImGui::SameLine();
-		show_sfr(reg_sp, "STKPTR: ", 4);
-		ImGui::SameLine();
-		show_sfr(reg_psw, "STATUS: ", 5, 2);
-		ImGui::SameLine();
-		show_sfr(reg_dsr, "BSR: ", 6, 2);
-		show_sfr(reg_ex2, "LCDAR: ", 8, 6);
-	}
-	else {
-		show_sfr(reg_lr, "LR: ", 2, 6);
-		ImGui::SameLine();
-		show_sfr(reg_ea, "EA: ", 3);
-		ImGui::SameLine();
-		show_sfr(reg_sp, "SP: ", 4);
-		ImGui::SameLine();
-		show_sfr(reg_psw, "PSW: ", 5, 2);
-		ImGui::SameLine();
-		show_sfr(reg_dsr, "DSR: ", 6, 2);
+	if (ToolUi::TableScope table{"##sfr_grid", 2}) {
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); show_sfr(reg_pc, "PC");
+		ImGui::TableNextColumn(); show_sfr(reg_sp, m_emu->chipset.epscpu ? "STKPTR" : "SP");
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); show_sfr(reg_lr, m_emu->chipset.epscpu ? "INDF0" : "LR");
+		ImGui::TableNextColumn(); show_sfr(reg_psw, m_emu->chipset.epscpu ? "STATUS" : "PSW");
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); show_sfr(reg_ea, m_emu->chipset.epscpu ? "INDF1" : "EA");
+		ImGui::TableNextColumn(); show_sfr(reg_dsr, m_emu->chipset.epscpu ? "BSR" : "DSR");
+		if (m_emu->chipset.epscpu) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); show_sfr(reg_ex1, "INDF2");
+			ImGui::TableNextColumn(); show_sfr(reg_ex2, "LCDAR");
+		}
 	}
 }
 void WatchWindow::ModRX() {
-	char id[10];
-	if (m_emu->chipset.epscpu) {
-		auto edit_sfr = ([&](char* ptr, const char* label, int i, int width) {
-			ImGui::TextColored(~UIHelpers::kColorSuccess, "%s", label);
-			ImGui::SameLine();
-			snprintf(id, sizeof(id), "##epssfr%d", i);
-			ImGui::SetNextItemWidth(char_width * width + 5);
-			ImGui::InputText(id, ptr, width + 1, ImGuiInputTextFlags_CharsHexadecimal);
-		});
-		edit_sfr(reg_pc, "PC: ", 1, 6);
+	auto edit_sfr = ([&](char* ptr, const char* label, int i, int width) {
+		ImGui::TextColored(~UIHelpers::kColorMuted, "%s", label);
 		ImGui::SameLine();
+		ImGui::SetNextItemWidth(ImGui::CalcTextSize("0").x * (width + 2) + 12.0f);
+		ImGui::PushID(i);
+		ImGui::InputText("##reg", ptr, width + 1, ImGuiInputTextFlags_CharsHexadecimal);
+		ImGui::PopID();
+	});
+	if (m_emu->chipset.epscpu) {
 		const auto snapshot = m_emu->chipset.epscpu->DebugSnapshot();
 		const auto& regs = snapshot.registers;
 		const auto show_indirect = [&](const char* label, int id, char* ptr, uint8_t fsr) {
@@ -126,62 +131,69 @@ void WatchWindow::ModRX() {
 				edit_sfr(ptr, label, id, 6);
 				return;
 			}
-			ImGui::TextColored(~UIHelpers::kColorSuccess, "%s", label);
+			ImGui::TextColored(~UIHelpers::kColorMuted, "%s", label);
 			ImGui::SameLine();
 			ImGui::TextUnformatted(ptr);
 		};
-		show_indirect("INDF0: ", 2, reg_lr, 0x01);
-		ImGui::SameLine();
-		show_indirect("INDF1: ", 3, reg_ea, 0x04);
-		ImGui::SameLine();
-		show_indirect("INDF2: ", 4, reg_ex1, 0x11);
-		ImGui::SameLine();
-		edit_sfr(reg_sp, "STKPTR: ", 5, 4);
-		ImGui::SameLine();
-		edit_sfr(reg_psw, "STATUS: ", 6, 2);
-		ImGui::SameLine();
-		ImGui::TextColored(~UIHelpers::kColorSuccess, "BSR: ");
-		ImGui::SameLine();
-		ImGui::TextUnformatted(reg_dsr);
-		edit_sfr(reg_ex2, "LCDAR: ", 8, 6);
+		if (ToolUi::TableScope table{"##eps_reg_edit", 2}) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); edit_sfr(reg_pc, "PC", 1, 6);
+			ImGui::TableNextColumn(); edit_sfr(reg_sp, "STKPTR", 5, 4);
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); show_indirect("INDF0", 2, reg_lr, 0x01);
+			ImGui::TableNextColumn(); edit_sfr(reg_psw, "STATUS", 6, 2);
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); show_indirect("INDF1", 3, reg_ea, 0x04);
+			ImGui::TableNextColumn();
+			ImGui::TextColored(~UIHelpers::kColorMuted, "BSR");
+			ImGui::SameLine();
+			ImGui::TextUnformatted(reg_dsr);
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); show_indirect("INDF2", 4, reg_ex1, 0x11);
+			ImGui::TableNextColumn(); edit_sfr(reg_ex2, "LCDAR", 8, 6);
+		}
 		return;
 	}
-	ImGui::TextColored(~UIHelpers::kColorSuccess, "RXn: ");
-	for (int i = 0; i < 16; i++) {
-		ImGui::SameLine();
-        snprintf(id, sizeof(id), "##data%d", i);
-		ImGui::SetNextItemWidth(char_width * 3);
-		ImGui::InputText(id, (char*)&reg_rx[i][0], 3, ImGuiInputTextFlags_CharsHexadecimal);
+	const int per_row = RegistersPerRow();
+	if (ToolUi::TableScope table{"##rx_edit", per_row}) {
+		for (int base = 0; base < 16; base += per_row) {
+			ImGui::TableNextRow();
+			for (int col = 0; col < per_row && base + col < 16; ++col) {
+				ImGui::TableNextColumn();
+				const int index = base + col;
+				ImGui::TextColored(~UIHelpers::kColorMuted, "R%d", index);
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(ImGui::CalcTextSize("0").x * 4.0f + 12.0f);
+				ImGui::PushID(index);
+				ImGui::InputText("##rx", (char*)&reg_rx[index][0], 3, ImGuiInputTextFlags_CharsHexadecimal);
+				ImGui::PopID();
+			}
+		}
 	}
-	// ERn
-	// 不可编辑，必须通过Rn编辑
-	ImGui::TextUnformatted("ERn: ");
-	for (int i = 0; i < 16; i += 2) {
-		ImGui::SameLine();
-		uint16_t val = m_emu->chipset.cpu.reg_r[i + 1]
-						   << 8 |
-					   m_emu->chipset.cpu.reg_r[i];
-		ImGui::Text("%04x ", val);
+	if (ToolUi::TableScope table{"##er_grid_edit", per_row / 2}) {
+		for (int base = 0; base < 16; base += per_row) {
+			ImGui::TableNextRow();
+			for (int col = 0; col + 1 < per_row && base + col + 1 < 16; col += 2) {
+				ImGui::TableNextColumn();
+				uint16_t val = m_emu->chipset.cpu.reg_r[base + col + 1] << 8 |
+					m_emu->chipset.cpu.reg_r[base + col];
+				ImGui::TextColored(~UIHelpers::kColorMuted, "ER%d", base + col);
+				ImGui::SameLine();
+				ImGui::Text("%04x", val);
+			}
+		}
 	}
-
-	auto show_sfr = ([&](char* ptr, const char* label, int i, int width = 4) {
-		ImGui::TextColored(~UIHelpers::kColorSuccess, "%s", label);
-		ImGui::SameLine();
-        snprintf(id, sizeof(id), "##sfr%d", i);
-		ImGui::SetNextItemWidth(char_width * width + 2);
-		ImGui::InputText(id, (char*)ptr, width + 1, ImGuiInputTextFlags_CharsHexadecimal);
-	});
-	show_sfr(reg_pc, "PC: ", 1, 6);
-	ImGui::SameLine();
-	show_sfr(reg_lr, "LR: ", 2, 6);
-	ImGui::SameLine();
-	show_sfr(reg_ea, "EA: ", 3);
-	ImGui::SameLine();
-	show_sfr(reg_sp, "SP: ", 4);
-	ImGui::SameLine();
-	show_sfr(reg_psw, "PSW: ", 5, 2);
-	ImGui::SameLine();
-	show_sfr(reg_dsr, "DSR: ", 6, 2);
+	if (ToolUi::TableScope table{"##sfr_edit", 2}) {
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); edit_sfr(reg_pc, "PC", 1, 6);
+		ImGui::TableNextColumn(); edit_sfr(reg_sp, "SP", 4, 4);
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); edit_sfr(reg_lr, "LR", 2, 6);
+		ImGui::TableNextColumn(); edit_sfr(reg_psw, "PSW", 5, 2);
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); edit_sfr(reg_ea, "EA", 3, 4);
+		ImGui::TableNextColumn(); edit_sfr(reg_dsr, "DSR", 6, 2);
+	}
 }
 
 void WatchWindow::UpdateRX() {
@@ -219,40 +231,56 @@ void WatchWindow::UpdateRX() {
 }
 
 void WatchWindow::RenderCore() {
+	ToolUi::PageScope page("Watch");
 	if (auto* core = m_emu->chipset.t4x) {
 		const auto state = core->Snapshot();
-		ImGui::Text("T4x PC (word): %04X  SP: %02X", state.pc, ((state.reg[9] & 7) * 16 + (state.reg[8] & 14)) / 2);
-		ImGui::Text("Instructions: %llu  Cycles: %llu", static_cast<unsigned long long>(state.instructions), static_cast<unsigned long long>(state.cycles));
-		ImGui::Text("%s  Pending: %02X", state.halted ? "HALT" : "RUN", state.pending);
-		if (ImGui::Button(m_emu->GetPaused() ? "Continue" : "Pause")) {
-			if (m_emu->GetPaused()) core->RequestContinue(); else core->CancelDebugRun();
-			m_emu->SetPaused(!m_emu->GetPaused());
+		ToolUi::Section("Core");
+		{
+			ToolUi::PanelScope panel("##t4x_status");
+			ImGui::Text("T4x PC (word): %04X   SP: %02X", state.pc,
+				((state.reg[9] & 7) * 16 + (state.reg[8] & 14)) / 2);
+			ImGui::Text("Instructions: %llu   Cycles: %llu",
+				static_cast<unsigned long long>(state.instructions),
+				static_cast<unsigned long long>(state.cycles));
+			ImGui::Text("%s   Pending: %02X", state.halted ? "HALT" : "RUN", state.pending);
+			ImGui::Spacing();
+			if (ImGui::Button(m_emu->GetPaused() ? "Continue" : "Pause")) {
+				if (m_emu->GetPaused()) core->RequestContinue(); else core->CancelDebugRun();
+				m_emu->SetPaused(!m_emu->GetPaused());
+			}
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!m_emu->GetPaused());
+			if (ImGui::Button("Step")) { core->RequestStepInto(); m_emu->chipset.StepTiMultiView(); }
+			ImGui::EndDisabled();
 		}
-		ImGui::SameLine();
-		ImGui::BeginDisabled(!m_emu->GetPaused());
-		if (ImGui::Button("Step")) { core->RequestStepInto(); m_emu->chipset.StepTiMultiView(); }
-		ImGui::EndDisabled();
-		if (ImGui::BeginTable("T4xRegisters", 8, ImGuiTableFlags_Borders)) {
+		ToolUi::Section("Registers");
+		if (ToolUi::TableScope table{"T4xRegisters", 8}) {
 			for (unsigned i = 0; i < 64; ++i) {
 				ImGui::TableNextColumn();
 				ImGui::Text("R%02u: %X", i, state.reg[i]);
 			}
-			ImGui::EndTable();
 		}
 		const auto stop = core->LastDebugStop();
-		if (stop.stopped()) ImGui::Text("Debug stop: %u at %04X", unsigned(stop.reason), stop.program_counter);
-		if (ImGui::CollapsingHeader("Call stack", ImGuiTreeNodeFlags_DefaultOpen)) {
+		if (stop.stopped())
+			ToolUi::Status("Debug stop", UIHelpers::kColorWarning);
+		ToolUi::Section("Call Stack");
+		{
 			const auto frames = core->StackFrames();
+			ToolUi::PanelScope panel("##t4x_stack");
+			if (frames.empty())
+				ToolUi::EmptyState("No stack frames. Run or step to update the stack trace.");
 			for (auto it = frames.rbegin(); it != frames.rend(); ++it) {
 				UIHelpers::ClickableAddress(it->pc, UIHelpers::JumpTarget::Code);
-				ImGui::SameLine(); ImGui::Text("%s return %04X SP %02X", it->interrupt ? "IRQ" : "CALL", it->lr, it->sp);
+				ImGui::SameLine();
+				ImGui::Text("%s return %04X SP %02X", it->interrupt ? "IRQ" : "CALL", it->lr, it->sp);
 			}
 		}
 		return;
 	}
+
 	char_width = ImGui::CalcTextSize("F").x;
 	casioemu::Chipset& chipset = m_emu->chipset;
-	ImGui::BeginChild("##reg_trace", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * (m_emu->chipset.epscpu ? 11.0f : 8.0f)), false, 0);
+	ToolUi::Section("Registers");
 	auto rm = m_emu->chipset.run_mode;
 	using casioemu::Chipset::RM_HALT;
 	using casioemu::Chipset::RM_RUN;
@@ -261,51 +289,29 @@ void WatchWindow::RenderCore() {
 							(rm == RM_RUN ? "Run" : rm == RM_STOP ? "Stop" : rm == RM_HALT ? "Halt" :
 							 rm == casioemu::Chipset::RM_DEEP_HALT ? "DEEP-HALT" : "HALT-H"))
 			.c_str());
-	// ImGui::Text("Psw");
-	// for (size_t i = 0; i < 8; i++) {
-	//	ImGui::SameLine(i * 25. + 50.);
-	//	ImGui::Text("%zu", i);
-	// }
-	// ImGui::Dummy(ImVec2(0, 0));
-
-	// bool changed = false;
-	// for (size_t i = 0; i < 8; i++) {
-	//	ImGui::SameLine(i * 25. + 50.);
-	//	if (ImGui::Checkbox(("##" + std::to_string(i)).c_str(), &pdx[i])) {
-	//		changed = true;
-	//	}
-	// }
-
-	// if (changed) {
-	//	pd = 0;
-	//	for (int i = 0; i < 8; i++) {
-	//		if (pdx[i]) {
-	//			pd |= (1 << i);
-	//		}
-	//	}
-	//	m_emu->ModelDefinition.pd_value = pd;
-	// }
 	PrepareRX();
 	if (chipset.epscpu) {
 		const auto debug = chipset.epscpu->DebugSnapshot();
-		ImGui::Text("Instructions: %llu  Cycles: %llu",
+		ImGui::Text("Instructions: %llu   Cycles: %llu",
 			static_cast<unsigned long long>(debug.instruction_count),
 			static_cast<unsigned long long>(debug.cycle_count));
-		if (ImGui::Checkbox("Trace", &eps_trace_enabled))
+		if (ImGui::Checkbox("Trace recording", &eps_trace_enabled))
 			chipset.epscpu->EnableTrace(eps_trace_enabled);
-		UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("Capacity").x + 100.0f);
-		ImGui::SetNextItemWidth(100.0f);
-		if (ImGui::InputInt("Capacity", &eps_trace_capacity, 256, 1024)) {
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Trace capacity").x + 120.0f);
+		ImGui::SetNextItemWidth(ImGui::CalcTextSize("000000").x);
+		if (ImGui::InputInt("Trace capacity", &eps_trace_capacity, 256, 1024)) {
 			eps_trace_capacity = std::clamp(eps_trace_capacity, 0, 65536);
 			chipset.epscpu->SetTraceCapacity(static_cast<size_t>(eps_trace_capacity));
 		}
-		UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("Clear trace"));
-		if (ImGui::Button("Clear trace"))
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Clear Trace").x + 20.0f);
+		if (ImGui::Button("Clear Trace"))
 			chipset.epscpu->ClearTrace();
 	}
+	ImGui::Spacing();
 	if (!m_emu->GetPaused()) {
 		ShowRX();
-		if (ImGui::Button("WatchWindow.Pause"_lc)) {
+		ImGui::Spacing();
+		if (ToolUi::AccentButton("WatchWindow.Pause"_lc)) {
 			if (m_emu->chipset.epscpu)
 				m_emu->chipset.epscpu->CancelDebugRun();
 			m_emu->SetPaused(1);
@@ -314,99 +320,99 @@ void WatchWindow::RenderCore() {
 	else {
 		ModRX();
 		UpdateRX();
-		if (ImGui::Button("WatchWindow.Continue"_lc)) {
+		ImGui::Spacing();
+		if (ToolUi::AccentButton("WatchWindow.Continue"_lc)) {
 			if (m_emu->chipset.epscpu)
 				m_emu->chipset.epscpu->RequestContinue();
 			m_emu->SetPaused(0);
 		}
 	}
 
-	ImGui::EndChild();
-	ImGui::Separator();
-	static int range = 64;
-	ImGui::BeginChild("##stack_trace", ImVec2(0, ImGui::GetWindowHeight() / 2));
-	if (ImGui::BeginTable("##Stack_trace", 6, pretty_table)) {
-		ImGui::TableSetupColumn("WatchWindow.Function"_lc, ImGuiTableColumnFlags_WidthStretch, 1);
-		ImGui::TableSetupColumn("PC", ImGuiTableColumnFlags_WidthFixed, 60);
-		ImGui::TableSetupColumn("SP", ImGuiTableColumnFlags_WidthFixed, 40);
-		ImGui::TableSetupColumn("ER0", ImGuiTableColumnFlags_WidthFixed, 40);
-		ImGui::TableSetupColumn("ER2", ImGuiTableColumnFlags_WidthFixed, 40);
-		ImGui::TableSetupColumn("LR", ImGuiTableColumnFlags_WidthStretch, 1);
-		ImGui::TableHeadersRow();
-		if (chipset.epscpu) {
-			const auto snapshot = chipset.epscpu->DebugSnapshot();
-			for (size_t i = 0; i < snapshot.stack_pointer && i < snapshot.stack.size(); i++) {
-				ImGui::TableNextRow();
-				ImGui::TableNextColumn();
-				ImGui::TextUnformatted(lookup_symbol(snapshot.stack[i], g_labels).c_str());
-				ImGui::TableNextColumn();
-				UIHelpers::ClickableAddress(snapshot.stack[i]);
-				ImGui::TableNextColumn();
-				ImGui::Text("%04zX", i);
-				ImGui::TableNextColumn();
-				ImGui::Text("%04X", 0);
-				ImGui::TableNextColumn();
-				ImGui::Text("%04X", 0);
-				ImGui::TableNextColumn();
-				ImGui::TextUnformatted("");
-			}
-		}
-		else {
-			auto stack = chipset.cpu.stack.get();
-			if (stack->empty()) {
-				ImGui::TableNextRow();
-				ImGui::TableNextColumn();
-				ImGui::PushStyleColor(ImGuiCol_Text, UIHelpers::kColorMuted);
-				ImGui::TextUnformatted("No stack frames. Run or step to update stack trace.");
-				ImGui::PopStyleColor();
-				for (int col = 1; col < 6; ++col) {
-					ImGui::TableNextColumn();
-					ImGui::TextUnformatted("");
+	ToolUi::Section("Call Stack");
+	{
+		const float stack_height = std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.42f);
+		if (ToolUi::TableScope table{"##Stack_trace", 6,
+				ToolUi::TableFlags() | ImGuiTableFlags_ScrollY, stack_height}) {
+			ImGui::TableSetupColumn("WatchWindow.Function"_lc, ImGuiTableColumnFlags_WidthFixed, 104);
+			ImGui::TableSetupColumn("PC", ImGuiTableColumnFlags_WidthFixed, 60);
+			ImGui::TableSetupColumn("SP", ImGuiTableColumnFlags_WidthFixed, 40);
+			ImGui::TableSetupColumn("ER0", ImGuiTableColumnFlags_WidthFixed, 40);
+			ImGui::TableSetupColumn("ER2", ImGuiTableColumnFlags_WidthFixed, 40);
+			ImGui::TableSetupColumn("LR", ImGuiTableColumnFlags_WidthStretch, 1);
+			ImGui::TableSetupScrollFreeze(0, 1);
+			ImGui::TableHeadersRow();
+			if (chipset.epscpu) {
+				const auto snapshot = chipset.epscpu->DebugSnapshot();
+				const int count = static_cast<int>(std::min<size_t>(snapshot.stack_pointer, snapshot.stack.size()));
+				ImGuiListClipper clipper;
+				clipper.Begin(count);
+				while (clipper.Step()) {
+					for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+						const auto pc = snapshot.stack[static_cast<size_t>(index)];
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted(lookup_symbol(pc, g_labels).c_str());
+						ImGui::TableNextColumn();
+						UIHelpers::ClickableAddress(pc);
+						ImGui::TableNextColumn();
+						ImGui::Text("%04X", static_cast<unsigned>(index));
+						ImGui::TableNextColumn();
+						ImGui::Text("%04X", 0);
+						ImGui::TableNextColumn();
+						ImGui::Text("%04X", 0);
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted("");
+					}
 				}
 			}
 			else {
-				class reverse_view {
-				public:
-					reverse_view(decltype(*stack)& vector1) : stk(vector1) {}
-					decltype(*stack)& stk;
-					auto begin() {
-						return stk.rbegin();
-					}
-					auto end() {
-						return stk.rend();
-					}
-				};
-				for (auto& frame : reverse_view{*stack}) {
+				auto stack = chipset.cpu.stack.get();
+				if (stack->empty()) {
 					ImGui::TableNextRow();
 					ImGui::TableNextColumn();
-					ImGui::TextUnformatted(lookup_symbol(frame.new_pc, g_labels).c_str());
-					ImGui::TableNextColumn();
-					UIHelpers::ClickableAddress(frame.new_pc);
-					ImGui::TableNextColumn();
-					ImGui::Text("%04X", frame.sp);
-					ImGui::TableNextColumn();
-					ImGui::Text("%04X", frame.er0);
-					ImGui::TableNextColumn();
-					ImGui::Text("%04X", frame.er2);
-					ImGui::TableNextColumn();
-					if (frame.lr_pushed) {
-						if (frame.lr == 0xffffff) {
-							ImGui::TextUnformatted("WatchWindow.LrDestroyed"_lc);
-						}
-						else {
-							ImGui::TextUnformatted(lookup_symbol(frame.lr, g_labels).c_str());
+					ImGui::PushStyleColor(ImGuiCol_Text, UIHelpers::kColorMuted);
+					ImGui::TextUnformatted("No stack frames. Run or step to update stack trace.");
+					ImGui::PopStyleColor();
+					for (int col = 1; col < 6; ++col) {
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted("");
+					}
+				}
+				else {
+					const int count = static_cast<int>(stack->size());
+					ImGuiListClipper clipper;
+					clipper.Begin(count);
+					while (clipper.Step()) {
+						for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+							const auto& frame = (*stack)[static_cast<size_t>(count - 1 - index)];
+							ImGui::TableNextRow();
+							ImGui::TableNextColumn();
+							ImGui::TextUnformatted(lookup_symbol(frame.new_pc, g_labels).c_str());
+							ImGui::TableNextColumn();
+							UIHelpers::ClickableAddress(frame.new_pc);
+							ImGui::TableNextColumn();
+							ImGui::Text("%04X", frame.sp);
+							ImGui::TableNextColumn();
+							ImGui::Text("%04X", frame.er0);
+							ImGui::TableNextColumn();
+							ImGui::Text("%04X", frame.er2);
+							ImGui::TableNextColumn();
+							if (frame.lr_pushed) {
+								if (frame.lr == 0xffffff)
+									ImGui::TextUnformatted("WatchWindow.LrDestroyed"_lc);
+								else
+									ImGui::TextUnformatted(lookup_symbol(frame.lr, g_labels).c_str());
+							}
 						}
 					}
 				}
 			}
 		}
-		ImGui::EndTable();
 	}
-	ImGui::EndChild();
-	if (chipset.epscpu && ImGui::CollapsingHeader("EPS6800 Trace Buffer")) {
-		const auto trace = chipset.epscpu->TraceBuffer();
+	if (chipset.epscpu) {
+		ToolUi::Section("EPS6800 Trace Buffer");
 		ImGui::BeginChild("##eps_trace_buffer", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 10), true);
-		if (ImGui::BeginTable("##eps_trace_table", 7, pretty_table)) {
+		if (ToolUi::TableScope table{"##eps_trace_table", 7}) {
 			ImGui::TableSetupScrollFreeze(0, 1);
 			ImGui::TableSetupColumn("#");
 			ImGui::TableSetupColumn("Cycle");
@@ -416,6 +422,7 @@ void WatchWindow::RenderCore() {
 			ImGui::TableSetupColumn("A");
 			ImGui::TableSetupColumn("STATUS");
 			ImGui::TableHeadersRow();
+			const auto trace = chipset.epscpu->TraceBuffer();
 			ImGuiListClipper clipper;
 			clipper.Begin(static_cast<int>(trace.size()));
 			while (clipper.Step()) {
@@ -431,15 +438,24 @@ void WatchWindow::RenderCore() {
 					ImGui::TableNextColumn(); ImGui::Text("%02X", entry.status);
 				}
 			}
-			ImGui::EndTable();
 		}
 		ImGui::EndChild();
 	}
-	ImGui::BeginChild("##stack_view");
-	ImGui::TextUnformatted("WatchWindow.StackMemViewRange"_lc);
-	ImGui::SameLine();
+	ToolUi::Section("Stack Memory");
+	static int range = 64;
+	ToolUi::Field("View range");
+	ImGui::SetNextItemWidth(std::max(160.0f, ImGui::GetContentRegionAvail().x * 0.45f));
 	ImGui::SliderInt("##range", &range, 64, 2048);
 	uint16_t offset = chipset.epscpu ? 0 : chipset.cpu.reg_sp & 0xffff;
+	// Keep the hex row inside the panel: address + bytes + ASCII pane.
+	{
+		const float char_width = std::max(1.0f, ImGui::CalcTextSize("0").x);
+		const int max_columns = std::clamp(
+			static_cast<int>((ImGui::GetContentRegionAvail().x - char_width * 22.0f) / (char_width * 4.0f)),
+			2, 64);
+		if (mem_editor.Cols > max_columns)
+			mem_editor.Cols = max_columns;
+	}
 	mem_editor.ReadFn = [](const ImU8* data, size_t off) -> ImU8 {
 		return me_mmu->ReadData((size_t)data + off);
 	};
@@ -450,6 +466,9 @@ void WatchWindow::RenderCore() {
 	if (rng + offset >= casioemu::GetRamBaseAddr(m_emu->hardware_id) + casioemu::GetRamSize(m_emu->hardware_id)) {
 		rng = casioemu::GetRamSize(m_emu->hardware_id) - offset + casioemu::GetRamBaseAddr(m_emu->hardware_id);
 	}
-	mem_editor.DrawContents((void*)static_cast<size_t>(offset), rng, offset);
-	ImGui::EndChild();
+	{
+		const float body_height = std::max(200.0f, ImGui::GetContentRegionAvail().y);
+		ToolUi::PanelScope frame("##stack_hex_frame", body_height);
+		mem_editor.DrawContents((void*)static_cast<size_t>(offset), rng, offset);
+	}
 }

@@ -110,16 +110,33 @@ struct CalculatorSettings {
 	// Legacy name for AppearanceSettings::uiScale, kept in the document for one
 	// release so old tooling keeps working.
 	float scale = 1.0f;
+	// Re-read the injection file when it changes on disk.
+	bool injectionAutoReload = true;
+	// Calculator face zoom. 0 = fit the panel, otherwise an explicit scale.
+	float zoom = 0.0f;
 };
 
 struct EmulatorSettings {
 	float backgroundThrottle = 0.25f;
 	bool lowPerformanceMode = false;
+	// 0 = use the model's own cycle rate; otherwise 2^n cycles per second.
+	int clockExponent = 0;
+	bool audioEnabled = true;
+	int captureScale = 3;
+	int captureBackgroundRgb = 0xD6E3D6;
+	int lcdFlashThreshold = 0;
+	float lcdFlashBrightness = 1.5f;
+	int lcdBuffer = 0;
 };
 
 struct IntegrationSettings {
 	bool discordRPC = true;
 	bool updateChecker = true;
+};
+
+struct AdvancedSettings {
+	// SDL renderer hint persisted to .renderer_hint.cfg; applied next launch.
+	std::string renderer = "default";
 };
 
 struct PluginSettings {
@@ -140,6 +157,7 @@ struct SettingsData {
 	EmulatorSettings emulator;
 	IntegrationSettings integrations;
 	PluginSettings plugins;
+	AdvancedSettings advanced;
 	std::string language = "en_US";
 };
 

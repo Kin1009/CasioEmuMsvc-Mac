@@ -1,4 +1,6 @@
 #include "Peripheral/OrdinaryLcdHistory.hpp"
+#include "Peripheral/ScreenGate.hpp"
+#include "Emulator.hpp"
 #include "ThemeManager.h"
 #ifndef TEST_BUILD
 
@@ -334,7 +336,36 @@ void ThemeManager::SetFontScale(float scale) {
 	m_fontScale = std::clamp(scale, 0.8f, 2.0f);
 }
 
+// Globals owned by Gui/HwController.cpp.  Persisted emulator settings are
+// pushed into them once an emulator exists so a restart honours them.
+extern bool audio_enable;
+extern int screen_buffer_select;
+extern float screen_flashing_brightness_coeff;
+
+// Declared by Ui.hpp in the desktop build.
+extern casioemu::Emulator* m_emu;
+
+void ThemeManager::ApplyEmulatorRuntimeSettings() {
+	if (m_emulatorSettingsApplied || !m_emu)
+		return;
+	auto& data = casioemu::settings::SettingsStore::Instance().Data();
+	const auto& emulator = data.emulator;
+
+	audio_enable = emulator.audioEnabled;
+	casioemu::screen_gate::SetFlashingThreshold(emulator.lcdFlashThreshold);
+	screen_flashing_brightness_coeff = std::clamp(emulator.lcdFlashBrightness, 1.0f, 8.0f);
+	screen_buffer_select = std::clamp(emulator.lcdBuffer, 0, 2);
+	m_emu->capture_scale.store(std::max(1, emulator.captureScale));
+	m_emu->capture_background_rgb.store(static_cast<uint32_t>(emulator.captureBackgroundRgb) & 0xFFFFFFu);
+	if (emulator.clockExponent > 0) {
+		m_emu->cycles.Setup(Uint64{1} << std::clamp(emulator.clockExponent, 1, 28),
+			m_emu->cycles.timer_interval);
+	}
+	m_emulatorSettingsApplied = true;
+}
+
 void ThemeManager::ProcessFontRebuild() {
+	ApplyEmulatorRuntimeSettings();
 	if (!m_fontRebuildRequested)
 		return;
 

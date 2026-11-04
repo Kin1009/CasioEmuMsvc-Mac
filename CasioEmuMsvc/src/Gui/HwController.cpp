@@ -1,6 +1,7 @@
 #include "HwController.h"
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "../Config.hpp"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #include "imgui/imgui.h"
 #include "Chipset.hpp"
@@ -17,90 +18,101 @@ float screen_residual_alpha_scale = 1.0f;
 int screen_buffer_select = 0;
 bool audio_enable = false;
 void HwController::RenderCore() {
-	UIHelpers::SectionHeader("Display");
+	ToolUi::PageScope page("Hardware");
+	ToolUi::Section("Capture & Display");
 
 #ifndef CASIOEMU_CORE_WEB
-	if (ImGui::Button("ScreenshotBtn"_lc)) {
-		m_emu->screenshot_requested.store(true);
-	}
-	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("PopUpScreenBtn"_lc));
-	if (ImGui::Button("PopUpScreenBtn"_lc)) {
-		m_emu->mirroring_requested.store(true);
-	}
-	const bool recording = m_emu->recording_active.load();
-	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth(recording ? "RecordStopBtn"_lc : "RecordStartBtn"_lc));
-	if (UIHelpers::ButtonWithShortcut(recording ? "RecordStopBtn"_lc : "RecordStartBtn"_lc, "Ctrl+F12")) {
+	{
+		ToolUi::PanelScope panel("##hw_capture");
+		if (ToolUi::AccentButton("ScreenshotBtn"_lc)) {
+			m_emu->screenshot_requested.store(true);
+		}
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("PopUpScreenBtn"_lc).x + 20.0f);
+		if (ImGui::Button("PopUpScreenBtn"_lc)) {
+			m_emu->mirroring_requested.store(true);
+		}
+		const bool recording = m_emu->recording_active.load();
+		const char* record_label = recording ? "RecordStopBtn"_lc : "RecordStartBtn"_lc;
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize(record_label).x + 20.0f);
+		if (UIHelpers::ButtonWithShortcut(record_label, "Ctrl+F12")) {
+			if (recording) {
+				m_emu->recording_stop_requested.store(true);
+			}
+			else {
+				m_emu->recording_requested.store(true);
+			}
+		}
 		if (recording) {
-			m_emu->recording_stop_requested.store(true);
+			ImGui::SameLine();
+			ToolUi::Status("Recording", UIHelpers::kColorWarning);
+			ImGui::SameLine();
+			ImGui::Text("RecordStatus"_lc, m_emu->recording_frame_count.load());
 		}
-		else {
-			m_emu->recording_requested.store(true);
+
+		ImGui::Spacing();
+		ToolUi::Field("Capture scale");
+		ImGui::SetNextItemWidth(ImGui::CalcTextSize("000000").x * 1.6f);
+		int capture_scale = std::max(1, m_emu->capture_scale.load());
+		bool capture_scale_changed = false;
+		ImGui::PushID("HwController.CaptureScale");
+		if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
+			capture_scale--;
+			capture_scale_changed = true;
 		}
-	}
-	if (recording) {
-		UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("RecordStatus"_lc).x + 80.0f);
-		ImGui::Text("RecordStatus"_lc, m_emu->recording_frame_count.load());
-	}
-	int capture_scale = std::max(1, m_emu->capture_scale.load());
-	bool capture_scale_changed = false;
-	ImGui::PushID("HwController.CaptureScale");
-	ImGui::NewLine();
-	if (ImGui::Button("-", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
-		capture_scale--;
-		capture_scale_changed = true;
-	}
-	ImGui::SameLine();
-	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-	if (ImGui::InputInt("##Value", &capture_scale, 0, 0)) {
-		capture_scale_changed = true;
-	}
-	UIHelpers::SameLineOrWrap(ImGui::GetFrameHeight());
-	if (ImGui::Button("+", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
-		capture_scale++;
-		capture_scale_changed = true;
-	}
-	ImGui::PopID();
-	UIHelpers::SameLineOrWrap(ImGui::CalcTextSize("HwController.CaptureScale"_lc).x);
-	ImGui::TextUnformatted("HwController.CaptureScale"_lc);
-	if (capture_scale_changed) {
-		m_emu->capture_scale.store(std::max(1, capture_scale));
-	}
-	else if (capture_scale != m_emu->capture_scale.load()) {
-		m_emu->capture_scale.store(capture_scale);
-	}
-	uint32_t capture_background = m_emu->capture_background_rgb.load();
-	float capture_background_color[3] = {
-		static_cast<float>((capture_background >> 16) & 0xff) / 255.0f,
-		static_cast<float>((capture_background >> 8) & 0xff) / 255.0f,
-		static_cast<float>(capture_background & 0xff) / 255.0f};
-	ImGui::TextUnformatted("HwController.CaptureBackground"_lc);
-	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-	if (ImGui::ColorEdit3("##capture_background", capture_background_color)) {
-		const auto channel = [](float value) {
-			return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(value * 255.0f)), 0, 255));
-		};
-		m_emu->capture_background_rgb.store((channel(capture_background_color[0]) << 16) |
-			(channel(capture_background_color[1]) << 8) |
-			channel(capture_background_color[2]));
+		ImGui::SameLine();
+		if (ImGui::InputInt("##Value", &capture_scale, 0, 0)) {
+			capture_scale_changed = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("+", ImVec2(ImGui::GetFrameHeight(), 0.0f))) {
+			capture_scale++;
+			capture_scale_changed = true;
+		}
+		ImGui::PopID();
+		if (capture_scale_changed) {
+			m_emu->capture_scale.store(std::max(1, capture_scale));
+		}
+		else if (capture_scale != m_emu->capture_scale.load()) {
+			m_emu->capture_scale.store(capture_scale);
+		}
+
+		ToolUi::Field("Background");
+		uint32_t capture_background = m_emu->capture_background_rgb.load();
+		float capture_background_color[3] = {
+			static_cast<float>((capture_background >> 16) & 0xff) / 255.0f,
+			static_cast<float>((capture_background >> 8) & 0xff) / 255.0f,
+			static_cast<float>(capture_background & 0xff) / 255.0f};
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+		if (ImGui::ColorEdit3("##capture_background", capture_background_color)) {
+			const auto channel = [](float value) {
+				return static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(value * 255.0f)), 0, 255));
+			};
+			m_emu->capture_background_rgb.store((channel(capture_background_color[0]) << 16) |
+				(channel(capture_background_color[1]) << 8) |
+				channel(capture_background_color[2]));
+		}
+		ToolUi::Hint("Screenshots and recordings use this scale and background colour.");
 	}
 #endif
 
 	if (!casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
+		ToolUi::Section("LCD behaviour");
+		ToolUi::PanelScope panel("##hw_lcd");
 		auto gate = casioemu::screen_gate::Get();
 		int flashing_threshold = gate.flashing_threshold;
-		ImGui::TextUnformatted("HwController.Value1"_lc);
+		ToolUi::Field("Flash threshold");
 		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::SliderInt("##flashing_threshold", &flashing_threshold, 0, 0x3F))
 			casioemu::screen_gate::SetFlashingThreshold(flashing_threshold);
 		float flashing_brightness = screen_flashing_brightness_coeff;
-		ImGui::TextUnformatted("HwController.Value2"_lc);
+		ToolUi::Field("Flash brightness");
 		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::SliderFloat("##flashing_brightness", &flashing_brightness, 1.0f, 8.0f)) {
 			casioemu::ordinary_lcd_history::UntrackedChange change;
 			screen_flashing_brightness_coeff = flashing_brightness;
 		}
 		int buffer_select = screen_buffer_select;
-		ImGui::TextUnformatted("HwController.ScreenBufferSelect"_lc);
+		ToolUi::Field("Screen buffer");
 		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::SliderInt("##screen_buffer_select", &buffer_select, 0, 2)) {
 			casioemu::ordinary_lcd_history::UntrackedChange change;
@@ -108,22 +120,24 @@ void HwController::RenderCore() {
 		}
 	}
 
-	UIHelpers::SectionHeader("CPU & Performance");
-	
-	static int cps = log(m_emu->cycles.cycles_per_second) / log(2);
-	ImGui::TextUnformatted("HwController.CPS"_lc);
-	ImGui::SetNextItemWidth(-1.0f);
-	if (ImGui::SliderInt("##cpu_speed", &cps, 1, 28, "2^%d CPS")) {
-		m_emu->cycles.Setup((Uint64)1 << cps, m_emu->cycles.timer_interval);
+	ToolUi::Section("CPU & Performance");
+	{
+		ToolUi::PanelScope panel("##hw_cpu");
+		static int cps = log(m_emu->cycles.cycles_per_second) / log(2);
+		ToolUi::Field("Clock rate");
+		ImGui::SetNextItemWidth(-1.0f);
+		if (ImGui::SliderInt("##cpu_speed", &cps, 1, 28, "2^%d CPS")) {
+			m_emu->cycles.Setup((Uint64)1 << cps, m_emu->cycles.timer_interval);
+		}
+		if (m_emu->hardware_id == casioemu::HW_TI_MULTI_VIEW)
+			ImGui::Text("Reference speed: %.3fx", (double)m_emu->cycles.cycles_per_second / 1000000.0);
+		else
+			ImGui::Text("%.6f MHz", (double)m_emu->cycles.cycles_per_second / 1024 / 1024);
 	}
-	if (m_emu->hardware_id == casioemu::HW_TI_MULTI_VIEW)
-		ImGui::Text("Reference speed: %.3fx", (double)m_emu->cycles.cycles_per_second / 1000000.0);
-	else
-		ImGui::Text("%.6f MHz", (double)m_emu->cycles.cycles_per_second / 1024 / 1024);
-	
-	ImGui::Spacing();
-	
+
 	if (!casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
+		ToolUi::Section("PD register");
+		ToolUi::PanelScope panel("##hw_pd");
 		static bool pdx[8];
 		int pd = m_emu->ModelDefinition.pd_value;
 
@@ -133,8 +147,7 @@ void HwController::RenderCore() {
 		}
 
 		bool changed = false;
-		ImGui::Text("PD Register:");
-		if (ImGui::BeginTable("##pd_table", 9, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX | ImGuiTableFlags_BordersOuter)) {
+		if (ToolUi::TableScope table{"##pd_table", 9, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_PadOuterX}) {
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::TextDisabled(" Bit");
@@ -154,7 +167,6 @@ void HwController::RenderCore() {
 				}
 				ImGui::PopID();
 			}
-			ImGui::EndTable();
 		}
 
 		if (changed) {
@@ -168,9 +180,9 @@ void HwController::RenderCore() {
 		}
 
 		ImGui::Spacing();
-
 		static int irq = 5;
-		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+		ToolUi::Field("Interrupt");
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
 		ImGui::InputInt("##irqid", &irq);
 		ImGui::SameLine();
 		if (ImGui::Button("HwController.Interrupt"_lc)) {
@@ -178,19 +190,24 @@ void HwController::RenderCore() {
 				m_emu->chipset.RaiseMaskable(irq);
 			}
 		}
+		ToolUi::Hint("Raises a maskable CPU interrupt with the given number (5-63).");
 	}
 
-	UIHelpers::SectionHeader("Advanced");
-	
-	if (ImGui::Button("HwController.HotReload"_lc)) {
-		const bool was_paused = m_emu->GetPaused();
-		m_emu->SetPaused(true);
-		auto lg = std::lock_guard(m_emu->access_mx);
-		std::string error;
-		if (!m_emu->chipset.ReloadRom(error)) {
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-				"HwController.HotReload"_lc, error.c_str(), window);
+	ToolUi::Section("Advanced");
+	{
+		ToolUi::PanelScope panel("##hw_advanced");
+		ImGui::TextWrapped("%s", "Reload the ROM from disk without restarting the emulator. The CPU is paused while the image is replaced.");
+		ImGui::Spacing();
+		if (ToolUi::AccentButton("HwController.HotReload"_lc)) {
+			const bool was_paused = m_emu->GetPaused();
+			m_emu->SetPaused(true);
+			auto lg = std::lock_guard(m_emu->access_mx);
+			std::string error;
+			if (!m_emu->chipset.ReloadRom(error)) {
+				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+					"HwController.HotReload"_lc, error.c_str(), window);
+			}
+			m_emu->SetPaused(was_paused);
 		}
-		m_emu->SetPaused(was_paused);
 	}
 }

@@ -203,6 +203,7 @@ void SettingsStore::Normalize() {
 
 	d.appearance.uiScale = std::clamp(d.appearance.uiScale, 0.8f, 2.0f);
 	d.calculator.scale = d.appearance.uiScale;
+	d.calculator.zoom = d.calculator.zoom <= 0.0f ? 0.0f : std::clamp(d.calculator.zoom, 0.25f, 4.0f);
 	for (float& component : d.appearance.seedColor)
 		component = std::clamp(component, 0.0f, 1.0f);
 	if (d.calculator.injectionFilePath.empty())
@@ -212,6 +213,14 @@ void SettingsStore::Normalize() {
 	d.editor.tabSize = std::clamp(d.editor.tabSize, 1, 16);
 
 	d.emulator.backgroundThrottle = std::clamp(d.emulator.backgroundThrottle, 0.05f, 1.0f);
+	d.emulator.clockExponent = std::clamp(d.emulator.clockExponent, 0, 28);
+	d.emulator.captureScale = std::clamp(d.emulator.captureScale, 1, 16);
+	d.emulator.captureBackgroundRgb = std::clamp(d.emulator.captureBackgroundRgb, 0, 0xFFFFFF);
+	d.emulator.lcdFlashThreshold = std::clamp(d.emulator.lcdFlashThreshold, 0, 0x3F);
+	d.emulator.lcdFlashBrightness = std::clamp(d.emulator.lcdFlashBrightness, 1.0f, 8.0f);
+	d.emulator.lcdBuffer = std::clamp(d.emulator.lcdBuffer, 0, 2);
+
+	d.advanced.renderer = d.advanced.renderer.empty() ? "default" : d.advanced.renderer;
 
 	d.shell.sidebar.width = std::clamp(d.shell.sidebar.width, 160, 600);
 	d.shell.bottom.height = std::clamp(d.shell.bottom.height, 80, 800);
@@ -350,6 +359,8 @@ LoadStatus SettingsStore::Load(std::string* error) {
 		if (const json* calculator = ObjectAt(document, "calculator")) {
 			parsed.calculator.injectionFilePath = StringAt(*calculator, "injectionFilePath", parsed.calculator.injectionFilePath);
 			parsed.calculator.scale = FloatAt(*calculator, "scale", parsed.calculator.scale);
+			parsed.calculator.injectionAutoReload = BoolAt(*calculator, "injectionAutoReload", parsed.calculator.injectionAutoReload);
+			parsed.calculator.zoom = FloatAt(*calculator, "zoom", parsed.calculator.zoom);
 			// calculator.scale is a legacy alias; only use it when the new key is
 			// absent from the document.
 			if (!ObjectAt(document, "appearance") || !document["appearance"].contains("uiScale"))
@@ -359,7 +370,17 @@ LoadStatus SettingsStore::Load(std::string* error) {
 		if (const json* emulator = ObjectAt(document, "emulator")) {
 			parsed.emulator.backgroundThrottle = FloatAt(*emulator, "backgroundThrottle", parsed.emulator.backgroundThrottle);
 			parsed.emulator.lowPerformanceMode = BoolAt(*emulator, "lowPerformanceMode", parsed.emulator.lowPerformanceMode);
+			parsed.emulator.clockExponent = IntAt(*emulator, "clockExponent", parsed.emulator.clockExponent);
+			parsed.emulator.audioEnabled = BoolAt(*emulator, "audioEnabled", parsed.emulator.audioEnabled);
+			parsed.emulator.captureScale = IntAt(*emulator, "captureScale", parsed.emulator.captureScale);
+			parsed.emulator.captureBackgroundRgb = IntAt(*emulator, "captureBackgroundRgb", parsed.emulator.captureBackgroundRgb);
+			parsed.emulator.lcdFlashThreshold = IntAt(*emulator, "lcdFlashThreshold", parsed.emulator.lcdFlashThreshold);
+			parsed.emulator.lcdFlashBrightness = FloatAt(*emulator, "lcdFlashBrightness", parsed.emulator.lcdFlashBrightness);
+			parsed.emulator.lcdBuffer = IntAt(*emulator, "lcdBuffer", parsed.emulator.lcdBuffer);
 		}
+
+		if (const json* advanced = ObjectAt(document, "advanced"))
+			parsed.advanced.renderer = StringAt(*advanced, "renderer", parsed.advanced.renderer);
 
 		if (const json* integrations = ObjectAt(document, "integrations")) {
 			parsed.integrations.discordRPC = BoolAt(*integrations, "discordRPC", parsed.integrations.discordRPC);
@@ -489,12 +510,25 @@ bool SettingsStore::Save(std::string* error) {
 	json calculator = json::object();
 	calculator["injectionFilePath"] = m_data.calculator.injectionFilePath;
 	calculator["scale"] = m_data.calculator.scale;
+	calculator["injectionAutoReload"] = m_data.calculator.injectionAutoReload;
+	calculator["zoom"] = m_data.calculator.zoom;
 	document["calculator"] = calculator;
 
 	json emulator = json::object();
 	emulator["backgroundThrottle"] = m_data.emulator.backgroundThrottle;
 	emulator["lowPerformanceMode"] = m_data.emulator.lowPerformanceMode;
+	emulator["clockExponent"] = m_data.emulator.clockExponent;
+	emulator["audioEnabled"] = m_data.emulator.audioEnabled;
+	emulator["captureScale"] = m_data.emulator.captureScale;
+	emulator["captureBackgroundRgb"] = m_data.emulator.captureBackgroundRgb;
+	emulator["lcdFlashThreshold"] = m_data.emulator.lcdFlashThreshold;
+	emulator["lcdFlashBrightness"] = m_data.emulator.lcdFlashBrightness;
+	emulator["lcdBuffer"] = m_data.emulator.lcdBuffer;
 	document["emulator"] = emulator;
+
+	json advanced = json::object();
+	advanced["renderer"] = m_data.advanced.renderer;
+	document["advanced"] = advanced;
 
 	json integrations = json::object();
 	integrations["discordRPC"] = m_data.integrations.discordRPC;

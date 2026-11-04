@@ -211,7 +211,7 @@ struct MemoryEditor {
 		const float height_separator = style.ItemSpacing.y + style.ItemInnerSpacing.y;
 		float footer_height = OptFooterExtraHeight;
 		if (OptShowOptions)
-			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1;
+			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1 + 14.0f;
 		if (OptShowDataPreview)
 			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1 + ImGui::GetTextLineHeightWithSpacing() * 3;
 		ImGui::BeginChild("##scrolling", ImVec2(0, -footer_height), false, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav);
@@ -419,7 +419,9 @@ struct MemoryEditor {
 
 		const bool lock_show_data_preview = OptShowDataPreview;
 		if (OptShowOptions) {
+			ImGui::Spacing();
 			ImGui::Separator();
+			ImGui::Spacing();
 			DrawOptionsLine(s, mem_data, mem_size, base_display_addr);
 		}
 
@@ -510,7 +512,7 @@ struct MemoryEditor {
 		const float height_separator = style.ItemSpacing.y;
 		float footer_height = OptFooterExtraHeight;
 		if (OptShowOptions)
-			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1;
+			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1 + 14.0f;
 		if (OptShowDataPreview)
 			footer_height += height_separator + ImGui::GetFrameHeightWithSpacing() * 1 + ImGui::GetTextLineHeightWithSpacing() * 3;
 		if (SpanDescription.has_value())
@@ -780,7 +782,9 @@ struct MemoryEditor {
 
 		const bool lock_show_data_preview = OptShowDataPreview;
 		if (OptShowOptions) {
+			ImGui::Spacing();
 			ImGui::Separator();
+			ImGui::Spacing();
 			DrawOptionsLine(s, mem_data, mem_size, base_display_addr);
 		}
 
@@ -803,9 +807,22 @@ struct MemoryEditor {
 		ImGuiStyle& style = ImGui::GetStyle();
 		const char* format_range = OptUpperCaseHex ? "%s %0*" _PRISizeT "X..%0*" _PRISizeT "X" : "%s %0*" _PRISizeT "x..%0*" _PRISizeT "x";
 
-		// Options menu
+		// Options menu.  Chrome matches the tool-page dialogs: 10 px outer
+		// padding, 8/5 item spacing, rounded corners and a border.
 		if (ImGui::Button("HexEditor.Options"_lc))
 			ImGui::OpenPopup("context");
+		// Verification hook: open the menu without a mouse for screenshot checks.
+		if (std::getenv("CASIOEMU_SHOW_MEMORY_OPTIONS")) {
+			if (!ImGui::IsPopupOpen("context"))
+				ImGui::OpenPopup("context");
+			ImGui::SetNextWindowPos(ImVec2(340.0f, 300.0f), ImGuiCond_Always);
+		}
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 5.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+		if (ImGui::IsPopupOpen("context"))
+			ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
 		if (ImGui::BeginPopup("context")) {
 			ImGui::SetNextItemWidth(s.GlyphWidth * 7 + style.FramePadding.x * 2.0f);
 			if (ImGui::DragInt("##cols", &Cols, 0.2f, 4, 32, "HexEditor.ContextMenu.NCols"_lc)) {
@@ -823,6 +840,7 @@ struct MemoryEditor {
 
 			ImGui::EndPopup();
 		}
+		ImGui::PopStyleVar(4);
 
 		ImGui::SameLine();
 		ImGui::Text(format_range, "HexEditor.Range"_lc, s.AddrDigitsCount, base_display_addr, s.AddrDigitsCount, base_display_addr + mem_size - 1);

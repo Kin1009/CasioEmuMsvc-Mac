@@ -7,6 +7,7 @@
 #include "Hooks.h"
 #include "Logger.hpp"
 #include "SysDialog.h"
+#include "ToolUi.hpp"
 #include "U8Disas.h"
 #include "ePSCpu.h"
 #include "Chipset/T4xCore.hpp"
@@ -532,7 +533,8 @@ void CodeViewer::DrawContent() {
 							}
 							if (m_emu->chipset.epscpu || m_emu->chipset.t4x) {
 								const std::string popup_id = "##eps_exec_bp_" + std::to_string(line_i);
-								if (ImGui::BeginPopupContextItem(popup_id.c_str())) {
+								ToolUi::ContextPopupScope popup(popup_id.c_str());
+								if (popup) {
 									auto details = m_emu->chipset.t4x ? m_emu->chipset.t4x->ExecutionBreakpointDetails() : m_emu->chipset.epscpu->ExecutionBreakpointDetails();
 									auto detail = std::find_if(details.begin(), details.end(), [&](const auto& item) {
 										return item.address == e.offset;
@@ -550,7 +552,6 @@ void CodeViewer::DrawContent() {
 											else m_emu->chipset.epscpu->ConfigureExecutionBreakpoint(*detail);
 										}
 									}
-									ImGui::EndPopup();
 								}
 							}
 						}
@@ -956,6 +957,7 @@ static std::string GetInstructionHelp(const std::string& mnem, const std::string
 	return help;
 }
 void CodeViewer::RenderCore() {
+	ToolUi::PageScope page("Code Viewer");
 #ifdef CASIOEMU_CORE_WEB
 	if (!disasm_requested) {
 		PrepareDisasm();
@@ -964,7 +966,7 @@ void CodeViewer::RenderCore() {
 	int h = ImGui::GetTextLineHeight() + 4;
 	int w = ImGui::CalcTextSize("F").x;
 	if (!is_loaded.load(std::memory_order_acquire)) {
-		ImGui::SetCursorPos(ImVec2(w * 2, h * 5));
+		ToolUi::Section("Disassembly");
 		const char* spinner = "|/-\\";
 		int idx = (int)(ImGui::GetTime() / 0.15f) % 4;
 		ImGui::Text("%c %s", spinner[idx], "CodeViewer.Loading"_lc);
@@ -1011,8 +1013,7 @@ void CodeViewer::RenderCore() {
 			break;
 		}
 	}
-	ImGui::TextUnformatted(header.c_str());
-	ImGui::Separator();
+	ToolUi::Section(header.empty() ? "Disassembly" : header.c_str());
 	const float bottom_height = (2 + int(search_activated)) * ImGui::GetFrameHeightWithSpacing()
 		+ (help_activated ? 45.0f + ImGui::GetStyle().ItemSpacing.y : 0.0f)
 		+ ImGui::GetStyle().ItemSpacing.y;
@@ -1115,42 +1116,50 @@ void CodeViewer::RenderCore() {
 
 		ImGui::EndChild();
 	}
-	// Second line: Goto and Control
-	ImGui::TextUnformatted("CodeViewer.Goto"_lc);
-	ImGui::SameLine();
+	// Footer: go-to row, execution row, then view options.  Each row wraps
+	// instead of clipping when the tool dock is narrow.
+	ToolUi::Field("CodeViewer.Goto"_lc);
 	ImGui::SetNextItemWidth(ImGui::CalcTextSize("000000").x);
 	ImGui::InputText("##input", adrbuf, 8);
 	if (adrbuf[0] != '\0' && ImGui::IsItemFocused()) {
 		uint32_t addr = strtol(adrbuf, 0, 16);
 		JumpTo(addr);
 	}
-	ImGui::SameLine();
+	if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.GotoPC"_lc).x + 20.0f)) {
+		if (UIHelpers::ButtonWithShortcut("CodeViewer.GotoPC"_lc, "Ctrl+G"))
+			JumpTo(pc_cache);
+	}
+	if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.Export"_lc).x + 20.0f)) {
+		if (ImGui::Button("CodeViewer.Export"_lc))
+			ExportDisassembly();
+	}
+	ImGui::Spacing();
 	if (m_emu->GetPaused()) {
-		if (UIHelpers::ButtonWithShortcut("CodeViewer.Step"_lc, "F11")) {
+		if (UIHelpers::ButtonWithShortcut("CodeViewer.Step"_lc, "F11"))
 			RequestStep();
+		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.Trace"_lc).x + 20.0f)) {
+			if (UIHelpers::ButtonWithShortcut("CodeViewer.Trace"_lc, "F10"))
+				RequestTrace();
 		}
-		ImGui::SameLine();
-		if (UIHelpers::ButtonWithShortcut("CodeViewer.Trace"_lc, "F10")) {
-			RequestTrace();
+		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.JumpOut"_lc).x + 20.0f)) {
+			if (UIHelpers::ButtonWithShortcut("CodeViewer.JumpOut"_lc, "Shift+F11"))
+				RequestStepOut();
 		}
-		ImGui::SameLine();
-		if (UIHelpers::ButtonWithShortcut("CodeViewer.JumpOut"_lc, "Shift+F11")) {
-			RequestStepOut();
+		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.Continue"_lc).x + 20.0f)) {
+			if (UIHelpers::ButtonWithShortcut("CodeViewer.Continue"_lc, "F5"))
+				RequestContinue();
 		}
-		ImGui::SameLine();
-		if (UIHelpers::ButtonWithShortcut("CodeViewer.Continue"_lc, "F5")) {
-			RequestContinue();
-		}
-		ImGui::SameLine();
 		if (m_emu->chipset.epscpu || m_emu->chipset.t4x) {
-			if (ImGui::Button("Free Run"))
-				RequestContinue(false);
-			ImGui::SameLine();
-			ImGui::BeginDisabled(selected_addr == static_cast<uint32_t>(-1));
-			if (ImGui::Button("Run to cursor"))
-				RequestRunTo(selected_addr);
-			ImGui::EndDisabled();
-			ImGui::SameLine();
+			if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Run to cursor").x + 20.0f)) {
+				if (ImGui::Button("Free Run"))
+					RequestContinue(false);
+			}
+			if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Run to cursor").x + 20.0f)) {
+				ImGui::BeginDisabled(selected_addr == static_cast<uint32_t>(-1));
+				if (ImGui::Button("Run to cursor"))
+					RequestRunTo(selected_addr);
+				ImGui::EndDisabled();
+			}
 		}
 	}
 	else {
@@ -1163,17 +1172,10 @@ void CodeViewer::RenderCore() {
 			m_emu->SetPaused(true);
 			JumpTo(pc_cache);
 		}
-		ImGui::SameLine();
 	}
-	if (UIHelpers::ButtonWithShortcut("CodeViewer.GotoPC"_lc, "Ctrl+G")) {
-		JumpTo(pc_cache);
+	if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("CodeViewer.ShowHelp"_lc).x + 40.0f)) {
+		ImGui::Checkbox("CodeViewer.ShowHelp"_lc, &help_activated);
 	}
-	ImGui::SameLine();
-	if (ImGui::Button("CodeViewer.Export"_lc)) {
-		ExportDisassembly();
-	}
-	ImGui::SameLine();
-	ImGui::Checkbox("CodeViewer.ShowHelp"_lc, &help_activated);
 }
 
 void CodeViewer::RequestStep() {

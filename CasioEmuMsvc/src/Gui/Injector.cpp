@@ -5,6 +5,7 @@
 #include "Peripheral/BatteryBackedRAM.hpp"
 #include "Plugin/PluginPayloads.h"
 #include "Theme.h"
+#include "ToolUi.hpp"
 #include "Ui.hpp"
 #ifdef CASIOEMU_CORE_WEB
 #include "WebDebuggerGui.h"
@@ -470,17 +471,20 @@ bool Injector::ApplyInjection(const CustomInjection& inj, bool& show_info, std::
 }
 
 void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
-	ImGui::TextUnformatted(("Rop.CurrentInjectFile"_l + ": " + injectionFilePath).c_str());
-
+	ToolUi::Description("Injections are read from the injection file configured in Settings > Calculator.");
 	static bool autoCheckFileChanges = true;
-	if (ImGui::Checkbox("Rop.AutoReload"_lc, &autoCheckFileChanges)) {
-		if (autoCheckFileChanges) {
-			needsReload = true;
-		}
-	}
+	{
+		ToolUi::PanelScope panel("##custom_inject_toolbar");
+		ImGui::TextWrapped("%s: %s", "Rop.CurrentInjectFile"_l.c_str(), injectionFilePath.c_str());
 
-	UIHelpers::SameLineOrWrap(UIHelpers::ButtonWidth("Rop.ReloadCustomInjects"_lc));
-	if (ImGui::Button("Rop.ReloadCustomInjects"_lc)) {
+		if (ImGui::Checkbox("Rop.AutoReload"_lc, &autoCheckFileChanges)) {
+			if (autoCheckFileChanges) {
+				needsReload = true;
+			}
+		}
+
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Rop.ReloadCustomInjects"_lc).x + 20.0f);
+		if (ImGui::Button("Rop.ReloadCustomInjects"_lc)) {
 		if (!isReloading.load() && !isShuttingDown.load()) {
 			std::string currentFilePath = ThemeManager::Instance().Settings().injectionFilePath;
 			if (currentFilePath != injectionFilePath) {
@@ -490,21 +494,20 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 
 			AsyncLoadCustomInjections();
 
-			SetFeedback("Rop.CustomInjectReloading"_l, false);
+			SetFeedback("Rop.CustomInjectReloading"_lc, false);
 			show_info = false;
 		}
+		if (isReloading.load()) {
+			ImGui::SameLine();
+			ImGui::TextUnformatted("Rop.Loading"_lc);
+		}
+		}
 	}
-
-	if (isReloading.load()) {
-		ImGui::SameLine();
-		ImGui::TextUnformatted("Rop.Loading"_lc);
-	}
-
-	ImGui::Separator();
+	ImGui::Spacing();
 
 	for (const auto& inj : customInjections) {
 		if (ImGui::CollapsingHeader(inj.name.c_str())) {
-			ImGui::Text("%s:", "Rop.Address"_lc);
+			ImGui::TextUnformatted("Rop.Address"_lc);
 			for (const auto& pair : inj.pairs) {
 				std::string displayAddr = pair.address;
 				if (displayAddr.substr(0, 2) != "0x" && displayAddr.substr(0, 2) != "0X") {
@@ -513,11 +516,12 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 				ImGui::BulletText("%s", displayAddr.c_str());
 			}
 
-			if (ImGui::Button((inj.name + "##inject").c_str())) {
+			ImGui::Spacing();
+			if (ToolUi::AccentButton((inj.name + "##inject").c_str())) {
 				ApplyInjection(inj, show_info, info_msg);
 			}
 
-			ImGui::Separator();
+			ImGui::Spacing();
 		}
 	}
 
@@ -534,9 +538,8 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 	// reach this list.
 	const auto plugin_payloads = casioemu::plugin::PluginPayloads();
 	if (!plugin_payloads.empty()) {
-		ImGui::Separator();
-		ImGui::TextUnformatted("Plugin payloads");
-		ImGui::TextDisabled("Registered by installed inject plugins.");
+		ToolUi::Section("Plugin payloads");
+		ToolUi::Description("Registered by installed inject plugins.");
 		for (const auto& payload : plugin_payloads) {
 			ImGui::PushID(payload.id.c_str());
 			if (ImGui::CollapsingHeader(payload.name.c_str())) {
@@ -580,18 +583,18 @@ void Injector::RenderInjectorTab(InjectorData& inj, int index, bool& show_info, 
 			   (c >= 'A' && c <= 'F');
 	};
 
-	ImGui::TextUnformatted("Rop.InjectAddr"_lc);
+	ToolUi::Field("Address");
+	ImGui::SetNextItemWidth(ImGui::CalcTextSize("00000000").x + 24.0f);
+	ImGui::InputText(("##addr" + std::to_string(index)).c_str(), inj.addr, 10,
+		ImGuiInputTextFlags_CharsHexadecimal);
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(80);
-	ImGui::InputText(("##addr" + std::to_string(index)).c_str(), inj.addr, 10);
-
 	if (ImGui::Button(("Rop.Paste"_l + "##" + std::to_string(index)).c_str())) {
 		if (ImGui::GetClipboardText() != nullptr) {
 			strncpy(inj.data, ImGui::GetClipboardText(), sizeof(inj.data) - 1);
 			inj.data[sizeof(inj.data) - 1] = '\0';
 		}
 	}
-	ImGui::SameLine();
+	ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Rop.Clear"_lc).x + 20.0f);
 	if (ImGui::Button(("Rop.Clear"_l + "##" + std::to_string(index)).c_str())) {
 		memset(inj.data, 0, sizeof(inj.data));
 	}
@@ -603,7 +606,8 @@ void Injector::RenderInjectorTab(InjectorData& inj, int index, bool& show_info, 
 		IM_ARRAYSIZE(inj.data) - 1,
 		ImVec2(-1, ImGui::GetTextLineHeight() * 8));
 
-	if (ImGui::Button(("Rop.Inject"_l + "##" + std::to_string(index)).c_str())) {
+	ImGui::Spacing();
+	if (ToolUi::AccentButton(("Rop.Inject"_l + "##" + std::to_string(index)).c_str())) {
 		auto plc = strtol(inj.addr, 0, 16);
 		size_t i = 0, j = 0;
 		char hex_buf[3];
@@ -635,7 +639,7 @@ void Injector::RenderInjectorTab(InjectorData& inj, int index, bool& show_info, 
 		}
 	exit:
 		char buf[128];
-		snprintf(buf, sizeof(buf), "✔ Injected %zu bytes at 0x%05X", j, (unsigned int)plc);
+		snprintf(buf, sizeof(buf), "Injected %zu bytes at 0x%05X", j, (unsigned int)plc);
 		SetFeedback(buf, false);
 		show_info = false;
 	}
@@ -647,17 +651,18 @@ void Injector::RenderCore() {
 	static MemoryEditor editor;
 	static bool show_info = false;
 	static std::string info_msg;
+	ToolUi::PageScope page("Payload");
 	if (!initialLoadRequested) {
 		initialLoadRequested = true;
 		AsyncLoadCustomInjections();
 	}
 	if (!m_emu || !me_mmu || !n_ram_buffer) {
-		ImGui::TextDisabled("Injector is unavailable until the emulator RAM is ready.");
+		ToolUi::Section("Payload");
+		ToolUi::EmptyState("The injector is unavailable until the emulator RAM is ready.");
 		return;
 	}
 	auto inputbase = m_emu->hardware_id == casioemu::HardwareId::HW_CLASSWIZ_II ? 0x9268 : 0xD180;
-	char* base_addr = n_ram_buffer - casioemu::GetRamBaseAddr(m_emu->hardware_id);
-
+		char* base_addr = n_ram_buffer - casioemu::GetRamBaseAddr(m_emu->hardware_id);
 	// Check if injection file path has changed in settings
 	std::string currentFilePath = ThemeManager::Instance().Settings().injectionFilePath;
 	if (currentFilePath != injectionFilePath) {
@@ -669,104 +674,158 @@ void Injector::RenderCore() {
 		}
 	}
 
-	if (ImGui::BeginTabBar("Rop.TabBar"_lc)) {
-		if (ImGui::BeginTabItem("Rop.XAnMode"_lc)) {
-			ImGui::TextUnformatted("Rop.InputSize"_lc);
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(80);
-			ImGui::InputText("##off", buf, 9);
-			ImGui::SameLine();
-
-			if (ImGui::Button("Rop.InputAn"_lc)) {
-				int off = atoi(buf);
-				if (off > 100) {
-					memset(base_addr + inputbase, 0x31, 100);
-					memset(base_addr + inputbase + 100, 0xa6, 1);
-					memset(base_addr + inputbase + 101, 0x31, off - 100);
+	// A tab bar splits the width evenly and truncates labels in a narrow dock;
+	// a wrapping segmented row keeps every label complete.
+	ToolUi::Section("Payload");
+	static int rop_tab = [] {
+		// Headless verification: open a specific payload tab.
+		if (const char* requested = std::getenv("CASIOEMU_PAYLOAD_TAB"))
+			return std::clamp(std::atoi(requested), 0, 3);
+		return 0;
+	}();
+	{
+		static const char* tab_labels[] = {
+			"Rop.XAnMode"_lc, "Rop.InjectHex"_lc, "Rop.Input"_lc, "Rop.CustomInject"_lc
+		};
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const float row_start = ImGui::GetCursorPosX();
+		const float row_width = ImGui::GetWindowContentRegionMax().x - row_start;
+		float used = 0.0f;
+		for (int i = 0; i < IM_ARRAYSIZE(tab_labels); ++i) {
+			const bool selected = rop_tab == i;
+			const float button_width = ImGui::CalcTextSize(tab_labels[i]).x + style.FramePadding.x * 2.0f;
+			if (i > 0) {
+				if (used + button_width > row_width) {
+					ImGui::NewLine();
+					used = 0.0f;
 				}
 				else {
-					memset(base_addr + inputbase, 0x31, off);
+					ImGui::SameLine();
 				}
-				*(base_addr + inputbase + off) = 0xfd;
-				*(base_addr + inputbase + off + 1) = 0x20;
-				SetFeedback("✔ " + "Rop.AnInputed"_l, false);
-				show_info = false;
 			}
-
-			ImGui::EndTabItem();
+			ImGui::PushStyleColor(ImGuiCol_Button, selected ? ToolUi::Palette().selection : ImVec4(0, 0, 0, 0));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ToolUi::Palette().hover);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ToolUi::Palette().selection);
+			ImGui::PushStyleColor(ImGuiCol_Text, selected ? ToolUi::Palette().foreground : ToolUi::Palette().muted);
+			if (ImGui::Button(tab_labels[i]))
+				rop_tab = i;
+			ImGui::PopStyleColor(4);
+			used += button_width + style.ItemSpacing.x;
 		}
+	}
+	ImGui::Spacing();
 
-		if (ImGui::BeginTabItem("Rop.InjectHex"_lc)) {
-			if (ImGui::Button("Rop.AddInjector"_lc)) {
+	{
+		if (rop_tab == 0) {
+			ToolUi::Section("An input");
+			ToolUi::Description("Fill the answer input area with dummy digits of the requested length.");
+			ImGui::Spacing();
+			{
+				ToolUi::PanelScope panel("##rop_an_panel");
+				ToolUi::Field("Length");
+				ImGui::SetNextItemWidth(ImGui::CalcTextSize("0000").x + 24.0f);
+				ImGui::InputText("##off", buf, 9, ImGuiInputTextFlags_CharsDecimal);
+				ImGui::SameLine();
+				if (ToolUi::AccentButton("Rop.InputAn"_lc)) {
+					int off = atoi(buf);
+					if (off > 100) {
+						memset(base_addr + inputbase, 0x31, 100);
+						memset(base_addr + inputbase + 100, 0xa6, 1);
+						memset(base_addr + inputbase + 101, 0x31, off - 100);
+					}
+					else {
+						memset(base_addr + inputbase, 0x31, off);
+					}
+					*(base_addr + inputbase + off) = 0xfd;
+					*(base_addr + inputbase + off + 1) = 0x20;
+					SetFeedback("Rop.AnInputed"_lc, false);
+					show_info = false;
+				}
+			}
+		}
+		else if (rop_tab == 1) {
+			ToolUi::Section("Hex injection");
+			ToolUi::Description("Write hex bytes to any address. Semicolons start a comment until the end of the line.");
+			ImGui::Spacing();
+			if (ToolUi::AccentButton("Rop.AddInjector"_lc)) {
 				injectors.push_back(InjectorData());
 			}
-
-			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+			ImGui::Spacing();
 			for (size_t i = 0; i < injectors.size(); i++) {
 				ImGui::PushID(static_cast<int>(i));
-
+				ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+				ImGui::BeginChild(("##injector_card" + std::to_string(i)).c_str(), ImVec2(0, 0),
+					ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
 				std::string header = "Rop.InjectorNum"_l + " " + std::to_string(i + 1);
-
 				if (injectors.size() > 1) {
 					if (ImGui::Button(("Rop.RemoveInjector"_l + "##" + std::to_string(i)).c_str())) {
 						injectors.erase(injectors.begin() + i);
+						ImGui::EndChild();
+						ImGui::PopStyleVar();
 						ImGui::PopID();
 						break;
 					}
+					ImGui::SameLine();
 				}
-
-				if (ImGui::CollapsingHeader(header.c_str())) {
-					RenderInjectorTab(injectors[i], i, show_info, info_msg);
-				}
-
+				ImGui::TextUnformatted(header.c_str());
+				RenderInjectorTab(injectors[i], static_cast<int>(i), show_info, info_msg);
+				ImGui::EndChild();
+				ImGui::PopStyleVar();
 				ImGui::PopID();
+				ImGui::Spacing();
 			}
-
-			ImGui::EndTabItem();
 		}
-
-		if (ImGui::BeginTabItem("Rop.Input"_lc)) {
-			ImGui::BeginChild("RopInput");
+		else if (rop_tab == 2) {
+			ToolUi::Section("Input buffer");
+			ToolUi::Description("Edit the raw bytes that Load to Input Area copies into the input region.");
+			ImGui::Spacing();
+			ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+			ImGui::BeginChild("RopInput", ImVec2(0, std::max(160.0f, ImGui::GetContentRegionAvail().y - 80.0f)),
+				ImGuiChildFlags_Border);
 			editor.DrawContents(data_buf, range);
 			ImGui::EndChild();
+			ImGui::PopStyleVar();
 
+			ToolUi::Field("Size");
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-			ImGui::SliderInt("Rop.InputSize"_lc, &range, 64, 1024);
+			ImGui::SliderInt("##range", &range, 64, 1024);
 
-			if (ImGui::Button("Rop.LoadToInputArea"_lc)) {
+			if (ToolUi::AccentButton("Rop.LoadToInputArea"_lc)) {
 				memcpy(base_addr + inputbase, data_buf, range);
-				SetFeedback("✔ " + "Rop.LoadedTip"_l, false);
+				SetFeedback("Rop.LoadedTip"_lc, false);
 				show_info = false;
 			}
 
-			ImGui::EndTabItem();
 		}
-
-		if (ImGui::BeginTabItem("Rop.CustomInject"_lc)) {
+		else if (rop_tab == 3) {
+			ToolUi::Section("Custom injections");
 			RenderCustomInjectTab(show_info, info_msg);
-			ImGui::EndTabItem();
 		}
-
-		ImGui::EndTabBar();
 	}
 
 	if (ImGui::GetTime() - feedback_time < 3.0) {
-		ImGui::Separator();
-		ImGui::PushStyleColor(ImGuiCol_Text, is_feedback_error ? UIHelpers::kColorError : UIHelpers::kColorSuccess);
-		ImGui::TextUnformatted(feedback_msg.c_str());
-		ImGui::PopStyleColor();
+		ImGui::Spacing();
+		{
+			ToolUi::PanelScope panel("##rop_feedback");
+			ToolUi::Status(feedback_msg.c_str(), is_feedback_error ? ToolUi::Palette().error : ToolUi::Palette().success);
+		}
 	}
 
 	if (show_info) {
 		ImGui::OpenPopup("Rop.InfoPopup"_lc);
 	}
 
-	if (ImGui::BeginPopupModal("Rop.InfoPopup"_lc, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-		ImGui::TextUnformatted(info_msg.c_str());
-		if (ImGui::Button("Button.Positive"_lc)) {
-			show_info = false;
-			ImGui::CloseCurrentPopup();
+	{
+		ToolUi::DialogScope dialog("Rop.InfoPopup"_lc, "Injection", 460.0f);
+		if (dialog) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextUnformatted(info_msg.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::Spacing();
+			if (ToolUi::AccentButton("Button.Positive"_lc, ImVec2(120, 0)) || dialog.CloseRequested()) {
+				show_info = false;
+				ImGui::CloseCurrentPopup();
+			}
 		}
-		ImGui::EndPopup();
 	}
 }
