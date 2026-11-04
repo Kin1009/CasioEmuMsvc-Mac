@@ -240,6 +240,8 @@ struct State {
 	};
 	std::vector<ModelChoice> modelChoices;
 	bool modelChoicesLoaded = false;
+	std::string modelChoicesError;
+	std::string modelsOverride;
 	bool restoredSessions = false;
 
 	std::string workspace;
@@ -375,9 +377,45 @@ void SaveLayout() {
 std::string BaseName(const std::string& path);
 
 std::filesystem::path ModelsDirectory() {
-	if (const char* override = std::getenv("CASIOEMU_MODELS_DIR"))
-		return std::filesystem::path(override);
-	return std::filesystem::current_path() / "models";
+	try {
+		if (!g.modelsOverride.empty())
+			return std::filesystem::path(g.modelsOverride);
+		if (const char* override = std::getenv("CASIOEMU_MODELS_DIR")) {
+			std::error_code override_ec;
+			if (std::filesystem::is_directory(override, override_ec))
+				return std::filesystem::path(override);
+		}
+		std::error_code ec;
+		const auto cwd = std::filesystem::current_path(ec);
+		if (!ec) {
+			const auto local = cwd / "models";
+			if (std::filesystem::is_directory(local, ec))
+				return local;
+		}
+		if (const char* base = SDL_GetBasePath()) {
+			const std::filesystem::path executable(base);
+			const std::filesystem::path candidates[] = {
+				executable / "models",
+				executable / ".." / "models",
+				executable / ".." / "Resources" / "models",
+			};
+			for (const auto& candidate : candidates) {
+				std::error_code candidate_ec;
+				if (std::filesystem::is_directory(candidate, candidate_ec))
+					return std::filesystem::weakly_canonical(candidate, candidate_ec);
+			}
+		}
+		if (const char* home = std::getenv("HOME")) {
+			const std::filesystem::path home_models = std::filesystem::path(home) / "models";
+			std::error_code home_ec;
+			if (std::filesystem::is_directory(home_models, home_ec))
+				return home_models;
+		}
+		return {};
+	}
+	catch (...) {
+		return {};
+	}
 }
 
 void SyncTabsFromSessions() {
@@ -434,10 +472,26 @@ void LoadModelChoices() {
 	if (g.modelChoicesLoaded)
 		return;
 	g.modelChoicesLoaded = true;
+	g.modelChoices.clear();
+	g.modelChoicesError.clear();
 	std::error_code ec;
 	const std::filesystem::path models_root = ModelsDirectory();
-	for (const auto& entry : std::filesystem::directory_iterator(models_root, ec)) {
-		if (!entry.is_directory())
+	if (models_root.empty()) {
+		g.modelChoicesError = "The current folder is unavailable. Choose a models folder.";
+		return;
+	}
+	if (!std::filesystem::is_directory(models_root, ec)) {
+		g.modelChoicesError = "Models folder not found: " + models_root.string() + ". Choose a folder.";
+		return;
+	}
+	for (const auto& entry : std::filesystem::directory_iterator(models_root,
+			std::filesystem::directory_options::skip_permission_denied, ec)) {
+		if (ec) {
+			g.modelChoicesError = "Cannot read the models folder: " + ec.message();
+			break;
+		}
+		std::error_code entry_ec;
+		if (!entry.is_directory(entry_ec))
 			continue;
 		const std::string name = entry.path().filename().string();
 		if (name.empty() || name == ".online")
@@ -1001,7 +1055,8 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 	doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
 	if (doc->languageIndex != 0) {
 		const auto record = OriginalRomRecordPath();
-		if (!record.empty() && std::filesystem::is_regular_file(record)) {
+		std::error_code record_ec;
+		if (!record.empty() && std::filesystem::is_regular_file(record, record_ec)) {
 			std::ifstream in(record);
 			std::string path_record;
 			if (std::getline(in, path_record) && !path_record.empty())
@@ -3052,6 +3107,20 @@ void RenderOverlays(const ThemePalette& palette) {
 				g.openModelQuery, sizeof(g.openModelQuery), ImGuiInputTextFlags_EnterReturnsTrue);
 			ImGui::Dummy(ImVec2(0.0f, 4.0f));
 			LoadModelChoices();
+			if (!g.modelChoicesError.empty())
+				ImGui::TextColored(palette.error, "%s", g.modelChoicesError.c_str());
+			if (ImGui::Button("Choose Models Folder...", ImVec2(0, 24))) {
+				SystemDialogs::OpenFolderDialog([](std::filesystem::path folder) {
+					if (folder.empty())
+						return;
+					g.modelsOverride = folder.string();
+					RefreshModelChoices();
+					LoadModelChoices();
+				});
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Import Package...", ImVec2(0, 24)))
+				RequestShellImport();
 			std::string first_match;
 			int shown = 0;
 			ImGui::BeginChild("##open_model_list", ImVec2(0, 0), ImGuiChildFlags_None);
@@ -3071,7 +3140,9 @@ void RenderOverlays(const ThemePalette& palette) {
 					ImGui::SetTooltip("%s\n%s", choice.path.c_str(), choice.type.c_str());
 			}
 			if (shown == 0)
-				ImGui::TextDisabled("No models found in the models folder");
+				ImGui::TextDisabled(g.modelChoicesError.empty()
+					? "No models found in the models folder"
+					: "Choose a folder that contains model directories.");
 			ImGui::EndChild();
 			if (submitted && !first_match.empty())
 				OpenModelAt(first_match);
@@ -3779,6 +3850,15 @@ void Render() {
 		Initialize();
 	if (RenderThemeBackdrop())
 		return;
+	if (std::getenv("CASIOEMU_SHOW_OPEN_MODEL")) {
+		static bool opened_picker = false;
+		if (!opened_picker) {
+			opened_picker = true;
+			RefreshModelChoices();
+			LoadModelChoices();
+			g.openModelOpen = true;
+		}
+	}
 	if (g.lastSessionIndex != session::ActiveIndex() && session::Count() > 0) {
 		g.lastSessionIndex = session::ActiveIndex();
 		RebuildSessionMemoryWindows();
@@ -3917,7 +3997,7 @@ void Render() {
 			editor_created = true;
 			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
 			const std::filesystem::path directory = root && *root
-				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+				? std::filesystem::path(root) : ([] { std::error_code cwd_ec; auto cwd = std::filesystem::current_path(cwd_ec); return cwd_ec ? std::filesystem::path(".") : cwd / ".editor-selftest"; })();
 			std::error_code ec;
 			std::filesystem::create_directories(directory, ec);
 			const auto first = directory / "editor-selftest.cwiz";
@@ -3941,7 +4021,7 @@ void Render() {
 			explorer_ops_checked = true;
 			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
 			const std::filesystem::path directory = root && *root
-				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+				? std::filesystem::path(root) : ([] { std::error_code cwd_ec; auto cwd = std::filesystem::current_path(cwd_ec); return cwd_ec ? std::filesystem::path(".") : cwd / ".editor-selftest"; })();
 			const auto created = directory / "explorer-created.cwiz";
 			const auto renamed = directory / "explorer-renamed.cwiz";
 			std::error_code ec;
@@ -4009,7 +4089,7 @@ void Render() {
 		if (frame == 20) {
 			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
 			const std::filesystem::path directory = root && *root
-				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+				? std::filesystem::path(root) : ([] { std::error_code cwd_ec; auto cwd = std::filesystem::current_path(cwd_ec); return cwd_ec ? std::filesystem::path(".") : cwd / ".editor-selftest"; })();
 			const auto cwiz = directory / "lint-errors.cwiz";
 			const auto wiz = directory / "lint-warnings.wz";
 			{
@@ -4066,7 +4146,7 @@ void Render() {
 			wiz_build_started = true;
 			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
 			const std::filesystem::path directory = root && *root
-				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+				? std::filesystem::path(root) : ([] { std::error_code cwd_ec; auto cwd = std::filesystem::current_path(cwd_ec); return cwd_ec ? std::filesystem::path(".") : cwd / ".editor-selftest"; })();
 			const auto wiz_source = directory / "wiz-build-selftest.wz";
 			{
 				std::ofstream file(wiz_source, std::ios::binary | std::ios::trunc);
