@@ -703,6 +703,7 @@ void ExecuteCommand(const std::string& id) {
 	else if (id == "view.sidebar") ToggleSidebar();
 	else if (id == "view.panel") ToggleBottomPanel();
 	else if (id == "view.tools") ToggleTools();
+	else if (id == "view.calculator") SetCalculatorVisible(!CalculatorVisible());
 	else if (id == "view.terminal") FocusTerminal();
 	else if (id == "settings.open") OpenSettings();
 	else if (id == "build") BuildToolchain(false);
@@ -1020,7 +1021,8 @@ void RenderTitleBar(const ThemePalette& palette) {
 		if (ImGui::BeginPopup("##view_menu")) {
 			if (ImGui::MenuItem("Toggle Sidebar")) ToggleSidebar();
 			if (ImGui::MenuItem("Toggle Panel")) ToggleBottomPanel();
-			if (ImGui::MenuItem("Toggle Calculator Panel")) ToggleTools();
+			if (ImGui::MenuItem("Toggle Tool Dock")) ToggleTools();
+			if (ImGui::MenuItem("Toggle Calculator Panel")) SetCalculatorVisible(!CalculatorVisible());
 			ImGui::Separator();
 			if (ImGui::MenuItem("Welcome")) OpenWelcomeTab();
 			if (ImGui::MenuItem("Command Palette")) OpenCommandPalette();
@@ -2429,7 +2431,8 @@ const std::vector<PaletteCommand>& Commands() {
 		{ "plugin.manager", "Plugins: Open Settings > Plugins", "" },
 		{ "view.sidebar", "View: Toggle Sidebar", "" },
 		{ "view.panel", "View: Toggle Bottom Panel", "" },
-		{ "view.tools", "View: Toggle Calculator Panel", "" },
+		{ "view.tools", "View: Toggle Tool Dock", "" },
+		{ "view.calculator", "View: Toggle Calculator Panel", "" },
 		{ "view.terminal", "Terminal: Focus Terminal", "" },
 		{ "settings.open", "Preferences: Open Settings", "" },
 		{ "session.pause", "Session: Pause / Resume", "" },
