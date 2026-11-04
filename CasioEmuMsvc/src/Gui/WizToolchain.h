@@ -17,5 +17,24 @@
 //                debugger window. There is no separate OS calculator window.
 // ---------------------------------------------------------------------------
 
+namespace casioemu::wizui {
+enum class BuildMode { None, Rom, Cwapp, Rop };
+struct BuildSummary {
+	BuildMode mode = BuildMode::None;
+	bool ready = false;
+	std::string target;
+	std::string source;
+	std::string binPath;
+	std::string asmPath;
+	std::string launcherHex;
+	std::string listing;
+	std::string error;
+	std::string info;
+	size_t size = 0;
+};
+const BuildSummary& GetBuildSummary();
+void ResetBuildSummary();
+} // namespace casioemu::wizui
+
 UIWindow* CreateToolchainWindow();
 UIWindow* CreateCalcScreenWindow();

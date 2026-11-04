@@ -104,6 +104,8 @@ public:
 	virtual bool OpenEditorDocument(const std::string& /*path*/, const std::string& /*text*/) { return false; }
 	virtual void SetEditorTarget(const std::string& /*target*/) {}
 	virtual void SetEditorLanguage(const std::string& /*language*/) {}
+	virtual void SetEditorRopPadding(int /*padding*/) {}
+	virtual bool CopyBuildLauncher() { return false; }
 	virtual void BuildEditorDocument(bool /*run*/) {}
 	virtual void PreprocessEditorDocument() {}
 	virtual void LintEditorDocument() {}

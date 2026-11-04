@@ -281,6 +281,18 @@ public:
 		}
 	}
 
+	void SetEditorRopPadding(int padding) override {
+		rop_pad_ = std::clamp(padding, 0, 4096);
+	}
+
+	bool CopyBuildLauncher() override {
+		if (rop_launcher_hex_.empty())
+			return false;
+		ImGui::SetClipboardText(rop_launcher_hex_.c_str());
+		AddLog(Sev::Note, "launcher copied to clipboard");
+		return true;
+	}
+
 	void SetEditorLanguage(const std::string& language) override {
 		if (language == "wiz")
 			lang_idx_ = 1;
@@ -552,6 +564,8 @@ private:
 		for (const std::string& note : wiz::last_notes())
 			AddLog(Sev::Note, note);
 		ReportStats();
+		PublishBuildSummary(last_build_.cwapp ? casioemu::wizui::BuildMode::Cwapp :
+			casioemu::wizui::BuildMode::Rom, last_build_.rom.size());
 		casioemu::shell::NotifyBuildFinished(true);
 		if (run_after) {
 			if (target == "cwapp" && Is580())
@@ -649,6 +663,8 @@ private:
 		listing += "# launcher: " + rop_launcher_hex_ + "\n" + rop.log;
 		last_asm_listing_ = listing;
 		WriteFile(asm_path_, listing);
+		PublishBuildSummary(casioemu::wizui::BuildMode::Rop, rop_bytes_.size(),
+			wiz::fmt("payload @ %04X, launcher @ %04X", rop_base_, rop_launcher_base_));
 		AddLog(Sev::Note, wiz::fmt("wrote %s", asm_path_.c_str()));
 
 		if (run_after)
@@ -718,6 +734,22 @@ private:
 		editor_.SetErrorMarkers(markers);
 		AddLog(errors ? Sev::Error : (warnings ? Sev::Warning : Sev::Note),
 			   wiz::fmt("lint: %d error(s), %d warning(s), %d note(s)", errors, warnings, notes));
+	}
+
+	void PublishBuildSummary(casioemu::wizui::BuildMode mode, size_t size,
+			const std::string& info = std::string()) {
+		auto& summary = const_cast<casioemu::wizui::BuildSummary&>(casioemu::wizui::GetBuildSummary());
+		summary.mode = mode;
+		summary.ready = true;
+		summary.target = kTargets[target_idx_].label;
+		summary.source = file_name_;
+		summary.binPath = bin_path_;
+		summary.asmPath = asm_path_;
+		summary.launcherHex = rop_launcher_hex_;
+		summary.listing = last_asm_listing_;
+		summary.error.clear();
+		summary.info = info;
+		summary.size = size;
 	}
 
 	void ReportStats() {
@@ -875,6 +907,8 @@ private:
 		}
 
 		stock_rom_ = stock;
+		PublishBuildSummary(casioemu::wizui::BuildMode::Cwapp, report.rom.size(),
+			wiz::fmt("slot %c patched image in session (%s)", "123456789ABC"[patch_slot - 1], name.c_str()));
 		AddLog(Sev::Note, wiz::fmt("patched slot %c (%d bytes) & rebooted%s",
 								  "123456789ABC"[patch_slot - 1], report.code_size,
 								  in_place ? " (original ROM overwritten, backup at .orig)"
@@ -1809,6 +1843,14 @@ private:
 };
 
 }  // namespace
+
+namespace casioemu::wizui {
+namespace {
+BuildSummary g_summary;
+}
+const BuildSummary& GetBuildSummary() { return g_summary; }
+void ResetBuildSummary() { g_summary = BuildSummary{}; }
+} // namespace casioemu::wizui
 
 UIWindow* CreateToolchainWindow() {
 	return new ToolchainWindow();

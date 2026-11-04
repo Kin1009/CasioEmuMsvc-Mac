@@ -3,6 +3,7 @@
 #include "Gui.h"
 #include "Gui/ThemeManager.h"
 #include "Gui/Editors.h"
+#include "Gui/WizToolchain.h"
 #include "Gui/Ui.hpp"
 #include "Gui/ToolUi.hpp"
 #include "Plugin/PluginMan.h"
@@ -113,6 +114,7 @@ struct FileDocument {
 	std::vector<EditorProblem> problems;
 	int targetIndex = 1;
 	int languageIndex = 0;
+	int ropPadding = 0;
 	bool findOpen = false;
 	char findText[128]{};
 };
@@ -355,7 +357,8 @@ void SaveLayout() {
 	data.shell.sidebar.width = static_cast<int>(g.sidebarWidth);
 	data.shell.bottom.visible = g.panelVisible;
 	data.shell.bottom.height = static_cast<int>(g.panelHeight);
-	data.shell.bottom.active = g.panelTab == 0 ? "output" : (g.panelTab == 1 ? "problems" : "terminal");
+	data.shell.bottom.active = g.panelTab == 0 ? "output" :
+		(g.panelTab == 1 ? "problems" : (g.panelTab == 2 ? "terminal" : "wiz"));
 	data.shell.tools.visible = g.toolsVisible;
 	data.shell.tools.width = static_cast<int>(g.toolsWidth);
 	data.shell.calculator.visible = g.calculatorVisible;
@@ -781,6 +784,7 @@ void TransferDocumentToToolchain(FileDocument& doc) {
 	wiz->OpenEditorDocument(doc.path, doc.editor.GetText());
 	wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
 	wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
+	wiz->SetEditorRopPadding(doc.ropPadding);
 }
 
 void RunLintForDocument(FileDocument& doc) {
@@ -1889,6 +1893,8 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		doc.editor.Redo();
 	ImGui::SameLine();
 	ImGui::TextDisabled("Ln %d, Col %d", cursor.mLine + 1, cursor.mColumn + 1);
+	ImGui::SameLine();
+	ImGui::TextDisabled("| File: %s", doc.name.c_str());
 	if (FileDocumentDirty(doc)) {
 		ImGui::SameLine();
 		ImGui::TextColored(palette.warning, "modified");
@@ -1922,6 +1928,12 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			}
 			ImGui::EndCombo();
 		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("ROP pad");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(76.0f);
+		ImGui::InputInt("##editor_rop_pad", &doc.ropPadding, 0, 0);
+		doc.ropPadding = std::clamp(doc.ropPadding, 0, 4096);
 
 		// Row 4: lint and build actions.
 		ImGui::SetCursorPos(ImVec2(8.0f, 90.0f));
@@ -1954,6 +1966,21 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 				wiz->PreprocessEditorDocument();
 			g.panelVisible = true;
 			g.panelTab = 0;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Load Source...")) {
+			SystemDialogs::OpenFileDialog([](std::filesystem::path path) {
+				if (!path.empty())
+					OpenFileInEditor(path);
+			});
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Copy Launcher")) {
+			UIWindow* wiz = FindWindow("Wiz Compiler");
+			if (!wiz || !wiz->CopyBuildLauncher())
+				AppendOutput("[wiz] no ROP launcher yet; build a ROP payload first");
+			else
+				AppendOutput("[wiz] launcher copied to clipboard");
 		}
 	}
 
@@ -2329,6 +2356,63 @@ void RenderProblemsTab(const ThemePalette& palette) {
 	ImGui::EndChild();
 }
 
+void RenderWizOutputTab(const ThemePalette& palette) {
+	ImGui::BeginChild("##wiz_output_body", ImVec2(0, 0), ImGuiChildFlags_None);
+	const auto& summary = casioemu::wizui::GetBuildSummary();
+	if (!summary.ready) {
+		ImGui::Indent(10.0f);
+		ImGui::TextDisabled("No Wiz build yet. Build a Wiz (.wz) or CWiz (.cwiz) source to see its artifact here.");
+		ImGui::Unindent(10.0f);
+		ImGui::EndChild();
+		return;
+	}
+	const char* mode = summary.mode == casioemu::wizui::BuildMode::Rop ? "ROP payload" :
+		(summary.mode == casioemu::wizui::BuildMode::Cwapp ? "CWiz #cwapp" : "ROM");
+	ImGui::Indent(10.0f);
+	ImGui::TextColored(palette.link, "%s", mode);
+	ImGui::SameLine();
+	ImGui::TextDisabled("| %s | %s | %zu bytes", summary.target.c_str(), summary.source.c_str(), summary.size);
+	if (!summary.info.empty())
+		ImGui::TextDisabled("%s", summary.info.c_str());
+	ImGui::Spacing();
+	if (ImGui::Button("Download", ImVec2(110, 26))) {
+		const std::string source = !summary.binPath.empty() ? summary.binPath : summary.asmPath;
+		if (!source.empty()) {
+			const std::string name = std::filesystem::path(source).filename().string();
+			SystemDialogs::SaveFileDialog(name, [source](std::filesystem::path dest) {
+				std::error_code ec;
+				std::filesystem::copy_file(source, dest, std::filesystem::copy_options::overwrite_existing, ec);
+				if (ec)
+					AppendOutput("[wiz] download failed: " + ec.message());
+				else
+					AppendOutput("[wiz] saved " + dest.string());
+			});
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Copy", ImVec2(90, 26))) {
+		std::string text = std::string("Mode: ") + mode + "\nTarget: " + summary.target +
+			"\nSource: " + summary.source + "\nSize: " + std::to_string(summary.size) + " bytes\n";
+		if (!summary.binPath.empty()) text += "Image: " + summary.binPath + "\n";
+		if (!summary.asmPath.empty()) text += "Listing: " + summary.asmPath + "\n";
+		if (!summary.info.empty()) text += "Info: " + summary.info + "\n";
+		if (!summary.launcherHex.empty()) text += "Launcher: " + summary.launcherHex + "\n";
+		if (!summary.listing.empty()) text += "\n" + summary.listing;
+		ImGui::SetClipboardText(text.c_str());
+		g.panelCopyNotice = "Wiz build details copied to the clipboard";
+		g.panelCopyNoticeAt = ImGui::GetTime();
+		AppendOutput("[wiz] copied build details");
+	}
+	if (!summary.binPath.empty())
+		ImGui::TextWrapped("Image: %s", summary.binPath.c_str());
+	if (!summary.asmPath.empty())
+		ImGui::TextWrapped("Listing: %s", summary.asmPath.c_str());
+	if (!summary.launcherHex.empty())
+		ImGui::TextWrapped("Launcher: %s", summary.launcherHex.c_str());
+	ImGui::Unindent(10.0f);
+	ImGui::EndChild();
+}
+
 void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellPanel", pos, size, palette.surface);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -2337,14 +2421,15 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	draw->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x + size.x, pos.y + kPanelHeaderHeight),
 		ImGui::ColorConvertFloat4ToU32(palette.surface));
 
-	const char* tabs[] = { "Output", "Problems", "Terminal" };
-	const bool compact_panel = size.x < 520.0f;
+	const char* tabs[] = { "Output", "Problems", "Terminal", "Wiz Output" };
+	const bool compact_panel = size.x < 620.0f;
 	const float close_width = compact_panel ? 26.0f : 70.0f;
-	const float tabs_limit = pos.x + size.x - close_width - 24.0f;
+	const float tab_pad = compact_panel ? 16.0f : 26.0f;
+	const float tabs_limit = pos.x + size.x - close_width - 8.0f;
 	float x = pos.x + 12.0f;
 	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(tabs_limit, pos.y + kPanelHeaderHeight), true);
-	for (int index = 0; index < 3; ++index) {
-		const float width = TextWidth(tabs[index]) + 26.0f +
+	for (int index = 0; index < 4; ++index) {
+		const float width = TextWidth(tabs[index]) + tab_pad +
 			((index == 1 && !g.problems.empty()) ? 34.0f : 0.0f);
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
 		ImGui::PushID(index);
@@ -2366,7 +2451,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		else if (hovered) {
 			draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(palette.hover));
 		}
-		draw->AddText(ImVec2(min.x + 12.0f, min.y + (kPanelHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f),
+		draw->AddText(ImVec2(min.x + (compact_panel ? 8.0f : 12.0f), min.y + (kPanelHeaderHeight - ImGui::GetTextLineHeight()) * 0.5f),
 			ImGui::ColorConvertFloat4ToU32(g.panelTab == index ? palette.foreground : palette.muted), tabs[index]);
 		if (index == 1 && !g.problems.empty()) {
 			const std::string count = std::to_string(g.problems.size());
@@ -2396,12 +2481,15 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		RenderOutputTab();
 	else if (g.panelTab == 1)
 		RenderProblemsTab(palette);
-	else {
+	else if (g.panelTab == 2) {
 		if (!g.terminalStarted) {
 			g.terminal.Start(g.workspace);
 			g.terminalStarted = true;
 		}
 		g.terminal.Render("##terminal_view", ImGui::GetContentRegionAvail().y, true);
+	}
+	else {
+		RenderWizOutputTab(palette);
 	}
 	ImGui::EndChild();
 
@@ -3113,7 +3201,8 @@ void Initialize() {
 	g.sidebarWidth = static_cast<float>(std::clamp(data.shell.sidebar.width, 200, 600));
 	g.panelVisible = data.shell.bottom.visible;
 	g.panelHeight = static_cast<float>(std::clamp(data.shell.bottom.height, 200, 700));
-	g.panelTab = data.shell.bottom.active == "problems" ? 1 : (data.shell.bottom.active == "terminal" ? 2 : 0);
+	g.panelTab = data.shell.bottom.active == "problems" ? 1 :
+		(data.shell.bottom.active == "terminal" ? 2 : (data.shell.bottom.active == "wiz" ? 3 : 0));
 	g.toolsVisible = data.shell.tools.visible;
 	g.toolsWidth = static_cast<float>(std::clamp(data.shell.tools.width, 240, 800));
 	g.calculatorVisible = data.shell.calculator.visible;
@@ -3902,7 +3991,7 @@ void Render() {
 	}
 
 	if (const char* panel = std::getenv("CASIOEMU_PANEL_TAB"))
-		g.panelTab = std::clamp(std::atoi(panel), 0, 2);
+		g.panelTab = std::clamp(std::atoi(panel), 0, 3);
 	calculator_panel_focused = false;
 	if (std::getenv("CASIOEMU_UI_CONTEXT_MENU")) {
 		static int ctx_frame = 0;
