@@ -1155,6 +1155,50 @@ namespace casioemu {
 			}
 		}
 
+		void RunMassRoundTripTest(const std::filesystem::path& scratch, const std::filesystem::path& report_path) {
+			std::error_code ec;
+			std::filesystem::create_directories(scratch, ec);
+			const std::filesystem::path source = startup::DefaultModelsDirectory();
+			const char* names[] = { "fx-580VN X", "fx-880BTG" };
+			bool all_ok = true;
+			std::ostringstream report;
+			for (int mode = 0; mode < 2; ++mode) {
+				const std::string mode_name = mode == 0 ? "fixed" : "per-model";
+				const auto export_dir = scratch / (mode_name + "-packages");
+				const auto models_dir = scratch / (mode_name + "-models");
+				std::filesystem::remove_all(export_dir, ec);
+				std::filesystem::remove_all(models_dir, ec);
+				std::filesystem::create_directories(export_dir, ec);
+				std::filesystem::create_directories(models_dir, ec);
+				const std::string passwords[] = {
+					mode == 0 ? "roundtrip" : "pass580",
+					mode == 0 ? "roundtrip" : "pass880",
+				};
+				for (int i = 0; i < 2; ++i) {
+					const std::filesystem::path folder = source / names[i];
+					const std::filesystem::path package = export_dir / (sanitize_path(names[i]) + ".package");
+					std::string error;
+					bool ok = ExportPackageForModel(folder, package, passwords[i], error);
+					if (ok) {
+						auto imported = startup::ImportModelPackage(package, models_dir, passwords[i]);
+						ok = imported.ok;
+						error = imported.error;
+					}
+					report << mode_name << " " << names[i] << "=" << (ok ? "PASS" : "FAIL");
+					if (!ok) {
+						all_ok = false;
+						report << " (" << error << ")";
+					}
+					report << "\n";
+				}
+			}
+			std::ofstream out(report_path, std::ios::trunc);
+			if (out) {
+				out << report.str();
+				out << (all_ok ? "RESULT PASS\n" : "RESULT FAIL\n");
+			}
+		}
+
 		void RunImportSelfTest(const std::filesystem::path& package_path, const std::filesystem::path& report_path) {
 			std::error_code ec;
 			if (reload_thread.joinable())
@@ -1451,6 +1495,215 @@ namespace casioemu {
 			return matches_filter && matches_search && matches_rom_kind;
 		}
 
+		bool ExportPackageForModel(const std::filesystem::path& model_folder,
+				const std::filesystem::path& destination, const std::string& password, std::string& error) {
+			try {
+				RomPackage package;
+				package.Load(model_folder);
+				if (!password.empty())
+					package.Encrypt(password);
+				std::error_code ec;
+				std::filesystem::create_directories(destination.parent_path(), ec);
+				std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+				if (!out) {
+					error = "cannot create " + destination.string();
+					return false;
+				}
+				Binary::Write(out, package);
+				return true;
+			}
+			catch (const std::exception& exception) {
+				error = exception.what();
+				return false;
+			}
+		}
+
+		struct ImportEntry {
+			std::filesystem::path path;
+			bool folder = false;
+			bool ok = false;
+			bool skipped = false;
+			std::string status = "Pending";
+			char password[128]{};
+		};
+		struct ExportEntry {
+			int model_index = -1;
+			bool selected = false;
+			std::string status = "Pending";
+			char password[128]{};
+		};
+		bool show_import_dialog = false;
+		bool show_export_dialog = false;
+		std::vector<ImportEntry> import_entries;
+		std::vector<ExportEntry> export_entries;
+		bool import_per_model = false;
+		bool export_per_model = false;
+		char import_password[128]{};
+		char export_password[128]{};
+		char export_destination[512]{};
+		std::string export_manifest;
+		void AddImportPath(const std::filesystem::path& path) {
+			std::error_code ec;
+			if (std::filesystem::is_directory(path, ec)) {
+				for (const auto& entry : std::filesystem::directory_iterator(path,
+						std::filesystem::directory_options::skip_permission_denied, ec)) {
+					if (entry.is_regular_file(ec) && entry.path().extension() == ".package") {
+						ImportEntry item;
+						item.path = entry.path();
+						import_entries.push_back(std::move(item));
+					}
+				}
+			}
+			else if (std::filesystem::is_regular_file(path, ec)) {
+				ImportEntry item;
+				item.path = path;
+				import_entries.push_back(std::move(item));
+			}
+		}
+		void RunImportEntries() {
+			const std::filesystem::path models_dir = startup::DefaultModelsDirectory();
+			for (auto& entry : import_entries) {
+				if (entry.ok || entry.skipped)
+					continue;
+				const std::string password = import_per_model ? entry.password : import_password;
+				auto result = startup::ImportModelPackage(entry.path, models_dir, password);
+				entry.ok = result.ok;
+				entry.status = result.ok ? "Imported " + result.modelName : result.error;
+			}
+			Reload();
+		}
+		void RunExportEntries() {
+			const std::filesystem::path destination(export_destination);
+			if (destination.empty()) {
+				export_manifest = "Choose a destination folder first.";
+				return;
+			}
+			std::error_code ec;
+			std::filesystem::create_directories(destination, ec);
+			std::ofstream manifest(destination / "export-manifest.txt", std::ios::trunc);
+			manifest << "CasioEmuMsvc model export\n";
+			for (auto& entry : export_entries) {
+				if (!entry.selected || entry.model_index < 0 ||
+					entry.model_index >= static_cast<int>(models.size()))
+					continue;
+				const auto& model = models[static_cast<size_t>(entry.model_index)];
+				const std::string password = export_per_model ? entry.password : export_password;
+				const std::string name = sanitize_path(model.name) + ".package";
+				std::string error;
+				const bool ok = ExportPackageForModel(model.path, destination / name, password, error);
+				entry.status = ok ? "Exported " + name : error;
+				manifest << (ok ? "OK " : "FAIL ") << name << "  " << model.path.string()
+					<< (error.empty() ? std::string() : "  " + error) << "\n";
+			}
+			export_manifest = "Manifest: " + (destination / "export-manifest.txt").string();
+		}
+		void RenderMassImportDialog(const plugin::ThemePalette& palette) {
+			if (!show_import_dialog) return;
+			ImGui::OpenPopup("Import Models##mass_import");
+			bool open = true;
+			if (BeginStartupModal(palette, "Import Models##mass_import", "Import Models", &open,
+					ImVec2(760.0f, 560.0f))) {
+				if (ImGui::Button("Add Files...", ImVec2(0, 26))) {
+					SystemDialogs::OpenFileDialog([this](std::filesystem::path path) {
+						if (!path.empty()) AddImportPath(path);
+					});
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Add Folder...", ImVec2(0, 26))) {
+					SystemDialogs::OpenFolderDialog([this](std::filesystem::path path) {
+						if (!path.empty()) AddImportPath(path);
+					});
+				}
+				ImGui::SameLine();
+				ImGui::Checkbox("Password per model", &import_per_model);
+				if (!import_per_model) {
+					ImGui::SetNextItemWidth(260.0f);
+					ImGui::InputTextWithHint("##import_fixed_password", "Fixed password", import_password,
+						sizeof(import_password), ImGuiInputTextFlags_Password);
+				}
+				ImGui::Separator();
+				ImGui::BeginChild("##import_entries", ImVec2(0, 380.0f), ImGuiChildFlags_Border);
+				for (size_t index = 0; index < import_entries.size(); ++index) {
+					auto& entry = import_entries[index];
+					ImGui::PushID(static_cast<int>(index));
+					ImGui::TextUnformatted(entry.path.filename().string().c_str());
+					ImGui::SameLine(360.0f);
+					ImGui::TextDisabled("%s", entry.status.c_str());
+					if (import_per_model) {
+						ImGui::SetNextItemWidth(220.0f);
+						ImGui::InputText("##item_password", entry.password, sizeof(entry.password),
+							ImGuiInputTextFlags_Password);
+						ImGui::SameLine();
+					}
+					if (ImGui::SmallButton("Skip")) entry.skipped = true;
+					ImGui::SameLine();
+					if (ImGui::SmallButton("Retry")) { entry.ok = false; entry.skipped = false; entry.status = "Pending"; }
+					ImGui::PopID();
+				}
+				if (import_entries.empty())
+					ImGui::TextDisabled("No packages selected.");
+				ImGui::EndChild();
+				if (ImGui::Button("Import", ImVec2(120, 26))) RunImportEntries();
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(120, 26))) { show_import_dialog = false; ImGui::CloseCurrentPopup(); }
+				EndStartupModal();
+			}
+			if (!open) show_import_dialog = false;
+		}
+		void RenderMassExportDialog(const plugin::ThemePalette& palette) {
+			if (!show_export_dialog) return;
+			ImGui::OpenPopup("Export Models##mass_export");
+			bool open = true;
+			if (BeginStartupModal(palette, "Export Models##mass_export", "Export Models", &open,
+					ImVec2(760.0f, 580.0f))) {
+				if (export_entries.size() != models.size()) {
+					std::vector<ExportEntry> rebuilt;
+					for (int index = 0; index < static_cast<int>(models.size()); ++index) {
+						ExportEntry entry;
+						entry.model_index = index;
+						rebuilt.push_back(entry);
+					}
+					export_entries = std::move(rebuilt);
+				}
+				if (ImGui::Button("Choose Destination...", ImVec2(0, 26))) {
+					SystemDialogs::OpenFolderDialog([this](std::filesystem::path path) {
+						std::snprintf(export_destination, sizeof(export_destination), "%s", path.string().c_str());
+					});
+				}
+				ImGui::SameLine();
+				ImGui::TextDisabled("%s", export_destination[0] ? export_destination : "(no destination)");
+				ImGui::Checkbox("Password per model", &export_per_model);
+				if (!export_per_model) {
+					ImGui::SetNextItemWidth(260.0f);
+					ImGui::InputTextWithHint("##export_fixed_password", "Fixed password", export_password,
+						sizeof(export_password), ImGuiInputTextFlags_Password);
+				}
+				ImGui::Separator();
+				ImGui::BeginChild("##export_entries", ImVec2(0, 400.0f), ImGuiChildFlags_Border);
+				for (auto& entry : export_entries) {
+					if (entry.model_index < 0 || entry.model_index >= static_cast<int>(models.size())) continue;
+					auto& model = models[static_cast<size_t>(entry.model_index)];
+					ImGui::PushID(entry.model_index);
+					ImGui::Checkbox(model.name.c_str(), &entry.selected);
+					ImGui::SameLine(360.0f);
+					ImGui::TextDisabled("%s", entry.status.c_str());
+					if (export_per_model) {
+						ImGui::SetNextItemWidth(220.0f);
+						ImGui::InputText("##item_password", entry.password, sizeof(entry.password),
+							ImGuiInputTextFlags_Password);
+					}
+					ImGui::PopID();
+				}
+				ImGui::EndChild();
+				if (!export_manifest.empty()) ImGui::TextDisabled("%s", export_manifest.c_str());
+				if (ImGui::Button("Export", ImVec2(120, 26))) RunExportEntries();
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(120, 26))) { show_export_dialog = false; ImGui::CloseCurrentPopup(); }
+				EndStartupModal();
+			}
+			if (!open) show_export_dialog = false;
+		}
+
 		void RenderOnlineModels() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
 			if (show_online_popup) {
@@ -1640,9 +1893,10 @@ namespace casioemu {
 				float width;
 			};
 			const Action actions[] = {
-				{ "Import...", 0, ImGui::CalcTextSize("Import...").x + 20.0f },
-				{ "Refresh", 1, ImGui::CalcTextSize("Refresh").x + 20.0f },
-				{ "Online", 2, ImGui::CalcTextSize("Online").x + 20.0f },
+				{ "Import models...", 0, ImGui::CalcTextSize("Import models...").x + 20.0f },
+				{ "Export models...", 1, ImGui::CalcTextSize("Export models...").x + 20.0f },
+				{ "Refresh", 2, ImGui::CalcTextSize("Refresh").x + 20.0f },
+				{ "Online", 3, ImGui::CalcTextSize("Online").x + 20.0f },
 			};
 			float total = 0.0f;
 			for (const auto& action : actions)
@@ -1662,11 +1916,13 @@ namespace casioemu {
 				ImGui::PopID();
 				if (clicked) {
 					if (action.id == 0) {
-						SystemDialogs::OpenFileDialog([this](std::filesystem::path file) {
-							BeginImportModelPackage(file);
-						});
+						show_import_dialog = true;
 					}
-					else if (action.id == 1)
+					else if (action.id == 1) {
+						export_entries.clear();
+						show_export_dialog = true;
+					}
+					else if (action.id == 2)
 						Reload();
 					else
 						show_online_popup = true;
@@ -1920,6 +2176,14 @@ namespace casioemu {
 
 		void RenderLegacy() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
+			if (std::getenv("CASIOEMU_SHOW_MASS_IMPORT")) {
+				static bool once = false;
+				if (!once) { once = true; show_import_dialog = true; }
+			}
+			if (std::getenv("CASIOEMU_SHOW_MASS_EXPORT")) {
+				static bool once = false;
+				if (!once) { once = true; export_entries.clear(); show_export_dialog = true; }
+			}
 			if (std::getenv("CASIOEMU_STARTUP_SETTINGS")) {
 				static bool opened = false;
 				if (!opened) {
@@ -2049,6 +2313,8 @@ namespace casioemu {
 			}
 			RenderStartupStatus(palette, viewport->Size.x, status_h);
 			RenderOnlineModels();
+			RenderMassImportDialog(palette);
+			RenderMassExportDialog(palette);
 			PollImportTask();
 
 			if (import_password_pending)
@@ -2423,6 +2689,11 @@ StartupSelection sui_loop() {
 	SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
 	windows2 = new std::vector<UIWindow*>();
 	casioemu::StartupUi ui;
+	if (const char* mass = std::getenv("CASIOEMU_MASS_TEST")) {
+		const char* scratch = std::getenv("CASIOEMU_MASS_TMP");
+		if (scratch && *scratch)
+			ui.RunMassRoundTripTest(scratch, mass);
+	}
 	if (const char* report = std::getenv("CASIOEMU_SELFTEST_IMPORT")) {
 		const char* package = std::getenv("CASIOEMU_SELFTEST_PACKAGE");
 		if (package && *package)
