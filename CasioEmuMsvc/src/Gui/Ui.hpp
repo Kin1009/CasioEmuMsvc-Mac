@@ -105,6 +105,7 @@ public:
 	virtual void SetEditorTarget(const std::string& /*target*/) {}
 	virtual void SetEditorLanguage(const std::string& /*language*/) {}
 	virtual void SetEditorRopPadding(int /*padding*/) {}
+	virtual void SetEditorOriginalRom(const std::string& /*path*/) {}
 	virtual bool CopyBuildLauncher() { return false; }
 	virtual void BuildEditorDocument(bool /*run*/) {}
 	virtual void PreprocessEditorDocument() {}

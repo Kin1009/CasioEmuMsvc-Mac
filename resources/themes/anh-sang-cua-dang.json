@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "name": "Ánh sáng của Đảng",
+  "variant": "dark",
+  "image": "anh-sang-cua-dang.jpeg",
+  "tokens": {
+    "colors": {
+      "background": "#8E0B20",
+      "surface": "#7A0819",
+      "surfaceAlt": "#A2122A",
+      "foreground": "#FFF3E6",
+      "muted": "#F0C9C1",
+      "border": "#C8102E",
+      "borderStrong": "#E0455C",
+      "accent": "#FFD166",
+      "accentHover": "#FFE08A",
+      "selection": "#C8102E",
+      "hover": "#A2122A",
+      "error": "#FFB4A2",
+      "warning": "#FFE08A",
+      "success": "#A8E6B0",
+      "link": "#FFE08A",
+      "titleBar": "#6E0615",
+      "activityBar": "#7A0819",
+      "statusBar": "#6E0615",
+      "panel": "#7A0819",
+      "tabActive": "#A2122A",
+      "tabInactive": "#8E0B20"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

@@ -281,6 +281,10 @@ public:
 		}
 	}
 
+	void SetEditorOriginalRom(const std::string& path) override {
+		original_rom_override_ = path;
+	}
+
 	void SetEditorRopPadding(int padding) override {
 		rop_pad_ = std::clamp(padding, 0, 4096);
 	}
@@ -932,7 +936,7 @@ private:
 							  "and run the patched firmware");
 			return;
 		}
-		const std::string stock = StockRomPath();
+		const std::string stock = original_rom_override_.empty() ? StockRomPath() : original_rom_override_;
 		if (stock.empty()) {
 			AddLog(Sev::Error, "this model has no ROM file to replace");
 			return;
@@ -940,7 +944,13 @@ private:
 
 		size_t stock_size = 0;
 		try {
-			stock_size = m_emu->ReadModelResource(stock).size();
+			if (original_rom_override_.empty())
+				stock_size = m_emu->ReadModelResource(stock).size();
+			else {
+				std::ifstream in(stock, std::ios::binary | std::ios::ate);
+				if (in)
+					stock_size = static_cast<size_t>(in.tellg());
+			}
 		} catch (const std::exception&) {
 		}
 		if (stock_size && last_build_.rom.size() > stock_size) {
@@ -1836,6 +1846,7 @@ private:
 	std::string last_build_source_;
 	std::string stock_rom_;
 	std::string stock_rom_path_;
+	std::string original_rom_override_;
 	std::string bin_path_;
 	std::string asm_path_;
 	std::string last_asm_listing_;

@@ -25,6 +25,7 @@
 #include "targets.hpp"
 
 #include <SDL.h>
+#include <SDL_image.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -115,6 +116,9 @@ struct FileDocument {
 	int targetIndex = 1;
 	int languageIndex = 0;
 	int ropPadding = 0;
+	std::string originalRomPath;
+	std::string originalRomStatus;
+	bool originalRomError = false;
 	bool findOpen = false;
 	char findText[128]{};
 };
@@ -785,6 +789,7 @@ void TransferDocumentToToolchain(FileDocument& doc) {
 	wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
 	wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
 	wiz->SetEditorRopPadding(doc.ropPadding);
+	wiz->SetEditorOriginalRom(doc.originalRomPath);
 }
 
 void RunLintForDocument(FileDocument& doc) {
@@ -910,6 +915,49 @@ void SaveFileDocument(FileDocument& doc, const std::string& path) {
 	RunLintForDocument(doc);
 }
 
+std::filesystem::path OriginalRomRecordPath() {
+	if (!m_emu)
+		return {};
+	std::string directory = m_emu->GetModelFilePath("wiz");
+	if (directory.empty())
+		return {};
+	std::error_code ec;
+	std::filesystem::create_directories(directory, ec);
+	return std::filesystem::path(directory) / "original-rom.txt";
+}
+
+void ApplyOriginalRom(FileDocument& doc, const std::filesystem::path& path) {
+	std::error_code ec;
+	if (!std::filesystem::is_regular_file(path, ec)) {
+		doc.originalRomPath.clear();
+		doc.originalRomError = true;
+		doc.originalRomStatus = "Original ROM error: not a file: " + path.string();
+		AppendOutput("[wiz] " + doc.originalRomStatus);
+		return;
+	}
+	const auto size = std::filesystem::file_size(path, ec);
+	if (ec || size == 0) {
+		doc.originalRomPath.clear();
+		doc.originalRomError = true;
+		doc.originalRomStatus = "Original ROM error: cannot read " + path.string();
+		AppendOutput("[wiz] " + doc.originalRomStatus);
+		return;
+	}
+	doc.originalRomPath = path.string();
+	doc.originalRomError = false;
+	doc.originalRomStatus = "Original ROM: " + path.string() + " (" +
+		std::to_string(size) + " bytes) for " + TargetLabelForIndex(doc.targetIndex);
+	AppendOutput("[wiz] loaded original ROM " + path.string());
+	const auto record = OriginalRomRecordPath();
+	if (!record.empty()) {
+		std::ofstream out(record, std::ios::trunc);
+		if (out)
+			out << doc.originalRomPath << "\n";
+	}
+	if (UIWindow* wiz = FindWindow("Wiz Compiler"))
+		wiz->SetEditorOriginalRom(doc.originalRomPath);
+}
+
 void OpenFileInEditor(const std::filesystem::path& path) {
 	if (!WantsEditor(path)) {
 		OpenExternal(path);
@@ -951,6 +999,20 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 	// Pick the target from the live model so a .wz on an fx-880BTG builds for
 	// the 880 chip instead of silently using the 580 default.
 	doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
+	if (doc->languageIndex != 0) {
+		const auto record = OriginalRomRecordPath();
+		if (!record.empty() && std::filesystem::is_regular_file(record)) {
+			std::ifstream in(record);
+			std::string path_record;
+			if (std::getline(in, path_record) && !path_record.empty())
+				ApplyOriginalRom(*doc, path_record);
+		}
+		if (doc->originalRomPath.empty() && m_emu) {
+			const std::string model_rom = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
+			if (!model_rom.empty())
+				ApplyOriginalRom(*doc, model_rom);
+		}
+	}
 	g.files.push_back(std::move(doc));
 	g.activeFile = static_cast<int>(g.files.size()) - 1;
 	g.showWelcome = false;
@@ -1867,7 +1929,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	// Line numbers, word wrap and font size have no editor API in this tree.
 	doc.editor.SetTabSize(std::clamp(SettingsStore::Instance().Data().editor.tabSize, 1, 16));
 	const bool wiz_file = IsWizDocument(doc);
-	const float toolbar_height = (wiz_file ? 146.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
+	const float toolbar_height = (wiz_file ? 226.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
 
 	// Row 1: file actions.
 	ImGui::SetCursorPos(ImVec2(8.0f, 6.0f));
@@ -1982,10 +2044,36 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			else
 				AppendOutput("[wiz] launcher copied to clipboard");
 		}
+
+		// Row 6: original ROM for cwapp patching / ROM-referenced builds.
+		ImGui::SetCursorPos(ImVec2(8.0f, 146.0f));
+		if (ImGui::Button("Load Original ROM")) {
+			std::string candidate;
+			if (m_emu) {
+				candidate = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
+				if (candidate.empty())
+					candidate = m_emu->GetModelFilePath("rom.bin");
+			}
+			std::error_code candidate_ec;
+			if (!candidate.empty() && std::filesystem::is_regular_file(candidate, candidate_ec))
+				ApplyOriginalRom(doc, candidate);
+			else
+				SystemDialogs::OpenFileDialog([&doc](std::filesystem::path path) {
+					if (!path.empty())
+						ApplyOriginalRom(doc, path);
+				});
+		}
+		if (!doc.originalRomStatus.empty()) {
+			ImGui::SetCursorPos(ImVec2(8.0f, 176.0f));
+			ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 4.0f);
+			ImGui::TextColored(doc.originalRomError ? palette.error : palette.muted, "%s",
+				doc.originalRomStatus.c_str());
+			ImGui::PopTextWrapPos();
+		}
 	}
 
 	if (doc.findOpen) {
-		const float find_y = wiz_file ? 146.0f : 62.0f;
+		const float find_y = wiz_file ? 226.0f : 62.0f;
 		ImGui::SetCursorPos(ImVec2(8.0f, find_y));
 		ImGui::SetNextItemWidth(220.0f);
 		if (ImGui::InputTextWithHint("##editor_find", "Find in file", doc.findText, sizeof(doc.findText),
@@ -3629,9 +3717,68 @@ bool WriteLayoutReport(const std::string& path) {
 	return ok;
 }
 
+bool RenderThemeBackdrop() {
+	if (ThemeManager::Instance().CurrentThemeName() != "anh-sang-cua-dang")
+		return false;
+	static SDL_Texture* texture = nullptr;
+	static int image_w = 0;
+	static int image_h = 0;
+	if (!texture) {
+		const char* candidates[] = {
+			"../Resources/themes/anh-sang-cua-dang.jpeg",
+			"Resources/themes/anh-sang-cua-dang.jpeg",
+			"resources/themes/anh-sang-cua-dang.jpeg",
+			"CasioEmuMsvc/resources/themes/anh-sang-cua-dang.jpeg",
+		};
+		for (const char* path : candidates) {
+			SDL_Surface* surface = IMG_Load(path);
+			if (!surface)
+				continue;
+			image_w = surface->w;
+			image_h = surface->h;
+			if (renderer)
+				texture = SDL_CreateTextureFromSurface(renderer, surface);
+			SDL_FreeSurface(surface);
+			if (texture)
+				break;
+		}
+	}
+	const ImGuiViewport* viewport = ImGui::GetMainViewport();
+	const ImVec2 pos = viewport->Pos;
+	const ImVec2 size = viewport->Size;
+	ImDrawList* draw = ImGui::GetForegroundDrawList();
+	if (texture && image_w > 0 && image_h > 0 && size.x > 0 && size.y > 0) {
+		const float window_aspect = size.x / size.y;
+		const float image_aspect = static_cast<float>(image_w) / static_cast<float>(image_h);
+		ImVec2 uv0(0.0f, 0.0f);
+		ImVec2 uv1(1.0f, 1.0f);
+		if (window_aspect > image_aspect) {
+			const float visible = image_aspect / window_aspect;
+			uv0.y = (1.0f - visible) * 0.5f;
+			uv1.y = 1.0f - uv0.y;
+		}
+		else {
+			const float visible = window_aspect / image_aspect;
+			uv0.x = (1.0f - visible) * 0.5f;
+			uv1.x = 1.0f - uv0.x;
+		}
+		draw->AddImage(reinterpret_cast<ImTextureID>(texture), pos,
+			ImVec2(pos.x + size.x, pos.y + size.y), uv0, uv1);
+	}
+	else {
+		draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(0, 0, 0, 255));
+	}
+	ImGuiIO& io = ImGui::GetIO();
+	io.WantCaptureMouse = true;
+	io.WantCaptureKeyboard = true;
+	return true;
+}
+
 void Render() {
 	if (!g.initialized)
 		Initialize();
+	if (RenderThemeBackdrop())
+		return;
 	if (g.lastSessionIndex != session::ActiveIndex() && session::Count() > 0) {
 		g.lastSessionIndex = session::ActiveIndex();
 		RebuildSessionMemoryWindows();
@@ -3830,7 +3977,7 @@ void Render() {
 			if (!std::getenv("CASIOEMU_SHOW_CLOSE_PROMPT"))
 				g.dismissClosePrompt = true;
 		}
-		if (frame == 10) {
+		if (frame == 10 && !std::getenv("CASIOEMU_SELFTEST_NO_SECOND")) {
 			LoadModelChoices();
 			const std::string primary_path = g.tabs.empty() ? std::string() : g.tabs.front().modelPath;
 			for (const auto& choice : g.modelChoices) {
@@ -3934,7 +4081,7 @@ void Render() {
 			if (const char* example = std::getenv("CASIOEMU_SELFTEST_WIZ_EXAMPLE")) {
 				example_build_started = true;
 				OpenFileInEditor(example);
-				RequestBuild(false);
+				RequestBuild(std::getenv("CASIOEMU_SELFTEST_WIZ_RUN") != nullptr);
 			}
 		}
 		if (frame == 60 && example_build_started)
