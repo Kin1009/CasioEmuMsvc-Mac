@@ -1,5 +1,13 @@
 # Repository Instructions
 
+## Git (agents)
+
+- You may create branches/worktrees and push your own work. Push **only your own commits/branch**, never the whole working tree.
+- Stage explicit paths only. Never `git add -A`, `git add .`, or `git commit -a`.
+- Never force-push or rewrite history that you did not create.
+- Do not switch branches in the shared checkout while other agents are working. For parallel branch work, use `git worktree add ../<area> -b <branch>`; otherwise commit your own paths on the current branch.
+- Do not commit generated artifacts, ROMs, `models/`, `temp/`, or files owned by other agents.
+
 - **Never store anything in a temp folder.** No `/tmp`, `/private/tmp`,
   `/private/var/folders`, `TMPDIR`, or tool-default cache paths. All scratch
   output (logs, screenshots, experiments, intermediate files) goes under
