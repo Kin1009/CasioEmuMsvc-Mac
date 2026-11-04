@@ -37,6 +37,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -187,14 +188,27 @@ namespace casioemu {
 		ConstructPeripherals();
 	}
 
-	Chipset::~Chipset() {
+	void Chipset::StopWorkerThreads() {
+		// The LCD worker locks per-Screen history and the process-wide settings
+		// lease. Joining it here (well before static destruction) is what makes
+		// process exit deterministic even when the owning Emulator is leaked by
+		// a session host at shutdown.
+		if (auto* screen = QueryInterface<IScreenFrameProvider>())
+			screen->StopFrameThread();
 		{
 			const std::lock_guard lock(eps_ram_save_thread_mutex);
 			eps_ram_save_thread_stop = true;
 		}
 		eps_ram_save_thread_cv.notify_all();
-		if (eps_ram_save_thread.joinable())
+		if (eps_ram_save_thread.joinable()) {
+			if (eps_ram_save_thread.get_id() == std::this_thread::get_id())
+				std::terminate();
 			eps_ram_save_thread.join();
+		}
+	}
+
+	Chipset::~Chipset() {
+		StopWorkerThreads();
 		PersistEpsRam();
 		DestructPeripherals();
 		if (!IsEpsFamily(emulator.hardware_id) && emulator.hardware_id != HW_TI_MULTI_VIEW) {

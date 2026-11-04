@@ -20,6 +20,15 @@ namespace casioemu {
 		virtual void WriteFrameRgba(uint8_t* out, int r, int g, int b) const = 0;
 		virtual int GetStatusAlphaCount() const = 0;
 		virtual void WriteStatusAlpha(uint8_t* out, int max_len) const = 0;
+		// Stops and joins the provider's LCD update worker, if any. Called from
+		// Emulator::Shutdown()/Chipset::StopWorkerThreads() so no worker can
+		// outlive teardown and touch destroyed history/settings state. Must be
+		// idempotent and must not be called from the worker itself.
+		virtual void StopFrameThread() {}
+		// Monotonic version of the published LCD frame. Presentation code may
+		// skip re-compositing when this did not change. Defaults to "unknown"
+		// so providers without a frame cache are always redrawn.
+		virtual uint64_t FrameVersion() const { return ~static_cast<uint64_t>(0); }
 		virtual ~IScreenFrameProvider() = default;
 	};
 

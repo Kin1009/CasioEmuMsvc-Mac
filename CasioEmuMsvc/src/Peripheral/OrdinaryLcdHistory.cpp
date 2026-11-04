@@ -8,7 +8,21 @@ namespace casioemu::ordinary_lcd_history {
 
 namespace {
 
-std::recursive_mutex settings_mutex;
+// Deliberately immortal. Screen update workers may still be inside
+// TemporalTick()/the legacy tick path while other translation units run their
+// static destructors at process exit. Destroying this mutex there turned a
+// late lock into std::system_error from std::recursive_mutex::lock(), which
+// escapes the worker lambda and terminates the process (SIGABRT).
+//
+// A function-local pointer static is constant-initialized/thread-safe and
+// registers no destructor for the heap mutex, so a worker may lock it at any
+// point during static destruction. Leaking one mutex per process is the price
+// of a teardown-order-independent settings lease.
+std::recursive_mutex& SettingsMutex() noexcept {
+	static std::recursive_mutex* mutex = new std::recursive_mutex();
+	return *mutex;
+}
+
 std::atomic_uint64_t untracked_revision{0};
 std::atomic_uint64_t untracked_writers{0};
 
@@ -20,7 +34,7 @@ uint64_t SteadyNowNs() {
 } // namespace
 
 std::unique_lock<std::recursive_mutex> UntrackedChange::LockSettings() {
-	return std::unique_lock(settings_mutex);
+	return std::unique_lock(SettingsMutex());
 }
 
 void UntrackedChange::BeginChange() noexcept {
@@ -131,6 +145,11 @@ ConsumeResult History::ConsumeUntil(const Cutoff& cutoff, Batch& batch) {
 bool History::Incomplete() const {
 	return incomplete.load(std::memory_order_acquire) ||
 		!UntrackedStableAt(coverage_revision.load(std::memory_order_acquire));
+}
+
+bool History::HasPending() const {
+	std::lock_guard<std::recursive_mutex> lock(mutex);
+	return count != 0 || Incomplete();
 }
 
 void History::InvalidateEpoch() {

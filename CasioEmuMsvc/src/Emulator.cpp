@@ -6,6 +6,7 @@
 #include "ModelConfig.h"
 #include "ModelInfo.h"
 #include "RendererBackend.h"
+#include "Peripheral/Screen.hpp"
 #include <SDL.h>
 #include <cassert>
 #include <chrono>
@@ -22,6 +23,28 @@
 
 namespace casioemu {
 	namespace {
+		// Process-wide, intentionally never reset: a quit request means the whole
+		// application is leaving, not just one of the multi-session emulators.
+		// Trivially destructible, so workers may read it during static teardown.
+		std::atomic<bool> g_process_quit{false};
+
+		bool QuitRequested() noexcept {
+			return g_process_quit.load(std::memory_order_acquire);
+		}
+
+		void RequestProcessQuit() noexcept {
+			g_process_quit.store(true, std::memory_order_release);
+		}
+
+		// Bound the emulator's catch-up burst. The cycle rate is unchanged (the
+		// budget is derived from wall time), but work is sliced into 2 ms quanta
+		// instead of one ~9 ms block per 20 ms, cutting the time the UI thread
+		// and the LCD worker wait for CPU/access_mx.
+		unsigned int SliceTimerInterval(unsigned int interval) {
+			constexpr unsigned int kMaxSliceMs = 2;
+			return interval > kMaxSliceMs ? kMaxSliceMs : interval;
+		}
+
 		unsigned int GetLimitedCyclesPerSecond(int hardware_id) {
 			switch (hardware_id) {
 			// case HW_FX_5800P:
@@ -239,6 +262,8 @@ namespace casioemu {
 		}
 		if (hardware_id == HW_TI_MULTI_VIEW) cycles_per_second = 1000000; // Microsecond scheduling, as in the reference JS.
 		timer_interval = GetTimerInterval(hardware_id);
+		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
+			timer_interval = SliceTimerInterval(timer_interval);
 
 		cycles.Setup(cycles_per_second, timer_interval);
 		chipset.Setup();
@@ -404,6 +429,8 @@ namespace casioemu {
 		}
 		if (hardware_id == HW_TI_MULTI_VIEW) cycles_per_second = 1000000; // Microsecond scheduling, as in the reference JS.
 		timer_interval = GetTimerInterval(hardware_id);
+		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
+			timer_interval = SliceTimerInterval(timer_interval);
 
 		cycles.Setup(cycles_per_second, timer_interval);
 		chipset.Setup();
@@ -534,17 +561,17 @@ namespace casioemu {
 	}
 
 	Emulator::~Emulator() {
+		// Deterministic teardown: stop the control channel, the CPU worker and
+		// every peripheral worker (including the LCD update thread) before the
+		// chipset or any process-wide state they touch is destroyed.
 		ctl::OnShutdown(*this);
+		StopAndJoin();
+
+		// Peripherals own SDL resources (including screen capture and mirror
+		// resources), so destroy them before the renderer they use.
+		delete& chipset;
+
 		if (!headless) {
-			if (tick_thread && tick_thread->joinable())
-				tick_thread->join();
-			delete tick_thread;
-
-			// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
-			// Peripherals own SDL resources (including screen capture and mirror
-			// resources), so destroy them before the renderer they use.
-			delete& chipset;
-
 			if (scaled_interface_texture)
 				SDL_DestroyTexture(scaled_interface_texture);
 			SDL_DestroyTexture(interface_texture);
@@ -552,10 +579,6 @@ namespace casioemu {
 				SDL_FreeSurface(interface_surface);
 			SDL_DestroyRenderer(renderer);
 			SDL_DestroyWindow(window);
-		}
-
-		else {
-			delete& chipset;
 		}
 	}
 
@@ -569,6 +592,7 @@ namespace casioemu {
 	void Emulator::UIEvent(SDL_Event event) {
 		if (headless)
 			return;
+		composite_dirty.store(true, std::memory_order_release);
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 #ifndef CASIOEMU_CORE_WEB
 		if (event.type == SDL_KEYDOWN) {
@@ -616,6 +640,7 @@ namespace casioemu {
 	void Emulator::ModelMouseEvent(int model_x, int model_y, bool down) {
 		if (headless)
 			return;
+		composite_dirty.store(true, std::memory_order_release);
 		SDL_Event event{};
 		event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
 		event.button.type = event.type;
@@ -766,6 +791,14 @@ namespace casioemu {
 		}
 		if (!renderer || !interface_texture || tex_w <= 0 || tex_h <= 0)
 			return;
+		uint64_t frame_version = ~static_cast<uint64_t>(0);
+		if (auto* provider = chipset.QueryInterface<IScreenFrameProvider>())
+			frame_version = provider->FrameVersion();
+		const bool dirty = composite_dirty.exchange(false, std::memory_order_acq_rel);
+		if (!dirty && frame_version != ~static_cast<uint64_t>(0) &&
+			frame_version == last_composite_version &&
+			composite_texture && composite_texture_w == tex_w && composite_texture_h == tex_h)
+			return; // only the LCD/inputs can change the composite; nothing did
 		if (!composite_texture || composite_texture_w != tex_w || composite_texture_h != tex_h) {
 			if (composite_texture)
 				SDL_DestroyTexture(composite_texture);
@@ -810,6 +843,7 @@ namespace casioemu {
 		SDL_RenderSetViewport(renderer, nullptr);
 		SDL_RenderSetClipRect(renderer, nullptr);
 		SDL_RenderSetScale(renderer, 1.0f, 1.0f);
+		last_composite_version = frame_version;
 		return;
 #else
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
@@ -922,6 +956,7 @@ namespace casioemu {
 	}
 
 	void Emulator::WindowResize(int _width, int _height) {
+		composite_dirty.store(true, std::memory_order_release);
 	}
 
 	void Emulator::Tick() {
@@ -929,7 +964,14 @@ namespace casioemu {
 	}
 
 	bool Emulator::Running() {
-		return running;
+		// Process-wide quit request (control channel/test harness). Every
+		// emulator reports stopped so the primary main loop leaves even when a
+		// secondary session happened to own the control channel.
+		return running && !QuitRequested();
+	}
+
+	void Emulator::RequestQuit() {
+		RequestProcessQuit();
 	}
 
 	bool Emulator::GetPaused() {
@@ -942,6 +984,10 @@ namespace casioemu {
 			tick_thread->join();
 		delete tick_thread;
 		tick_thread = nullptr;
+		// Join peripheral workers too: a session host may release this Emulator
+		// at process exit without running its destructor, and a live LCD worker
+		// would then lock process statics during static destruction.
+		chipset.StopWorkerThreads();
 	}
 
 	void Emulator::Shutdown() {
@@ -949,6 +995,10 @@ namespace casioemu {
 
 		ctl::OnShutdown(*this);
 		running = false;
+		// Stop the LCD/screen worker here rather than only in ~Screen: shutdown
+		// is the point where the owning session is going away, and it must be
+		// deterministic even if the Emulator itself is never destroyed.
+		chipset.StopWorkerThreads();
 	}
 
 	void Emulator::ResetToMainMenu() {

@@ -203,6 +203,11 @@ namespace casioemu {
 		void Tick();
 		bool RunEpsFrame(uint32_t idle_timer_cycles = 0);
 		void EmulatorTick();
+		// Stops and joins every worker thread owned by the peripherals or by the
+		// chipset itself (LCD update workers, EPS RAM saver). Called from
+		// Emulator::Shutdown()/StopAndJoin() and from ~Chipset so no thread can
+		// outlive the state it locks or run into process exit.
+		void StopWorkerThreads();
 		void Frame();
 		void UIEvent(SDL_Event event);
 		void SaveStateAll(std::ostream& os);

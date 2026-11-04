@@ -31,6 +31,7 @@
 #include "OrdinaryLcdFrame.hpp"
 #include "ScreenScan.hpp"
 #include "ScreenScanVisual.hpp"
+#include "ScreenWorkerThread.hpp"
 #include "LcdTemporalReplay.hpp"
 #include "Chipset/Chipset.hpp"
 #include "Chipset/ePSCpu.h"
@@ -158,8 +159,16 @@ namespace casioemu {
 		std::unique_ptr<lcd_temporal::ReplaySession> temporal_replay;
 		bool temporal_valid = false;
 		std::chrono::steady_clock::time_point temporal_retry_after{};
-		static constexpr std::chrono::milliseconds kTemporalInterval{2};
+		static constexpr std::chrono::milliseconds kTemporalInterval{8};
 		static constexpr std::chrono::milliseconds kTemporalRecoveryInterval{50};
+		// Published LCD frame. The worker writes the back buffer and flips the
+		// atomic read index; consumers copy the front buffer, so no reader can
+		// observe a half-applied history replay. The version gates the texture
+		// conversion/upload so a static LCD costs no texture work.
+		std::array<std::array<float, 66 * 192>, 2> lcd_frame_buffers{};
+		std::atomic<uint32_t> lcd_frame_read{0};
+		uint32_t lcd_frame_write = 1;
+		std::atomic<uint64_t> lcd_frame_version{0};
 		float position = 0;
 		SDL_Renderer* renderer{};
 		SDL_Texture* interface_texture{};
@@ -172,8 +181,9 @@ namespace casioemu {
 		EpsScreenTemporalState eps_temporal_state;
 		bool eps_lcd_response_active = false;
 		std::chrono::steady_clock::time_point eps_lcd_response_last_tick{};
-		std::atomic_bool screen_thread_running{false};
-		std::thread screen_thread;
+		// Deterministic stop/join owner for the LCD update worker. Running() is
+		// the alive flag TemporalTick checks before taking any lock.
+		ScreenWorkerThread screen_thread;
 		mutable std::mutex screen_state_mutex;
 		mutable std::condition_variable screen_state_ready;
 		mutable std::atomic_uint screen_state_waiters{0};
@@ -251,6 +261,35 @@ namespace casioemu {
 			screen_state_waiters.fetch_sub(1);
 			screen_state_ready.notify_one();
 			return lock;
+		}
+
+		// Caller holds screen_state_mutex. Copies the worker's working alpha
+		// buffer into the back buffer and publishes it atomically. Skips the
+		// version bump when nothing changed so static LCDs stay upload-free.
+		void PublishLcdFrame() {
+			if constexpr (IsEpsFamily(hardware_id)) {
+				std::lock_guard<std::mutex> lock(eps_screen_alpha_mutex);
+				std::copy(eps_screen_ink_alpha.begin(), eps_screen_ink_alpha.end(), screen_ink_alpha);
+			}
+			const uint32_t read_index = lcd_frame_read.load(std::memory_order_acquire);
+			const auto& front = lcd_frame_buffers[read_index];
+			if (std::equal(front.begin(), front.end(), std::begin(screen_ink_alpha)))
+				return;
+			auto& back = lcd_frame_buffers[lcd_frame_write];
+			std::copy(std::begin(screen_ink_alpha), std::end(screen_ink_alpha), back.begin());
+			lcd_frame_read.store(lcd_frame_write, std::memory_order_release);
+			lcd_frame_write ^= 1u;
+			lcd_frame_version.fetch_add(1, std::memory_order_release);
+		}
+
+		// Caller holds screen_state_mutex; returns the front buffer the worker
+		// last published. The buffer is stable until the worker publishes twice.
+		const float* LcdFrameAlpha() const {
+			return lcd_frame_buffers[lcd_frame_read.load(std::memory_order_acquire)].data();
+		}
+
+		uint64_t LcdFrameVersion() const {
+			return lcd_frame_version.load(std::memory_order_acquire);
 		}
 
 		struct LcdResponseTick {
@@ -394,6 +433,12 @@ namespace casioemu {
 				return -1;
 			}
 			else {
+				// The worker owns Screen during the tick, but teardown can be
+				// requested at any time. Never enter TemporalTick (or take the
+				// settings/history locks) once the worker has been told to stop
+				// or the history object has been retired.
+				if (!screen_thread.Running() || !lcd_history.Active())
+					return -1;
 				const auto now = std::chrono::steady_clock::now();
 				{
 					auto settings_lock = ordinary_lcd_history::UntrackedChange::LockSettings();
@@ -619,6 +664,14 @@ namespace casioemu {
 				ti_contrast = 112;
 			}
 		}
+		// Emulator/Chipset teardown hook: join the LCD update worker before the
+		// owning Screen, its history object, or process statics are destroyed.
+		void StopFrameThread() override {
+			StopUpdateThread();
+		}
+		uint64_t FrameVersion() const override {
+			return LcdFrameVersion();
+		}
 		void UpdateFrameAlpha() override {
 #ifdef __EMSCRIPTEN__
 			auto state_lock = LockScreenState();
@@ -655,7 +708,8 @@ namespace casioemu {
 			std::array<float, 66 * 192> alpha_snapshot{};
 			{
 				auto state_lock = LockScreenState();
-				std::copy(std::begin(screen_ink_alpha), std::end(screen_ink_alpha), alpha_snapshot.begin());
+				const float* published = LcdFrameAlpha();
+				std::copy(published, published + alpha_snapshot.size(), alpha_snapshot.begin());
 			}
 			const int width = GetFrameWidth();
 			const int height = GetFrameHeight();
@@ -663,9 +717,13 @@ namespace casioemu {
 				std::fill(out, out + static_cast<size_t>(width) * static_cast<size_t>(height) * 4, 0);
 				return;
 			}
-			for (int y = 0; y < height; ++y) {
-				for (int x = 0; x < width; ++x) {
-					const float alpha = alpha_snapshot[y * 192 + x];
+			const int columns = std::min(width, 192);
+			const int rows = std::min(height, 65);
+			for (int y = 0; y < rows; ++y) {
+				for (int x = 0; x < columns; ++x) {
+					// Row 0 of the shared buffer holds the status sprites; the
+					// LCD pixels start at row 1 (same layout as the renderer).
+					const float alpha = alpha_snapshot[(y + 1) * 192 + x];
 					const int idx = (y * width + x) * 4;
 					out[idx + 0] = static_cast<uint8_t>(std::clamp(r, 0, 255));
 					out[idx + 1] = static_cast<uint8_t>(std::clamp(g, 0, 255));
@@ -684,7 +742,8 @@ namespace casioemu {
 			std::array<float, 66 * 192> alpha_snapshot{};
 			{
 				auto state_lock = LockScreenState();
-				std::copy(std::begin(screen_ink_alpha), std::end(screen_ink_alpha), alpha_snapshot.begin());
+				const float* published = LcdFrameAlpha();
+				std::copy(published, published + alpha_snapshot.size(), alpha_snapshot.begin());
 			}
 			for (int i = 0; i < count; ++i) {
 				out[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(alpha_snapshot[i]), 0, 255));
@@ -1180,38 +1239,61 @@ namespace casioemu {
 	template <HardwareId hardware_id>
 	void Screen<hardware_id>::StartUpdateThread() {
 #if !defined(TEST_BUILD) && !defined(__EMSCRIPTEN__)
-		if (screen_thread.joinable()) {
-			if (screen_thread_running.load(std::memory_order_acquire))
+		if (screen_thread.Joinable()) {
+			if (screen_thread.Running())
 				return;
-			if (screen_thread.get_id() == std::this_thread::get_id())
-				std::terminate();
-			screen_thread.join();
+			screen_thread.Join();
 		}
-		screen_thread_running.store(true, std::memory_order_release);
-		screen_thread = std::thread([this]() {
-			while (screen_thread_running.load(std::memory_order_acquire)) {
+		if constexpr (kCaptureLcdHistory) lcd_history.Activate();
+		screen_thread.Start([this](const std::atomic_bool& running) {
+			bool have_publication = false;
+			while (running.load(std::memory_order_acquire)) {
 				int temporal_status = -1;
 				{
 					std::unique_lock<std::mutex> state_lock(screen_state_mutex);
-					screen_state_ready.wait(state_lock, [this]() {
-						return screen_state_waiters.load() == 0 || !screen_thread_running.load();
+					screen_state_ready.wait(state_lock, [this, &running]() {
+						return screen_state_waiters.load() == 0 || !running.load();
 					});
-					if (!screen_thread_running.load())
+					if (!running.load())
 						break;
-					temporal_status = TemporalTick();
+					if constexpr (kCaptureLcdHistory) {
+						// Skip the replay entirely while the panel is static: the
+						// 8 ms poll then costs a history lock + predicate instead
+						// of a full 12k-pixel blend that cannot change the frame.
+						if (have_publication && !lcd_history.HasPending() &&
+							!lcd_response_reset_requested.load(std::memory_order_acquire)) {
+							temporal_status = 1;
+						}
+						else {
+							temporal_status = TemporalTick();
+						}
+					}
+					else {
+						temporal_status = TemporalTick();
+					}
+					if (!running.load())
+						break;
 					if (temporal_status < 0) {
 						// Settings writers use UntrackedChange. Keep the legacy
 						// renderer on the same synchronization contract.
 						auto settings_lock = ordinary_lcd_history::UntrackedChange::LockSettings();
 						tick();
 					}
+					PublishLcdFrame();
+					if (temporal_status == 1)
+						have_publication = true;
 				}
 				if constexpr (kCaptureLcdHistory) {
 					if (temporal_status >= 0) {
-						if (temporal_status == 1) lcd_history.WaitForWork(kTemporalInterval, screen_thread_running);
+						if (temporal_status == 1) lcd_history.WaitForWork(kTemporalInterval, running);
 						continue;
 					}
 				}
+				// StopUpdateThread() may have run after the state lock was
+				// released. Do not take the settings lease (or delay) once the
+				// worker has been asked to stop.
+				if (!running.load(std::memory_order_acquire))
+					break;
 			if constexpr (IsEpsFamily(hardware_id) || hardware_id == HW_TI_MATH_PRINT) {
 				SDL_Delay(10);
 				}
@@ -1239,18 +1321,18 @@ namespace casioemu {
 	void Screen<hardware_id>::StopUpdateThread() {
 #if !defined(TEST_BUILD) && !defined(__EMSCRIPTEN__)
 		{
+			// Announce the stop while holding the state mutex the worker waits
+			// on. This also waits for an in-flight TemporalTick to return, so the
+			// join below cannot race a settings/history lock.
 			auto state_lock = LockScreenState();
-			screen_thread_running.store(false, std::memory_order_release);
+			screen_thread.RequestStop();
 		}
 		screen_state_ready.notify_one();
 		if constexpr (kCaptureLcdHistory) lcd_history.Wake();
-		if (screen_thread.joinable()) {
-			// Screen destruction is owned by the Emulator/Chipset thread. The
-			// update worker never destroys its owning Screen instance.
-			if (screen_thread.get_id() == std::this_thread::get_id())
-				std::terminate();
-			screen_thread.join();
-		}
+		// Idempotent: safe from Emulator::Shutdown(), Chipset teardown and the
+		// Screen destructor.
+		screen_thread.Join();
+		if constexpr (kCaptureLcdHistory) lcd_history.Deactivate();
 		if constexpr (IsEpsFamily(hardware_id)) {
 			if (emulator.chipset.epscpu)
 				emulator.chipset.epscpu->SetLcdHistoryEnabled(false);
@@ -1943,19 +2025,24 @@ n为行扫描计数，[0xF03B] = ( ( n / ( [0xF036] == 0 ? 64 : [0xF035] ) ) % 2
 	template <HardwareId hardware_id>
 	void Screen<hardware_id>::Frame() {
 		std::array<float, 66 * 192> frame_screen_ink_alpha{};
+		uint64_t frame_version = 0;
 		{
 			auto state_lock = LockScreenState();
 #ifdef __EMSCRIPTEN__
 			tick();
+			PublishLcdFrame();
 #elif defined(TEST_BUILD)
-			if constexpr (IsEpsFamily(hardware_id))
-				tick();
-#endif
 			if constexpr (IsEpsFamily(hardware_id)) {
-				std::lock_guard<std::mutex> lock(eps_screen_alpha_mutex);
-				std::copy(eps_screen_ink_alpha.begin(), eps_screen_ink_alpha.end(), screen_ink_alpha);
+				tick();
+				PublishLcdFrame();
 			}
-			std::copy(std::begin(screen_ink_alpha), std::end(screen_ink_alpha), frame_screen_ink_alpha.begin());
+#endif
+			frame_version = LcdFrameVersion();
+			// Copy the worker's published front buffer: a frame can never mix a
+			// partially replayed row with the previous one.
+			const float* published = LcdFrameAlpha();
+			std::copy(published, published + frame_screen_ink_alpha.size(),
+				frame_screen_ink_alpha.begin());
 		}
 		int screenWidth = 0, screenHeight = 0;
 
@@ -2008,7 +2095,7 @@ n为行扫描计数，[0xF03B] = ( ( n / ( [0xF036] == 0 ? 64 : [0xF035] ) ) % 2
 
 #ifndef CASIOEMU_CORE_WEB
 		if (!segment_lcd)
-			pixel_screen_texture.Render(renderer, lcd_dest, logical_width, logical_height, ink_colour, frame_screen_ink_alpha.data());
+			pixel_screen_texture.Render(renderer, lcd_dest, logical_width, logical_height, ink_colour, frame_screen_ink_alpha.data(), frame_version);
 #endif
 
 #if !defined(__EMSCRIPTEN__) && !defined(CASIOEMU_CORE_WEB)

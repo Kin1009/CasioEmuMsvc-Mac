@@ -70,4 +70,18 @@ if(TARGET CasioEmuMsvc)
         SKIP_RETURN_CODE 77
         TIMEOUT 240
     )
+
+    # Shutdown-lifetime regression: open two sessions, then leave the main loop
+    # while their LCD workers are running. Exit status must stay 0 (no SIGABRT).
+    add_test(NAME screen-exit
+        COMMAND "${CMAKE_SOURCE_DIR}/CasioEmuMsvc/tests/screen-exit-test.sh"
+            "$<TARGET_FILE:CasioEmuMsvc>"
+            "$<TARGET_FILE:casioctl>"
+            "${CASIOCTL_E2E_MODEL}"
+            3
+    )
+    set_tests_properties(screen-exit PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300
+    )
 endif()

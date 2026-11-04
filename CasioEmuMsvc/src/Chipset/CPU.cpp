@@ -404,12 +404,14 @@ namespace casioemu {
 				break;
 		}
 
-		InstructionEventArgs iea{};
-		iea.pc_before = pc_before;
-		iea.pc_after = reg_csr << 16 | reg_pc;
-		RaiseEvent(on_instruction, *this, iea);
-		if (iea.should_break) {
-			emulator.SetPaused(true);
+		if (on_instruction) {
+			InstructionEventArgs iea{};
+			iea.pc_before = pc_before;
+			iea.pc_after = reg_csr << 16 | reg_pc;
+			RaiseEvent(on_instruction, *this, iea);
+			if (iea.should_break) {
+				emulator.SetPaused(true);
+			}
 		}
 		reg_dsr = 0;
 	}

@@ -448,6 +448,29 @@ if(CASIOEMU_BUILD_SETTINGS_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endif()
 
+# --------------------------------------------------- screen worker lifetime test
+# Starts/stops the LCD worker repeatedly, then exits while it is still running
+# and taking the process-wide settings lease. Exercises the shutdown/destruction
+# order that used to abort in std::recursive_mutex::lock() at process exit.
+if(NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+    find_package(Threads REQUIRED)
+    add_executable(casioemu_screen_thread_lifetime
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/screen_thread_lifetime.cpp"
+        "${SOURCE_DIR}/Peripheral/OrdinaryLcdHistory.cpp")
+    target_include_directories(casioemu_screen_thread_lifetime PRIVATE
+        "${SOURCE_DIR}"
+        "${SOURCE_DIR}/Peripheral"
+        "${THIRD_PARTY_DIR}")
+    target_link_libraries(casioemu_screen_thread_lifetime PRIVATE
+        SDL2::SDL2
+        Threads::Threads)
+    set_target_properties(casioemu_screen_thread_lifetime PROPERTIES
+        CXX_STANDARD 20
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    add_test(NAME screen_thread_lifetime COMMAND casioemu_screen_thread_lifetime)
+    set_tests_properties(screen_thread_lifetime PROPERTIES TIMEOUT 120)
+endif()
+
 # ------------------------------------------------------------------ plugin tests
 # plugin_loader_smoke: deterministic, GUI-free coverage for manifest parsing,
 # permission mapping/denial, zip traversal/case/limit hardening, trust history,

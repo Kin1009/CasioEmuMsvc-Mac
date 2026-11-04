@@ -87,7 +87,13 @@ namespace casioemu {
 		std::atomic<uint32_t> capture_background_rgb{0xd6e3d6};
 #endif
 
-		std::thread* tick_thread;
+		std::thread* tick_thread = nullptr;
+
+		// Composite-presentation cache (single-window builds): skip the full
+		// face/keys/LCD redraw when no LCD frame was published and no input or
+		// window event happened since the last render.
+		std::atomic<bool> composite_dirty{true};
+		uint64_t last_composite_version = ~0ull;
 
 		SpriteInfo interface_background;
 		SDL_Rect emu_rect{};
@@ -145,6 +151,9 @@ namespace casioemu {
 		QrCodeCapture qr_code;
 
 		bool Running();
+		// Asynchronous request (control channel/test harness) to leave the main
+		// loop through the normal teardown path. Idempotent.
+		void RequestQuit();
 		void HandleMemoryError();
 		void Shutdown();
 		// Stop the worker thread and join it without destroying the emulator.

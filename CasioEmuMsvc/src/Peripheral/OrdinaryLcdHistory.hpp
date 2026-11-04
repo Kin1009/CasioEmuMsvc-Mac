@@ -184,10 +184,20 @@ public:
 	bool Covers(const Cutoff& cutoff) const;
 	ConsumeResult ConsumeUntil(const Cutoff& cutoff, Batch& batch);
 	bool Incomplete() const;
+	// True when the ring holds events not yet consumed. The LCD worker uses
+	// this to stay asleep when the panel is static instead of replaying an
+	// empty timeline every few milliseconds.
+	bool HasPending() const;
 	void InvalidateEpoch();
 	// Hold Lock across the baseline copy, Reset and CaptureCutoff. Every
 	// producer, including fallback writes, must use that same mutation lease.
 	void Reset();
+	// Set false once the owning LCD worker has been joined (teardown). Temporal
+	// work must not start afterwards. Reactivated when a Screen thread starts
+	// again (power cycle/re-init).
+	void Deactivate() noexcept { active.store(false, std::memory_order_release); }
+	void Activate() noexcept { active.store(true, std::memory_order_release); }
+	bool Active() const noexcept { return active.load(std::memory_order_acquire); }
 
 private:
 	mutable std::recursive_mutex mutex;
@@ -197,6 +207,7 @@ private:
 	size_t count = 0;
 	uint64_t epoch = 1;
 	uint64_t next_seq = 0;
+	std::atomic_bool active{true};
 	std::atomic_bool incomplete{false};
 	std::atomic_uint64_t coverage_revision{UntrackedRevision()};
 };
@@ -208,8 +219,12 @@ struct DisabledHistory {
 	Cutoff CaptureCutoff() const { return {}; }
 	ConsumeResult ConsumeUntil(const Cutoff&, DisabledBatch&) { return {}; }
 	bool Incomplete() const { return false; }
+	bool HasPending() const { return false; }
 	void InvalidateEpoch() {}
 	void Reset() {}
+	void Deactivate() noexcept {}
+	void Activate() noexcept {}
+	bool Active() const noexcept { return false; }
 };
 
 } // namespace casioemu::ordinary_lcd_history

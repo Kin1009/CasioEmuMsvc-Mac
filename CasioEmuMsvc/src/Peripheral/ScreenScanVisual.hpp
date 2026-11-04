@@ -39,9 +39,20 @@ namespace casioemu::screen_scan {
 			screen_scan_curve_valid = true;
 		}
 
-		for (size_t i = 0; i < 64; i++) {
-			screen_scan_alpha[(i + n) % 64] = screen_scan_curve[i];
-		}
+		// A real LCD multiplexes its rows once per refresh period; the eye (and a
+		// 60 Hz display) integrates that wave over the frame. Publishing the
+		// instantaneous wave with a phase that advances at the scan-report rate
+		// aliases into a bright band that visibly crawls down the panel ("moving
+		// lines"/scanline tearing). Present the temporal average instead: the
+		// overall contrast is preserved while every row of a published frame has
+		// the same factor. The phase `n` is still returned because screen_report
+		// (F03B) and the scan state machine must stay cycle-accurate.
+		float average = 0.0f;
+		for (size_t i = 0; i < 64; i++)
+			average += screen_scan_curve[i];
+		average /= 64.0f;
+		for (size_t i = 0; i < 64; i++)
+			screen_scan_alpha[i] = average;
 
 		return n;
 	}

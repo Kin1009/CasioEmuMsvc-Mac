@@ -2,6 +2,7 @@
 
 #include <SDL.h>
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 #include "ModelInfo.h"
@@ -44,12 +45,13 @@ public:
 	~PixelScreenTexture();
 	void Reset();
 	void Render(SDL_Renderer* renderer, const SDL_Rect& dest, int width, int height,
-		const ColourInfo& ink_colour, const float* alpha);
+		const ColourInfo& ink_colour, const float* alpha, uint64_t version);
 private:
 	SDL_Texture* texture = nullptr;
 	int width = 0, height = 0;
 	std::vector<uint8_t> pixels;
-	std::vector<uint8_t> uploaded_pixels;
+	uint64_t uploaded_version = 0;
+	bool has_upload = false;
 };
 #endif
 } // namespace casioemu

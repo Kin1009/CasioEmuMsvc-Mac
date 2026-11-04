@@ -520,6 +520,16 @@ namespace casioctl {
 			return outcome;
 		}
 
+		if (command == "shutdown") {
+			// Leave through the normal main-loop teardown (the same path as a
+			// window close) so shutdown lifetime bugs stay observable in tests.
+			emulator.RequestQuit();
+			Json result = Json::Object();
+			result["quitting"] = true;
+			outcome.result = std::move(result);
+			return outcome;
+		}
+
 		if (command == "status") {
 			IDebugger& debugger = RequireDebugger();
 			Json result = Json::Object();

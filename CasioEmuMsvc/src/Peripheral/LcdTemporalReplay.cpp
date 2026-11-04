@@ -119,6 +119,14 @@ bool AdvancePixels(ReplayState& candidate, std::span<const size_t> pixels, uint6
 	for (const size_t i : pixels) {
 		if (!candidate.active[i])
 			continue;
+		// A settled pixel cannot change, so skip the gain lookup + double-precision
+		// blend. This is the common case once the LCD stops changing (most of the
+		// 12k pixels are fully on/off), and it is safe to advance its timestamp.
+		const double delta = candidate.targets[i] - candidate.alpha[i];
+		if (delta > -0.01 && delta < 0.01) {
+			candidate.alpha_steady_ns[i] = end_ns;
+			continue;
+		}
 		double rise = 0.0, fall = 0.0;
 		if (!LookupGains(candidate, config, candidate.alpha_steady_ns[i], end_ns, rise, fall))
 			return false;
@@ -138,6 +146,11 @@ bool AdvanceAllPixels(ReplayState& candidate, uint64_t end_ns) {
 	for (size_t i = 0; i != kPixelCount; ++i) {
 		if (!candidate.active[i])
 			continue;
+		const double delta = candidate.targets[i] - candidate.alpha[i];
+		if (delta > -0.01 && delta < 0.01) {
+			candidate.alpha_steady_ns[i] = end_ns;
+			continue;
+		}
 		double rise = 0.0, fall = 0.0;
 		if (!LookupGains(candidate, config, candidate.alpha_steady_ns[i], end_ns, rise, fall))
 			return false;

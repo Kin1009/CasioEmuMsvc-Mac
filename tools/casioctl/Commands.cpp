@@ -360,7 +360,7 @@ namespace casioctl {
 
 		if (command == "status" || command == "pause" || command == "resume" || command == "reset" ||
 			command == "regs" || command == "hello" || command == "bt" || command == "vars" ||
-			command == "step-over" || command == "step-out") {
+			command == "step-over" || command == "step-out" || command == "shutdown") {
 			if (!expect(1, command.c_str()))
 				return false;
 			parsed.command = command == "step-over" ? "step.over"
@@ -1584,6 +1584,7 @@ namespace casioctl {
 			"  snapshot export <path> [id] [--subtree] | snapshot import <path>\n"
 			"Protocol:\n"
 			"  hello                            protocol/capability handshake\n"
+			"  shutdown                         leave the main loop and exit the emulator\n"
 			"  help                             this list\n"
 			"  quit | exit                      leave the REPL\n"
 			"\n"
