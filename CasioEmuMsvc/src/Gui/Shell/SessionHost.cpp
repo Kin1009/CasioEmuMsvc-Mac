@@ -3,9 +3,11 @@
 #include "Chipset/Chipset.hpp"
 #include "Emulator.hpp"
 #include "Gui/Ui.hpp"
+#include "Peripheral/Screen.hpp"
 #include "Settings/Settings.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -28,6 +30,11 @@ struct Entry {
 	SDL_Texture* mirror = nullptr;
 	int mirrorWidth = 0;
 	int mirrorHeight = 0;
+	int mirrorAge = 0;
+	uint64_t lastMirrorVersion = ~static_cast<uint64_t>(0);
+	uint64_t mirrorCopies = 0;
+	uint64_t mirrorSkips = 0;
+	double mirrorCopyMs = 0.0;
 	std::vector<uint8_t> readback;
 };
 
@@ -201,6 +208,14 @@ void ShutdownAll() {
 		if (entry.owned)
 			entry.owned.release();
 	}
+	if (std::getenv("CASIOEMU_PERF_MIRROR_LOG")) {
+		for (size_t i = 0; i < g_entries.size(); ++i) {
+			const auto& entry = g_entries[i];
+			std::fprintf(stderr, "[mirror] session=%zu copies=%llu skips=%llu copy_ms=%.2f\n",
+				i, static_cast<unsigned long long>(entry.mirrorCopies),
+				static_cast<unsigned long long>(entry.mirrorSkips), entry.mirrorCopyMs);
+		}
+	}
 	g_entries.clear();
 	g_active = 0;
 	// Never leave the debugger globals pointing at a destroyed secondary.
@@ -275,6 +290,22 @@ void PrepareActiveFrame() {
 #ifdef SINGLE_WINDOW
 	if (entry.primary || !g_mainRenderer)
 		return;
+	// The LCD publishes a monotonic frame version.  Secondary sessions used to
+	// read back and upload their whole composite every displayed frame; skip
+	// that work while the frame is unchanged, with a periodic safety refresh
+	// for non-LCD state (key highlights/status sprites).
+	uint64_t frame_version = ~static_cast<uint64_t>(0);
+	if (auto* provider = entry.emulator->chipset.QueryInterface<casioemu::IScreenFrameProvider>())
+		frame_version = provider->FrameVersion();
+	++entry.mirrorAge;
+	static const bool always_copy = std::getenv("CASIOEMU_PERF_MIRROR_ALWAYS") != nullptr;
+	if (!always_copy && entry.mirror && frame_version != ~static_cast<uint64_t>(0) &&
+		frame_version == entry.lastMirrorVersion && entry.mirrorAge < 20) {
+		++entry.mirrorSkips;
+		return;
+	}
+	entry.mirrorAge = 0;
+	entry.lastMirrorVersion = frame_version;
 	SDL_Texture* composite = entry.emulator->GetCompositeTexture();
 	if (!composite)
 		return;
@@ -296,10 +327,20 @@ void PrepareActiveFrame() {
 	SDL_Renderer* source = entry.emulator->GetRenderer();
 	if (!source)
 		return;
+	const auto mirror_started = std::chrono::steady_clock::now();
 	SDL_SetRenderTarget(source, composite);
 	SDL_RenderReadPixels(source, nullptr, SDL_PIXELFORMAT_RGBA32, entry.readback.data(), width * 4);
 	SDL_SetRenderTarget(source, nullptr);
 	SDL_UpdateTexture(entry.mirror, nullptr, entry.readback.data(), width * 4);
+	entry.mirrorCopyMs += std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - mirror_started).count();
+	++entry.mirrorCopies;
+	if (std::getenv("CASIOEMU_PERF_MIRROR_LOG") && entry.mirrorCopies % 30 == 1) {
+		std::fprintf(stderr, "[mirror-live] copies=%llu skips=%llu copy_ms=%.2f\n",
+			static_cast<unsigned long long>(entry.mirrorCopies),
+			static_cast<unsigned long long>(entry.mirrorSkips), entry.mirrorCopyMs);
+		}
+		
 #endif
 }
 

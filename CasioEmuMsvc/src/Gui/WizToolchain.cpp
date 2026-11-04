@@ -189,7 +189,7 @@ const TargetChoice kTargets[] = {
 
 const char* kLanguages[] = {"Auto (by file name)", "Wiz (.wz)", "CWiz (.cwiz)"};
 
-const char* kSampleSource =
+const char* kSampleCwiz =
 	"// CWiz - the C-syntax language of the Wiz toolchain. Build it here, then\n"
 	"// press \"Build & Run\" to load the image into the model that is running.\n"
 	"// See the Wiz repository, docs/GUIDE.md, for the language reference.\n"
@@ -205,6 +205,20 @@ const char* kSampleSource =
 	"        delay(2);\n"
 	"    }\n"
 	"}\n";
+
+const char* kSampleWiz =
+	"# Wiz - the original compact language of the toolchain.\n"
+	"# Build this here, then press \"Build & Run\" to load it into the model.\n"
+	"# See the Wiz repository, docs/GUIDE.md, for the language reference.\n"
+	"\n"
+	"x = 10\n"
+	"\n"
+	"def main():\n"
+	"    clear()\n"
+	"    print(4, 4, \"Hello from Wiz\")\n"
+	"    print(4, 16, \"x =\", x)\n"
+	"    while True:\n"
+	"        delay(2)\n";
 
 enum class Sev { Error, Warning, Note };
 
@@ -243,7 +257,7 @@ public:
 		flags |= ImGuiWindowFlags_MenuBar;
 		std::snprintf(file_name_, sizeof(file_name_), "%s", "program.cwiz");
 		editor_.SetLanguageDefinition(TextEditor::LanguageDefinition::CPlusPlus());
-		editor_.SetText(kSampleSource);
+		editor_.SetText(kSampleCwiz);
 		AddLog(Sev::Note, "Wiz toolchain " WIZ_VERSION " - see the Wiz repository for the language reference.");
 	}
 
@@ -1120,8 +1134,16 @@ private:
 		if (!ImGui::BeginMenuBar())
 			return;
 		if (ImGui::BeginMenu("File")) {
-			if (ImGui::MenuItem("New / sample", nullptr, false, true))
-				editor_.SetText(kSampleSource);
+			if (ImGui::MenuItem("New CWiz sample (.cwiz)", nullptr, false, true)) {
+				std::snprintf(file_name_, sizeof file_name_, "%s", "program.cwiz");
+				lang_idx_ = 2;
+				editor_.SetText(kSampleCwiz);
+			}
+			if (ImGui::MenuItem("New Wiz sample (.wz)", nullptr, false, true)) {
+				std::snprintf(file_name_, sizeof file_name_, "%s", "program.wz");
+				lang_idx_ = 1;
+				editor_.SetText(kSampleWiz);
+			}
 			if (ImGui::MenuItem("Save", "Ctrl+S"))
 				SaveSource();
 			if (ImGui::MenuItem("Load", "Ctrl+O"))

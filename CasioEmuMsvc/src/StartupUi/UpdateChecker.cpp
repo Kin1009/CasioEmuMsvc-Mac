@@ -226,18 +226,21 @@ UpdateInfo Check() {
 }
 }
 UpdateChecker::UpdateChecker() : state_(std::make_shared<State>()) {}
-UpdateChecker::~UpdateChecker() = default;
+UpdateChecker::~UpdateChecker() {
+	if (thread_.joinable())
+		thread_.join();
+}
 void UpdateChecker::Start() {
 	if (started_.exchange(true)) return;
 	auto state = state_;
-	std::thread([state]() {
+	thread_ = std::thread([state]() {
 		UpdateInfo result;
 		try { result = Check(); }
 		catch (const std::exception& e) { SDL_Log("[UpdateChecker] Check failed: %s", e.what()); }
 		catch (...) { SDL_Log("[UpdateChecker] Check failed: unknown error"); }
 		{ std::lock_guard lock(state->mutex); state->result = std::move(result); }
 		state->ready.store(true, std::memory_order_release);
-	}).detach();
+	});
 }
 bool UpdateChecker::Ready() const { return state_->ready.load(std::memory_order_acquire); }
 UpdateInfo UpdateChecker::TakeResult() { std::lock_guard lock(state_->mutex); return state_->result; }

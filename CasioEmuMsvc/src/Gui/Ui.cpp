@@ -673,6 +673,18 @@ void gui_cleanup() {
 	}
 #endif
 #endif
+	// Tool windows own worker threads (CodeViewer/Injector) and must run their
+	// joining destructors before ImGui/SDL teardown.  This vector used to be
+	// leaked, leaving those threads and their chipset references alive.
+	for (auto* win : windows)
+		delete win;
+	windows.clear();
+	code_viewer = nullptr;
+	injector = nullptr;
+	membp = nullptr;
+	snapshot_window = nullptr;
+	g_labels.clear();
+
 	ImGui_ImplSDLRenderer2_Shutdown();
 	ImGui_ImplSDL2_Shutdown();
 	ImGui::DestroyContext();

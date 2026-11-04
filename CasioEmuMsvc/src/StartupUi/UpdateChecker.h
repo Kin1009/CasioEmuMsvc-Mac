@@ -26,5 +26,8 @@ private:
 	struct State { std::mutex mutex; UpdateInfo result; std::atomic<bool> ready{false}; };
 	std::shared_ptr<State> state_;
 	std::atomic<bool> started_{false};
+	// Joined in the destructor so a detached curl/JSON worker can never log
+	// through SDL after SDL_Quit.
+	std::thread thread_;
 };
 }

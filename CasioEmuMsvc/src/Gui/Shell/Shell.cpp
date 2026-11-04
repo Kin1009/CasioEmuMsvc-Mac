@@ -13,6 +13,8 @@
 #include "StartupUi/ModelImport.h"
 #include "Ext/MacWindow.h"
 #include "imgui/TextEditor.h"
+#include "imgui/imgui_internal.h"
+#include "imgui/imgui_impl_sdlrenderer2.h"
 #include "build.hpp"
 #include "common.hpp"
 #include "cpre.hpp"
@@ -28,6 +30,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -108,6 +112,29 @@ struct FileDocument {
 	char findText[128]{};
 };
 
+struct MainTab {
+	int kind = 0; // 0 welcome, 1 session, 2 file, 3 settings
+	int index = -1;
+	std::string label;
+	bool active = false;
+	bool dirty = false;
+	bool closable = false;
+	float width = 0.0f;
+};
+
+struct SidebarEntry {
+	std::string path;
+	std::string name;
+	bool is_directory = false;
+};
+
+struct SidebarDirCache {
+	std::vector<SidebarEntry> entries;
+	std::filesystem::file_time_type mtime{};
+	bool valid = false;
+	double checked_at = 0.0;
+};
+
 struct MainTabRect {
 	std::string label;
 	ImVec4 rect{};
@@ -133,6 +160,14 @@ struct State {
 	std::string lastActiveKey;
 	int lastToolIndex = -1;
 	std::vector<MainTabRect> mainTabRects;
+	std::vector<MainTab> mainTabItems;
+	size_t mainTabSignature = 0;
+	std::vector<std::string> docTabLabels;
+	std::vector<float> docTabWidths;
+	size_t docTabSignature = 0;
+	std::map<std::string, SidebarDirCache> sidebarCache;
+	int sidebarScanCount = 0;
+	double sidebarScanMs = 0.0;
 	float chromeTitleCenterY = 0.0f;
 	float chromeMenuCenterY = 0.0f;
 	float chromeActionCenterY = 0.0f;
@@ -157,6 +192,7 @@ struct State {
 	int activeFile = -1;
 	int pendingCloseFile = -1;
 	bool closeConfirmOpen = false;
+	bool dismissClosePrompt = false;
 	std::filesystem::path selectedPath;
 	bool selectedIsDir = false;
 	bool renameOpen = false;
@@ -204,11 +240,22 @@ struct State {
 	size_t pluginLogConsumed = 0;
 	bool lastBuildOk = true;
 	std::string lastBuildStatus = "Ready";
+	std::string panelCopyNotice;
+	double panelCopyNoticeAt = 0.0;
+	std::string perfReportPath;
+	int perfFrameLimit = 240;
+	int perfFrames = 0;
+	double perfTotalMs = 0.0;
+	double perfMinMs = 1.0e9;
+	double perfMaxMs = 0.0;
 
 	bool draggingSidebar = false;
 	bool draggingPanel = false;
 	bool draggingTools = false;
 	bool draggingWindow = false;
+	bool docScrollbarDragging = false;
+	float docScrollbarStartMouse = 0.0f;
+	float docScrollbarStartScroll = 0.0f;
 	ImVec2 dragStartMouse{};
 	ImVec2 dragStartWindow{};
 	double lastLayoutSave = 0.0;
@@ -229,6 +276,55 @@ struct State {
 };
 
 State g;
+
+ImFont* g_welcome_font = nullptr;
+
+bool PerfNoClip() {
+	static const bool disabled = std::getenv("CASIOEMU_PERF_NOCLIP") != nullptr;
+	return disabled;
+}
+
+bool FontInAtlas(ImFont* font) {
+	if (!font)
+		return false;
+	for (ImFont* entry : ImGui::GetIO().Fonts->Fonts) {
+		if (entry == font)
+			return true;
+	}
+	return false;
+}
+
+// The title is the one piece of chrome that deserves a larger face.  It is
+// rasterised from the same high-quality monospace file at 20 px (times the UI
+// scale) with a Retina-aware rasteriser density, while every other run keeps
+// the 15 px UI font.
+void EnsureTitleFont() {
+	if (FontInAtlas(g_welcome_font))
+		return;
+	g_welcome_font = nullptr;
+	ImGuiIO& io = ImGui::GetIO();
+	const float framebuffer_scale = std::max(1.0f, io.DisplayFramebufferScale.x);
+	const float ui_scale = std::max(1.0f,
+		ThemeManager::Instance().GetFontScale() * ThemeManager::Instance().Typography().scale);
+	const std::string path = GetMonospaceFontPath();
+	auto add_face = [&](float logical_size) -> ImFont* {
+		ImFontConfig config;
+		config.PixelSnapH = false;
+		config.OversampleH = 3;
+		config.OversampleV = 2;
+		config.RasterizerDensity = framebuffer_scale;
+		if (!path.empty()) {
+			if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), logical_size * ui_scale,
+					&config, io.Fonts->GetGlyphRangesDefault()))
+				return font;
+		}
+		return io.Fonts->AddFontDefault();
+	};
+	g_welcome_font = add_face(30.0f);
+	ImGui_ImplSDLRenderer2_DestroyFontsTexture();
+	io.Fonts->Build();
+	ImGui_ImplSDLRenderer2_CreateFontsTexture();
+}
 
 ImVec4 WithAlpha(ImVec4 color, float alpha) {
 	color.w = alpha;
@@ -460,15 +556,17 @@ bool IsTextFilePath(const std::filesystem::path& path) {
 	return false;
 }
 
-TextEditor::LanguageDefinition MakeWizLanguage() {
+TextEditor::LanguageDefinition MakeToolchainLanguage(bool cwiz) {
 	TextEditor::LanguageDefinition language;
-	language.mName = "Wiz/CWiz";
+	language.mName = cwiz ? "CWiz" : "Wiz";
 	language.mCaseSensitive = true;
 	language.mAutoIndentation = true;
-	language.mSingleLineComment = "//";
-	language.mCommentStart = "/*";
-	language.mCommentEnd = "*/";
-	language.mPreprocChar = '#';
+	// Wiz uses '#' for line comments and has no preprocessor; CWiz uses C
+	// comments and '#' directives.
+	language.mSingleLineComment = cwiz ? "//" : "#";
+	language.mCommentStart = cwiz ? "/*" : "";
+	language.mCommentEnd = cwiz ? "*/" : "";
+	language.mPreprocChar = cwiz ? '#' : static_cast<char>(0);
 	const char* keywords[] = { "if", "else", "for", "while", "do", "switch", "case", "default",
 		"break", "continue", "return", "struct", "enum", "typedef", "const", "static", "void",
 		"int", "char", "unsigned", "signed", "long", "short", "float", "double", "bool", "true",
@@ -527,6 +625,7 @@ bool MatchesFilter(const std::string& text, const std::string& filter) {
 void SetWorkspace(const std::string& folder) {
 	g.workspace = folder;
 	g.expanded.clear();
+	g.sidebarCache.clear();
 	g.quickFilesDirty = true;
 	auto& data = SettingsStore::Instance().Data();
 	data.workspace.folder = folder;
@@ -588,7 +687,7 @@ void ExecuteCommand(const std::string& id) {
 	else if (id == "model.open") RequestOpenModel();
 	else if (id == "model.import") RequestShellImport();
 	else if (id == "folder.open") RequestOpenFolder();
-	else if (id == "plugin.install") RequestInstallPlugin();
+	else if (id == "plugin.install") OpenSettings();
 	else if (id == "view.sidebar") ToggleSidebar();
 	else if (id == "view.panel") ToggleBottomPanel();
 	else if (id == "view.tools") ToggleTools();
@@ -598,7 +697,7 @@ void ExecuteCommand(const std::string& id) {
 	else if (id == "build.run") BuildToolchain(true);
 	else if (id == "session.pause") { if (m_emu) m_emu->SetPaused(!m_emu->GetPaused()); }
 	else if (id == "session.reset") { if (m_emu) m_emu->ResetToMainMenu(); }
-	else if (id == "plugin.manager") { if (auto* win = FindWindow("Plugin Manager")) { win->BringToFront(); } }
+	else if (id == "plugin.manager") OpenSettings();
 	else if (id == "theme.vscode-dark-plus") ApplyThemeAndSave("vscode-dark-plus");
 	else if (id == "theme.vscode-dark") ApplyThemeAndSave("vscode-dark");
 	else if (id == "theme.midnight-blue") ApplyThemeAndSave("midnight-blue");
@@ -728,8 +827,18 @@ void RunLintForDocument(FileDocument& doc) {
 	}
 }
 
+namespace {
+std::string NormalizeDocumentText(std::string text) {
+	while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+		text.pop_back();
+	return text;
+}
+} // namespace
+
 bool FileDocumentDirty(const FileDocument& doc) {
-	return doc.editor.GetText() != doc.savedText;
+	// TextEditor::GetText() materialises a trailing newline for the virtual
+	// empty last line, so a freshly loaded file would otherwise look dirty.
+	return NormalizeDocumentText(doc.editor.GetText()) != NormalizeDocumentText(doc.savedText);
 }
 
 void EraseFileDocument(int index) {
@@ -797,18 +906,26 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 	}
 	std::ostringstream buffer;
 	buffer << input.rdbuf();
+	std::string ext = path.extension().string();
+	for (char& ch : ext)
+		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+	const bool cwiz_source = ext == ".cwiz";
 	auto doc = std::make_unique<FileDocument>();
 	doc->path = path.string();
 	doc->name = path.filename().string();
 	doc->savedText = buffer.str();
-	doc->editor.SetLanguageDefinition(MakeWizLanguage());
+	doc->editor.SetLanguageDefinition(MakeToolchainLanguage(cwiz_source));
 	doc->editor.SetPalette(ThemeManager::Instance().IsDarkMode()
 		? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
 	doc->paletteSet = true;
 	doc->editor.SetText(doc->savedText);
 	doc->observedText = doc->savedText;
-	std::string ext = path.extension().string();
-	doc->languageIndex = ext == ".wiz" ? 1 : (ext == ".cwiz" ? 2 : 0);
+	// Auto-detection by extension: .wz is Wiz, .cwiz is CWiz.  Auto remains for
+	// untitled/other text documents.
+	doc->languageIndex = ext == ".wz" ? 1 : (ext == ".cwiz" ? 2 : 0);
+	// Pick the target from the live model so a .wz on an fx-880BTG builds for
+	// the 880 chip instead of silently using the 580 default.
+	doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
 	g.files.push_back(std::move(doc));
 	g.activeFile = static_cast<int>(g.files.size()) - 1;
 	g.showWelcome = false;
@@ -837,7 +954,10 @@ void RenderTitleBar(const ThemePalette& palette) {
 	const ImU32 muted = ImGui::ColorConvertFloat4ToU32(palette.muted);
 
 	const float traffic = 82.0f;
+	// The main-window title deliberately uses the same UI face, size and
+	// baseline as the File/View/Session menu buttons.
 	const char* title = "CasioEmuMsvc";
+	const float title_width = TextWidth(title);
 	draw->AddText(ImVec2(pos.x + traffic + 12.0f, text_top), foreground, title);
 	g.chromeTitleCenterY = center_y;
 
@@ -855,7 +975,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 	(void)muted;
 
 	const char* menus[] = { "File", "View", "Session" };
-	float menu_x = pos.x + traffic + 12.0f + TextWidth(title) + 18.0f;
+	float menu_x = pos.x + traffic + 12.0f + title_width + 18.0f;
 	for (const char* menu : menus) {
 		const float w = TextWidth(menu) + 22.0f;
 		ImGui::SetCursorScreenPos(ImVec2(menu_x, control_top));
@@ -980,40 +1100,54 @@ void RenderTabStrip(const ThemePalette& palette) {
 		ImVec2(pos.x + width, pos.y + kTabStripHeight - 1.0f),
 		ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
 
-	struct MainTab {
-		int kind = 0; // 0 welcome, 1 session, 2 file, 3 settings
-		int index = -1;
-		std::string label;
-		bool active = false;
-		bool dirty = false;
-		bool closable = false;
-		float width = 0.0f;
+	// Rebuild the tab model only when its content can have changed; the
+	// per-frame path just reuses the existing vector and strings.
+	size_t signature = 1469598103934665603ull;
+	auto mix = [&](size_t value) {
+		signature ^= value + 0x9e3779b97f4a7c15ull;
+		signature *= 1099511628211ull;
 	};
-	std::vector<MainTab> items;
-	items.push_back({ 0, -1, "Welcome", g.showWelcome && !g.activeSettings && g.activeFile < 0, false, false, 0.0f });
-	for (int index = 0; index < static_cast<int>(g.tabs.size()); ++index) {
-		const SessionTab& tab = g.tabs[static_cast<size_t>(index)];
-		MainTab item;
-		item.kind = 1;
-		item.index = index;
-		item.label = tab.title.empty() ? tab.model : tab.title;
-		item.active = !g.showWelcome && !g.activeSettings && g.activeFile < 0 && index == g.activeTab;
-		item.closable = true;
-		items.push_back(std::move(item));
+	mix(g.tabs.size());
+	mix(g.files.size());
+	mix(g.showWelcome ? 1u : 0u);
+	mix(g.activeSettings ? 1u : 0u);
+	mix(static_cast<size_t>(g.activeTab + 2));
+	mix(static_cast<size_t>(g.activeFile + 2));
+	for (const auto& tab : g.tabs)
+		mix(std::hash<std::string>{}(tab.title.empty() ? tab.model : tab.title));
+	for (const auto& file : g.files) {
+		mix(std::hash<std::string>{}(file->name));
+		mix(FileDocumentDirty(*file) ? 1u : 0u);
 	}
-	for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
-		const FileDocument& doc = *g.files[static_cast<size_t>(index)];
-		MainTab item;
-		item.kind = 2;
-		item.index = index;
-		item.label = doc.name;
-		item.active = !g.activeSettings && g.activeFile == index;
-		item.dirty = FileDocumentDirty(doc);
-		item.closable = true;
-		items.push_back(std::move(item));
+	if (signature != g.mainTabSignature) {
+		g.mainTabSignature = signature;
+		g.mainTabItems.clear();
+		g.mainTabItems.push_back({ 0, -1, "Welcome",
+			g.showWelcome && !g.activeSettings && g.activeFile < 0, false, false, 0.0f });
+		for (int index = 0; index < static_cast<int>(g.tabs.size()); ++index) {
+			const SessionTab& tab = g.tabs[static_cast<size_t>(index)];
+			MainTab item;
+			item.kind = 1;
+			item.index = index;
+			item.label = tab.title.empty() ? tab.model : tab.title;
+			item.active = !g.showWelcome && !g.activeSettings && g.activeFile < 0 && index == g.activeTab;
+			item.closable = true;
+			g.mainTabItems.push_back(std::move(item));
+		}
+		for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
+			const FileDocument& doc = *g.files[static_cast<size_t>(index)];
+			MainTab item;
+			item.kind = 2;
+			item.index = index;
+			item.label = doc.name;
+			item.active = !g.activeSettings && g.activeFile == index;
+			item.dirty = FileDocumentDirty(doc);
+			item.closable = true;
+			g.mainTabItems.push_back(std::move(item));
+		}
+		g.mainTabItems.push_back({ 3, -1, "Settings", g.activeSettings && g.activeFile < 0, false, false, 0.0f });
 	}
-	items.push_back({ 3, -1, "Settings", g.activeSettings && g.activeFile < 0, false, false, 0.0f });
-
+	auto& items = g.mainTabItems;
 	const float plus_size = 24.0f;
 	const float plus_area = plus_size + 18.0f;
 	const float tabs_right = std::max(80.0f, width - plus_area);
@@ -1069,18 +1203,23 @@ void RenderTabStrip(const ThemePalette& palette) {
 	for (int item_index = 0; item_index < static_cast<int>(items.size()); ++item_index) {
 		MainTab& item = items[static_cast<size_t>(item_index)];
 		const float item_x = pos.x + x;
-		const bool visible = item_x >= pos.x - 0.5f && item_x + item.width <= pos.x + tabs_right + 0.5f;
+		const bool visible = item_x + item.width > pos.x && item_x < pos.x + tabs_right;
 		if (visible) {
 			ImGui::SetCursorScreenPos(ImVec2(item_x, pos.y + 2.0f));
 			ImGui::PushID(item_index);
-			const bool clicked = ImGui::InvisibleButton("##main_tab", ImVec2(item.width, kTabStripHeight - 3.0f));
+			ImGui::InvisibleButton("##main_tab", ImVec2(item.width, kTabStripHeight - 3.0f));
 			const bool hovered = ImGui::IsItemHovered();
 			const ImVec2 min = ImGui::GetItemRectMin();
 			const ImVec2 max = ImGui::GetItemRectMax();
-			const bool close_clicked = item.closable && hovered &&
-				ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::GetIO().MousePos.x > max.x - 24.0f;
-			if (clicked || ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
-				if (close_clicked || ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
+			// The X is part of the tab item, so it must be resolved on the same
+			// release event as the tab click.  Using IsMouseClicked (press) here
+			// made the X miss and the tab select instead.
+			const bool left_released = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+			const bool middle_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Middle);
+			const bool over_close = hovered && ImGui::GetIO().MousePos.x > max.x - 24.0f;
+			const bool close_clicked = item.closable && ((left_released && over_close) || middle_clicked);
+			if (left_released || middle_clicked) {
+				if (close_clicked) {
 					if (item.kind == 1)
 						close_session = item.index;
 					else if (item.kind == 2)
@@ -1206,43 +1345,77 @@ void RenderTabStrip(const ThemePalette& palette) {
 	EndFlatPanel();
 }
 
-void RenderSidebarTree(const std::filesystem::path& directory, int depth, const ThemePalette& palette) {
-	if (depth > 12)
-		return;
+const std::vector<SidebarEntry>& SidebarEntries(const std::filesystem::path& directory) {
+	const std::string key = directory.string();
+	SidebarDirCache& cache = g.sidebarCache[key];
+	const double now = ImGui::GetTime();
+	const bool always_rescan = std::getenv("CASIOEMU_PERF_SIDEBAR_ALWAYS") != nullptr;
+	// Stat the directory at most twice a second; an unchanged mtime means the
+	// cached, already-sorted listing is still valid.
+	if (cache.valid && !always_rescan && now - cache.checked_at < 0.5)
+		return cache.entries;
+	cache.checked_at = now;
 	std::error_code ec;
-	std::vector<std::filesystem::directory_entry> entries;
+	const auto mtime = std::filesystem::last_write_time(directory, ec);
+	if (cache.valid && !always_rescan && !ec && mtime == cache.mtime)
+		return cache.entries;
+	const auto started = std::chrono::steady_clock::now();
+	cache.entries.clear();
 	for (const auto& entry : std::filesystem::directory_iterator(
 			 directory, std::filesystem::directory_options::skip_permission_denied, ec)) {
-		entries.push_back(entry);
-	}
-	std::sort(entries.begin(), entries.end(), [](const auto& lhs, const auto& rhs) {
-		if (lhs.is_directory() != rhs.is_directory())
-			return lhs.is_directory();
-		return lhs.path().filename().string() < rhs.path().filename().string();
-	});
-	int count = 0;
-	for (const auto& entry : entries) {
-		if (++count > 400)
-			break;
+		std::error_code entry_ec;
 		const std::string name = entry.path().filename().string();
 		if (name.empty() || name[0] == '.')
 			continue;
-		const std::string key = entry.path().string();
-		const bool is_directory = entry.is_directory(ec);
-		const std::string label = (is_directory ? (g.expanded.count(key) ? "[-] " : "[+] ") : "   ") + name;
+		SidebarEntry item;
+		item.path = entry.path().string();
+		item.name = name;
+		item.is_directory = entry.is_directory(entry_ec);
+		cache.entries.push_back(std::move(item));
+	}
+	std::sort(cache.entries.begin(), cache.entries.end(), [](const SidebarEntry& lhs, const SidebarEntry& rhs) {
+		if (lhs.is_directory != rhs.is_directory)
+			return lhs.is_directory;
+		return lhs.name < rhs.name;
+	});
+	cache.mtime = mtime;
+	cache.valid = true;
+	++g.sidebarScanCount;
+	g.sidebarScanMs += std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - started).count();
+	return cache.entries;
+}
+
+void RenderSidebarTree(const std::filesystem::path& directory, int depth, const ThemePalette& palette) {
+	if (depth > 12)
+		return;
+	int count = 0;
+	for (const SidebarEntry& entry : SidebarEntries(directory)) {
+		if (++count > 400)
+			break;
+		const std::filesystem::path entry_path(entry.path);
+		const std::string& key = entry.path;
+		const std::string& name = entry.name;
+		const bool is_directory = entry.is_directory;
+		char label[512];
+		std::snprintf(label, sizeof(label), "%s%s",
+			is_directory ? (g.expanded.count(key) ? "[-] " : "[+] ") : "   ", name.c_str());
+		// Every row owns a distinct popup ID.  A shared ID let one right-click
+		// stack context entries from several rows and target the wrong path.
+		ImGui::PushID(key.c_str());
 		ImGui::SetCursorPosX(20.0f + depth * 12.0f);
 		ImGui::PushStyleColor(ImGuiCol_Header, palette.selection);
 		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, palette.hover);
 		ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-		const bool row_selected = g.selectedPath == entry.path();
-		const bool clicked = ImGui::Selectable((label + "##" + key).c_str(), row_selected,
+		const bool row_selected = g.selectedPath == entry_path;
+		const bool clicked = ImGui::Selectable(label, row_selected,
 			ImGuiSelectableFlags_AllowDoubleClick, ImVec2(ImGui::GetContentRegionAvail().x - 6.0f, 0.0f));
 		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-			g.selectedPath = entry.path();
+			g.selectedPath = entry_path;
 			g.selectedIsDir = is_directory;
 		}
 		if (clicked) {
-			g.selectedPath = entry.path();
+			g.selectedPath = entry_path;
 			g.selectedIsDir = is_directory;
 			if (is_directory) {
 				if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -1253,13 +1426,13 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 				}
 			}
 			else if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-				OpenFileInEditor(entry.path());
+				OpenFileInEditor(entry_path);
 			}
 		}
 		if (ImGui::BeginPopupContextItem("##explorer_context")) {
-			g.selectedPath = entry.path();
+			g.selectedPath = entry_path;
 			g.selectedIsDir = is_directory;
-			const std::filesystem::path base = is_directory ? entry.path() : entry.path().parent_path();
+			const std::filesystem::path base = is_directory ? entry_path : entry_path.parent_path();
 			if (ImGui::MenuItem("New File")) {
 				g.selectedPath = base;
 				g.selectedIsDir = true;
@@ -1276,26 +1449,27 @@ void RenderSidebarTree(const std::filesystem::path& directory, int depth, const 
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Rename")) {
-				g.selectedPath = entry.path();
+				g.selectedPath = entry_path;
 				std::snprintf(g.entryName, sizeof(g.entryName), "%s", name.c_str());
 				g.renameOpen = true;
 			}
 			if (ImGui::MenuItem("Delete")) {
-				g.selectedPath = entry.path();
+				g.selectedPath = entry_path;
 				g.deleteOpen = true;
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Reveal in Finder")) {
-				std::string uri = "file://" + (is_directory ? entry.path() : entry.path().parent_path()).string();
+				std::string uri = "file://" + (is_directory ? entry_path : entry_path.parent_path()).string();
 				SDL_OpenURL(uri.c_str());
 			}
 			if (ImGui::MenuItem("Copy Path"))
-				ImGui::SetClipboardText(entry.path().string().c_str());
+				ImGui::SetClipboardText(entry_path.string().c_str());
 			ImGui::EndPopup();
 		}
 		ImGui::PopStyleColor(3);
+		ImGui::PopID();
 		if (is_directory && g.expanded.count(key))
-			RenderSidebarTree(entry.path(), depth + 1, palette);
+			RenderSidebarTree(entry_path, depth + 1, palette);
 	}
 }
 
@@ -1331,6 +1505,7 @@ void RenderSidebar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		if (ImGui::Button("Refresh", ImVec2(button_w, 20.0f))) {
 			g.quickFilesDirty = true;
 			g.sidebarError.clear();
+			g.sidebarCache.clear();
 		}
 		ImGui::SetCursorScreenPos(ImVec2(pos.x + 16.0f, pos.y + 90.0f));
 		if (ImGui::Button("Open Folder", ImVec2(button_w, 20.0f)))
@@ -1356,6 +1531,7 @@ void RenderSidebar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		if (ImGui::Button("Refresh", ImVec2(button_w, 20.0f))) {
 			g.quickFilesDirty = true;
 			g.sidebarError.clear();
+			g.sidebarCache.clear();
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Open Folder", ImVec2(button_w, 20.0f)))
@@ -1419,26 +1595,30 @@ void RenderSidebar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 }
 
 void RenderWelcome(const ThemePalette& palette) {
-	ImGui::SetCursorPos(ImVec2(32.0f, 28.0f));
+	const float pad = 32.0f;
+	const float available = std::max(200.0f, ImGui::GetWindowWidth() - pad * 2.0f);
+	if (FontInAtlas(g_welcome_font))
+		ImGui::PushFont(g_welcome_font);
+	ImGui::SetCursorPos(ImVec2(pad, 22.0f));
 	ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-	ImGui::SetWindowFontScale(2.0f);
 	ImGui::TextUnformatted("CasioEmuMsvc");
-	ImGui::SetWindowFontScale(1.0f);
 	ImGui::PopStyleColor();
-	ImGui::SetCursorPosX(33.0f);
-	ImGui::PushTextWrapPos(ImGui::GetWindowWidth() - 32.0f);
-	ImGui::TextWrapped("Casio nX-U8/100 & nX-U16/100 emulator and debugger");
+	if (FontInAtlas(g_welcome_font))
+		ImGui::PopFont();
+	ImGui::SetCursorPosX(pad);
+	ImGui::PushTextWrapPos(pad + available);
+	ImGui::TextDisabled("Casio nX-U8/100 & nX-U16/100 emulator and debugger");
 	ImGui::PopTextWrapPos();
 
-	ImGui::Dummy(ImVec2(0.0f, 12.0f));
-	const float column_width = std::max(240.0f, ImGui::GetContentRegionAvail().x * 0.45f);
-
+	ImGui::Dummy(ImVec2(0.0f, 14.0f));
+	const float column_width = std::min(available, std::max(240.0f, available * 0.6f));
 	auto section = [&](const char* title) {
+		ImGui::SetCursorPosX(pad);
 		ImGui::TextDisabled("%s", title);
 	};
 	auto link = [&](const char* label, const std::string& command) {
-		const ImVec4 link_color = palette.link;
-		ImGui::PushStyleColor(ImGuiCol_Text, link_color);
+		ImGui::SetCursorPosX(pad);
+		ImGui::PushStyleColor(ImGuiCol_Text, palette.link);
 		if (ImGui::Selectable(label, false, ImGuiSelectableFlags_None, ImVec2(column_width, 0.0f)))
 			ExecuteCommand(command);
 		ImGui::PopStyleColor();
@@ -1450,11 +1630,12 @@ void RenderWelcome(const ThemePalette& palette) {
 	section("Recent");
 	const auto& data = SettingsStore::Instance().Data();
 	bool any_recent = false;
+	const float recent_width = std::min(360.0f, available);
 	for (const auto& session : data.sessions) {
 		any_recent = true;
-		ImGui::SetCursorPosX(36.0f);
+		ImGui::SetCursorPosX(pad);
 		if (ImGui::Selectable((std::string("> ") + (session.title.empty() ? session.model : session.title)).c_str(), false,
-				ImGuiSelectableFlags_None, ImVec2(360, 0))) {
+				ImGuiSelectableFlags_None, ImVec2(recent_width, 0.0f))) {
 			if (!session.modelPath.empty())
 				OpenModelAt(session.modelPath);
 			else
@@ -1465,17 +1646,19 @@ void RenderWelcome(const ThemePalette& palette) {
 	}
 	for (const auto& file : data.workspace.recentFiles) {
 		any_recent = true;
-		ImGui::SetCursorPosX(36.0f);
+		ImGui::SetCursorPosX(pad);
 		if (ImGui::Selectable((std::string("> ") + BaseName(file)).c_str(), false,
-				ImGuiSelectableFlags_None, ImVec2(360, 0)))
+				ImGuiSelectableFlags_None, ImVec2(recent_width, 0)))
 			OpenExternal(file);
 	}
-	if (!any_recent)
+	if (!any_recent) {
+		ImGui::SetCursorPosX(pad);
 		ImGui::TextDisabled("No recent sessions or files");
-
+	}
 }
 
 std::vector<UIWindow*> ToolWindows();
+std::string ToolDisplayName(const UIWindow* win);
 void SortToolsByOrder(std::vector<UIWindow*>& tools);
 
 void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
@@ -1520,7 +1703,7 @@ bool IsWizDocument(const FileDocument& doc) {
 	std::string ext = std::filesystem::path(doc.path).extension().string();
 	for (char& ch : ext)
 		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-	return ext == ".wiz" || ext == ".cwiz";
+	return ext == ".wz" || ext == ".cwiz";
 }
 
 void FindInDocument(FileDocument& doc) {
@@ -1702,14 +1885,29 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	// cursor, so a resize cannot shuffle tabs.
 	constexpr float kDocStripHeight = 30.0f;
 	constexpr float kDocTabHeight = 26.0f;
-	std::vector<float> widths;
-	widths.reserve(tools.size());
-	float total_width = 12.0f;
-	for (const auto* tool : tools) {
-		const float tab_width = ImGui::CalcTextSize(tool->name).x + 30.0f + 1.0f;
-		widths.push_back(tab_width);
-		total_width += tab_width;
+	size_t doc_signature = 1469598103934665603ull;
+	auto mix_doc = [&](size_t value) {
+		doc_signature ^= value + 0x9e3779b97f4a7c15ull;
+		doc_signature *= 1099511628211ull;
+	};
+	mix_doc(tools.size());
+	mix_doc(static_cast<size_t>(ImGui::GetFontSize() * 100.0f));
+	for (const auto* tool : tools)
+		mix_doc(std::hash<std::string>{}(ToolDisplayName(tool)));
+	if (doc_signature != g.docTabSignature) {
+		g.docTabSignature = doc_signature;
+		g.docTabLabels.clear();
+		g.docTabWidths.clear();
+		for (const auto* tool : tools) {
+			g.docTabLabels.push_back(ToolDisplayName(tool));
+			g.docTabWidths.push_back(ImGui::CalcTextSize(g.docTabLabels.back().c_str()).x + 31.0f);
+		}
 	}
+	const auto& labels = g.docTabLabels;
+	const auto& widths = g.docTabWidths;
+	float total_width = 12.0f;
+	for (const float tab_width : widths)
+		total_width += tab_width;
 	float max_scroll = std::max(0.0f, total_width - size.x);
 	if (g.lastToolIndex != g.toolIndex || std::fabs(g.lastDocStripWidth - size.x) > 0.5f) {
 		g.lastToolIndex = g.toolIndex;
@@ -1730,14 +1928,16 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	ImGui::BeginChild("##doc_tabs", ImVec2(size.x, kDocStripHeight), ImGuiChildFlags_None,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 	if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f && max_scroll > 0.0f)
-		g.docScroll = std::clamp(g.docScroll - ImGui::GetIO().MouseWheel * 48.0f, 0.0f, max_scroll);
+		g.docScroll = std::clamp(g.docScroll - ImGui::GetIO().MouseWheel * 32.0f, 0.0f, max_scroll);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(pos.x + size.x, pos.y + kDocStripHeight), true);
 	float x = 6.0f - g.docScroll;
 	for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
-		const char* label = tools[index]->name;
+		const std::string& label = labels[static_cast<size_t>(index)];
 		const float tab_width = widths[static_cast<size_t>(index)];
-		const bool visible = x >= -0.5f && x + tab_width <= size.x + 0.5f;
+		// Draw every intersecting tab.  Skipping partially visible tabs made
+		// the strip look like items vanished while scrolling.
+		const bool visible = x + tab_width > 0.0f && x < size.x;
 		if (visible) {
 			ImGui::SetCursorPos(ImVec2(x, 2.0f));
 			ImGui::PushID(index);
@@ -1761,7 +1961,7 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 					ImGui::ColorConvertFloat4ToU32(palette.accent));
 			draw->AddText(ImVec2(min.x + 15.0f, min.y + (kDocTabHeight - ImGui::GetTextLineHeight()) * 0.5f),
 				ImGui::ColorConvertFloat4ToU32(selected ? palette.foreground : WithAlpha(palette.foreground, 0.72f)),
-				label);
+				label.c_str());
 			ImGui::PopID();
 		}
 		x += tab_width;
@@ -1796,11 +1996,18 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			ImGui::ColorConvertFloat4ToU32(palette.muted));
 		ImGui::SetCursorScreenPos(ImVec2(pos.x + track_x, pos.y + bar_y - 2.0f));
 		ImGui::InvisibleButton("##doc_scrollbar", ImVec2(track_w, 6.0f));
-		if (ImGui::IsItemActive()) {
-			const float t = std::clamp((ImGui::GetIO().MousePos.x - pos.x - track_x - thumb_w * 0.5f) /
-				std::max(1.0f, track_w - thumb_w), 0.0f, 1.0f);
-			g.docScroll = t * max_scroll;
+		if (ImGui::IsItemActivated()) {
+			g.docScrollbarDragging = true;
+			g.docScrollbarStartMouse = ImGui::GetIO().MousePos.x;
+			g.docScrollbarStartScroll = g.docScroll;
 		}
+		if (ImGui::IsItemActive() && g.docScrollbarDragging) {
+			const float delta = ImGui::GetIO().MousePos.x - g.docScrollbarStartMouse;
+			const float t = delta / std::max(1.0f, track_w - thumb_w);
+			g.docScroll = std::clamp(g.docScrollbarStartScroll + t * max_scroll, 0.0f, max_scroll);
+		}
+		if (ImGui::IsItemDeactivated())
+			g.docScrollbarDragging = false;
 		if (ImGui::IsItemHovered())
 			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 	}
@@ -1809,12 +2016,11 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 
 	ImGui::SetCursorPos(ImVec2(1.0f, kDocStripHeight + 1.0f));
 	ImGui::BeginChild("##doc_body", ImVec2(size.x - 2.0f, size.y - kDocStripHeight - 2.0f), ImGuiChildFlags_None);
-	ImGui::BeginChild("##doc_body", ImVec2(size.x - 2.0f, size.y - 32.0f), ImGuiChildFlags_None);
 	UIWindow* active = tools[static_cast<size_t>(g.toolIndex)];
 	if (active->open)
 		active->RenderCore();
 	else
-		ImGui::TextDisabled("%s is closed.", active->name);
+		ImGui::TextDisabled("%s is closed.", ToolDisplayName(active).c_str());
 	ImGui::EndChild();
 	EndFlatPanel();
 }
@@ -1856,21 +2062,58 @@ void RenderOutputTab() {
 	ImGui::BeginChild("##output_body", ImVec2(0, 0), ImGuiChildFlags_None);
 	ImGui::Indent(10.0f);
 	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
-	for (const auto& line : g.output) {
-		if (line.severity == 2)
-			ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), "%s", line.text.c_str());
-		else
-			ImGui::TextUnformatted(line.text.c_str());
-	}
-	if (g.output.empty())
+	if (g.output.empty()) {
 		ImGui::TextDisabled("No output yet. Build or run something.");
+	}
+	else if (PerfNoClip()) {
+		for (const auto& line : g.output) {
+			if (line.severity == 2)
+				ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), "%s", line.text.c_str());
+			else
+				ImGui::TextUnformatted(line.text.c_str());
+		}
+	}
+	else {
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(g.output.size()));
+		while (clipper.Step()) {
+			for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+				const OutputLine& line = g.output[static_cast<size_t>(i)];
+				if (line.severity == 2)
+					ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), "%s", line.text.c_str());
+				else
+					ImGui::TextUnformatted(line.text.c_str());
+			}
+		}
+	}
 	if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
 		ImGui::SetScrollHereY(1.0f);
 	ImGui::Unindent(10.0f);
 	ImGui::EndChild();
 }
 
-void RenderProblemsTab() {
+std::string FormatProblemsForClipboard() {
+	if (g.problems.empty())
+		return "No problems.\n";
+	std::string dump;
+	for (const auto& problem : g.problems) {
+		const char* severity = problem.severity >= 2 ? "Error" :
+			(problem.severity == 1 ? "Warning" : "Note");
+		const std::string file = problem.file.empty() ? "(no file)" : problem.file;
+		dump += severity;
+		dump += " ";
+		dump += file;
+		dump += ":" + std::to_string(problem.line) + ":" + std::to_string(problem.column);
+		dump += " [" + (problem.code.empty() ? std::string("-") : problem.code) + "] ";
+		dump += problem.text;
+		if (!problem.hint.empty())
+			dump += "  (" + problem.hint + ")";
+		dump += "\n";
+	}
+	return dump;
+}
+
+void RenderProblemsTab(const ThemePalette& palette) {
 	ImGui::BeginChild("##problems_body", ImVec2(0, 0), ImGuiChildFlags_None);
 	int errors = 0, warnings = 0, notes = 0;
 	for (const auto& problem : g.problems) {
@@ -1880,6 +2123,29 @@ void RenderProblemsTab() {
 	}
 	ImGui::SetCursorPosX(10.0f);
 	ImGui::TextDisabled("%d errors, %d warnings, %d notes", errors, warnings, notes);
+	ImGui::SameLine();
+	const float copy_width = 92.0f;
+	ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 12.0f,
+		ImGui::GetContentRegionMax().x - copy_width - 8.0f));
+	if (ImGui::Button("Copy All", ImVec2(copy_width, 22.0f))) {
+		const std::string dump = FormatProblemsForClipboard();
+		ImGui::SetClipboardText(dump.c_str());
+		g.panelCopyNotice = "Copied " + std::to_string(g.problems.size()) +
+			(g.problems.size() == 1 ? " problem" : " problems") + " to the clipboard";
+		g.panelCopyNoticeAt = ImGui::GetTime();
+		AppendOutput("[problems] " + g.panelCopyNotice);
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Copy all diagnostics in a stable text format");
+	if (!g.panelCopyNotice.empty()) {
+		if (ImGui::GetTime() - g.panelCopyNoticeAt < 4.0) {
+			ImGui::SetCursorPosX(10.0f);
+			ImGui::TextColored(palette.link, "%s", g.panelCopyNotice.c_str());
+		}
+		else {
+			g.panelCopyNotice.clear();
+		}
+	}
 	ImGui::Spacing();
 	auto activate = [](const DiagLine& problem) {
 		int target = -1;
@@ -1909,68 +2175,45 @@ void RenderProblemsTab() {
 		return severity >= 2 ? ImVec4(0.945f, 0.298f, 0.298f, 1.0f)
 			: (severity == 1 ? ImVec4(0.8f, 0.655f, 0.0f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
 	};
-	if (ImGui::GetContentRegionAvail().x < 700.0f) {
-		// Narrow editor column: two-line rows avoid horizontal clipping.
-		for (const auto& problem : g.problems) {
-			ImGui::PushID(&problem);
-			ImGui::SetCursorPosX(10.0f);
-			ImGui::TextColored(color(problem.severity), "%s", problem.severity >= 2 ? "Error" :
-				(problem.severity == 1 ? "Warning" : "Note"));
-			ImGui::SameLine();
-			ImGui::TextDisabled("%s", problem.code.empty() ? "-" : problem.code.c_str());
-			ImGui::SetCursorPosX(22.0f);
-			ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 10.0f);
-			ImGui::TextWrapped("%s", problem.text.c_str());
-			ImGui::PopTextWrapPos();
+	// One fixed-height row per diagnostic keeps the list clippable: only the
+	// rows inside the visible scroll band are submitted to ImGui.
+	ImGuiListClipper clipper;
+	if (!PerfNoClip())
+		clipper.Begin(static_cast<int>(g.problems.size()));
+	bool clipper_done = false;
+	while (!clipper_done) {
+		int first = 0;
+		int last = static_cast<int>(g.problems.size());
+		if (PerfNoClip()) {
+			clipper_done = true;
+		}
+		else {
+			if (!clipper.Step())
+				break;
+			first = clipper.DisplayStart;
+			last = clipper.DisplayEnd;
+		}
+		for (int index = first; index < last; ++index) {
+			const DiagLine& problem = g.problems[static_cast<size_t>(index)];
+			const std::string file = problem.file.empty() ? std::string("-") :
+				std::filesystem::path(problem.file).filename().string();
+			const char* severity = problem.severity >= 2 ? "Error" :
+				(problem.severity == 1 ? "Warning" : "Note");
+			char row[1024];
+			std::snprintf(row, sizeof(row), "%-7s  %-12s  %s   %s:%d:%d",
+				severity, problem.code.empty() ? "-" : problem.code.c_str(),
+				problem.text.c_str(), file.c_str(), problem.line, problem.column);
+			ImGui::PushID(index);
+			ImGui::PushStyleColor(ImGuiCol_Text, color(problem.severity));
+			const bool clicked = ImGui::Selectable(row, false, ImGuiSelectableFlags_None,
+				ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
+			ImGui::PopStyleColor();
 			if (ImGui::IsItemHovered() && !problem.hint.empty())
 				ImGui::SetTooltip("%s", problem.hint.c_str());
-			if (ImGui::IsItemClicked())
+			if (clicked)
 				activate(problem);
-			ImGui::SetCursorPosX(22.0f);
-			if (!problem.file.empty()) {
-				ImGui::TextDisabled("%s:%d:%d", std::filesystem::path(problem.file).filename().string().c_str(),
-					problem.line, problem.column);
-				if (ImGui::IsItemClicked())
-					activate(problem);
-			}
-			ImGui::Separator();
 			ImGui::PopID();
 		}
-	}
-	else if (ImGui::BeginTable("##problems_table", 4,
-			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
-			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
-		ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-		ImGui::TableSetupColumn("Code", ImGuiTableColumnFlags_WidthFixed, 170.0f);
-		ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-		ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthFixed, 190.0f);
-		ImGui::TableHeadersRow();
-		for (const auto& problem : g.problems) {
-			ImGui::TableNextRow();
-			bool clicked = false;
-			ImGui::TableNextColumn();
-			ImGui::TextColored(color(problem.severity), "%s", problem.severity >= 2 ? "Error" :
-				(problem.severity == 1 ? "Warning" : "Note"));
-			clicked |= ImGui::IsItemClicked();
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(problem.code.empty() ? "-" : problem.code.c_str());
-			clicked |= ImGui::IsItemClicked();
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(problem.text.c_str());
-			if (ImGui::IsItemHovered() && !problem.hint.empty())
-				ImGui::SetTooltip("%s", problem.hint.c_str());
-			clicked |= ImGui::IsItemClicked();
-			ImGui::TableNextColumn();
-			if (!problem.file.empty())
-				ImGui::Text("%s:%d:%d", std::filesystem::path(problem.file).filename().string().c_str(),
-					problem.line, problem.column);
-			else
-				ImGui::TextDisabled("-");
-			clicked |= ImGui::IsItemClicked();
-			if (clicked && !problem.file.empty())
-				activate(problem);
-		}
-		ImGui::EndTable();
 	}
 	ImGui::EndChild();
 }
@@ -2033,7 +2276,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	if (g.panelTab == 0)
 		RenderOutputTab();
 	else if (g.panelTab == 1)
-		RenderProblemsTab();
+		RenderProblemsTab(palette);
 	else {
 		if (!g.terminalStarted) {
 			g.terminal.Start(g.workspace);
@@ -2100,6 +2343,16 @@ void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	EndFlatPanel();
 }
 
+std::string ToolDisplayName(const UIWindow* win) {
+	if (!win || !win->name)
+		return std::string();
+	// The ROP compiler window keeps its historical class/file name; the tab is
+	// presented as the full "Rop Compiler" label.
+	if (std::strcmp(win->name, "Injection") == 0)
+		return "Rop Compiler";
+	return win->name;
+}
+
 std::vector<UIWindow*> ToolWindows() {
 	std::vector<UIWindow*> tools;
 	for (auto* win : windows) {
@@ -2111,6 +2364,16 @@ std::vector<UIWindow*> ToolWindows() {
 		// Settings is a first-class document tab in the main models/session tab
 		// strip.  It must not also appear in the per-tool document strip.
 		if (std::strcmp(win->name, "Settings") == 0)
+			continue;
+		// The raw ROM / RAM / All dumps are covered by the real Memory view.
+		// Only the shell tab entries are suppressed; the windows themselves are
+		// owned by the memory-view component.
+		if (std::strcmp(win->name, "ROM") == 0 || std::strcmp(win->name, "RAM") == 0 ||
+			std::strcmp(win->name, "All") == 0)
+			continue;
+		// Plugins are configured in Settings > Plugins; a second Plugin Manager
+		// tab would be a duplicate entry for the same screen.
+		if (std::strcmp(win->name, "Plugin Manager") == 0)
 			continue;
 		tools.push_back(win);
 	}
@@ -2137,14 +2400,14 @@ void ExecutePaletteSelection(const std::string& id) {
 	g.paletteQuery[0] = '\0';
 }
 
-std::vector<PaletteCommand> Commands() {
-	return {
+const std::vector<PaletteCommand>& Commands() {
+	static const std::vector<PaletteCommand> commands = {
 		{ "session.new", "Session: New Calculator", "" },
 		{ "model.open", "File: Open Model...", "" },
 		{ "model.import", "File: Import Model Package...", "" },
 		{ "folder.open", "File: Open Folder...", "" },
-		{ "plugin.install", "Plugins: Install Plugin...", "" },
-		{ "plugin.manager", "Plugins: Open Plugin Manager", "" },
+		{ "plugin.install", "Plugins: Open Settings > Plugins", "" },
+		{ "plugin.manager", "Plugins: Open Settings > Plugins", "" },
 		{ "view.sidebar", "View: Toggle Sidebar", "" },
 		{ "view.panel", "View: Toggle Bottom Panel", "" },
 		{ "view.tools", "View: Toggle Calculator Panel", "" },
@@ -2160,6 +2423,7 @@ std::vector<PaletteCommand> Commands() {
 		{ "theme.solarized", "Preferences: Color Theme - Solarized", "" },
 		{ "theme.mono-green", "Preferences: Color Theme - Mono Green", "" },
 	};
+	return commands;
 }
 
 void PushDialogStyle(const ThemePalette& palette) {
@@ -2256,6 +2520,13 @@ void EndShellOverlay() {
 }
 
 void RenderOverlays(const ThemePalette& palette) {
+	if (g.dismissClosePrompt) {
+		g.dismissClosePrompt = false;
+		g.closeConfirmOpen = false;
+		g.pendingCloseFile = -1;
+		if (ImGui::IsPopupOpen("Unsaved changes##file_close"))
+			ImGui::ClosePopupToLevel(0, true);
+	}
 	if (g.closeConfirmOpen) {
 		ImGui::OpenPopup("Unsaved changes##file_close");
 		bool open = g.closeConfirmOpen;
@@ -2310,6 +2581,7 @@ void RenderOverlays(const ThemePalette& palette) {
 					std::error_code ec;
 					const auto target = g.selectedPath.parent_path() / g.entryName;
 					std::filesystem::rename(g.selectedPath, target, ec);
+					g.sidebarCache.clear();
 					if (ec)
 						filesystem_error("rename failed", ec);
 					else
@@ -2344,6 +2616,7 @@ void RenderOverlays(const ThemePalette& palette) {
 					const auto target = g.selectedPath / g.entryName;
 					if (folder) {
 						std::filesystem::create_directory(target, ec);
+						g.sidebarCache.clear();
 						if (ec)
 							filesystem_error("create folder failed", ec);
 					}
@@ -2353,6 +2626,7 @@ void RenderOverlays(const ThemePalette& palette) {
 							filesystem_error("create file failed", std::make_error_code(std::errc::permission_denied));
 						else
 							file.close();
+						g.sidebarCache.clear();
 						OpenFileInEditor(target);
 					}
 				}
@@ -2382,6 +2656,7 @@ void RenderOverlays(const ThemePalette& palette) {
 			if (ImGui::Button("Delete", ImVec2(110, 26))) {
 				std::error_code ec;
 				std::filesystem::remove_all(g.selectedPath, ec);
+				g.sidebarCache.clear();
 				if (ec)
 					filesystem_error("delete failed", ec);
 				g.deleteOpen = false;
@@ -2540,7 +2815,7 @@ void RenderOverlays(const ThemePalette& palette) {
 			}
 		}
 		else {
-			const auto commands = Commands();
+			const auto& commands = Commands();
 			int shown = 0;
 			for (const auto& command : commands) {
 				if (!MatchesFilter(command.label, g.paletteQuery))
@@ -2673,42 +2948,64 @@ void RenderLayout() {
 	}
 	if (g.calculatorVisible) {
 		const float calc_x = content_x + content_w;
-		const float grip_w = 6.0f;
+		const float grip_w = 6.0f;      // hit area required by the design
+		const float visual_w = 18.0f;   // the handle is visibly wider
 		g.rectCalculatorGrip = ImVec4(calc_x - grip_w * 0.5f, viewport->Pos.y + top, grip_w, body_h);
-		ImGui::SetNextWindowPos(ImVec2(calc_x - grip_w * 0.5f, viewport->Pos.y + top));
-		ImGui::SetNextWindowSize(ImVec2(grip_w, body_h));
+		ImGui::SetNextWindowPos(ImVec2(calc_x - visual_w * 0.5f, viewport->Pos.y + top));
+		ImGui::SetNextWindowSize(ImVec2(visual_w, body_h));
 		ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 		ImGui::Begin("##calculator_grip", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground);
 		ImGui::SetCursorScreenPos(ImVec2(calc_x - grip_w * 0.5f, viewport->Pos.y + top));
-		const bool active = ImGui::InvisibleButton("##grip", ImVec2(grip_w, body_h)) || ImGui::IsItemActive();
+		ImGui::InvisibleButton("##grip", ImVec2(grip_w, body_h));
+		const bool active = ImGui::IsItemActive();
 		const bool hovered = ImGui::IsItemHovered();
 		ImDrawList* grip_draw = ImGui::GetWindowDrawList();
 		const bool lit = hovered || active;
-		const ImU32 line = ImGui::ColorConvertFloat4ToU32(lit ? palette.accent : palette.borderStrong);
-		const float line_x = calc_x - 1.0f;
-		grip_draw->AddRectFilled(ImVec2(line_x, viewport->Pos.y + top),
-			ImVec2(line_x + 2.0f, viewport->Pos.y + top + body_h), line);
-		// A visible grab pill with dots makes the splitter discoverable even
-		// before hovering; hovering lights the whole edge with the accent.
-		const float dots_y = viewport->Pos.y + top + body_h * 0.5f;
-		const ImU32 handle_fill = ImGui::ColorConvertFloat4ToU32(lit ? palette.accent : palette.borderStrong);
-		const ImU32 dot_fill = ImGui::ColorConvertFloat4ToU32(palette.surface);
-		grip_draw->AddRectFilled(ImVec2(calc_x - 3.0f, dots_y - 24.0f),
-			ImVec2(calc_x + 3.0f, dots_y + 24.0f), handle_fill, 3.0f);
-		for (int dot = -1; dot <= 1; ++dot) {
-			grip_draw->AddCircleFilled(ImVec2(calc_x, dots_y + dot * 7.0f), 1.4f, dot_fill);
+		const float band_top = viewport->Pos.y + top;
+		const float band_bottom = band_top + body_h;
+		// A tinted 6 px band runs the full height, so the splitter reads as a
+		// resizable divider even before the pointer reaches it.
+		grip_draw->AddRectFilled(ImVec2(calc_x - grip_w * 0.5f, band_top),
+			ImVec2(calc_x + grip_w * 0.5f, band_bottom),
+			ImGui::ColorConvertFloat4ToU32(WithAlpha(palette.accent, lit ? 0.30f : 0.10f)));
+		grip_draw->AddRectFilled(ImVec2(calc_x - 1.0f, band_top),
+			ImVec2(calc_x + 1.0f, band_bottom),
+			ImGui::ColorConvertFloat4ToU32(lit ? palette.accent : palette.borderStrong));
+
+		// A tall grip pill with five lines: unmistakable as a drag handle.
+		const float handle_y = band_top + body_h * 0.5f;
+		const float half_h = 36.0f;
+		// Accent-filled even at rest: this panel must be discoverable without
+		// hovering blindly.  Hovering adds the brighter band and arrow heads.
+		const ImU32 handle_fill = ImGui::ColorConvertFloat4ToU32(palette.accent);
+		const ImU32 handle_edge = ImGui::ColorConvertFloat4ToU32(lit ? palette.foreground : palette.borderStrong);
+		const ImU32 grip_line = ImGui::ColorConvertFloat4ToU32(palette.background);
+		grip_draw->AddRectFilled(ImVec2(calc_x - 5.0f, handle_y - half_h),
+			ImVec2(calc_x + 5.0f, handle_y + half_h), handle_fill, 4.0f);
+		grip_draw->AddRect(ImVec2(calc_x - 5.0f, handle_y - half_h),
+			ImVec2(calc_x + 5.0f, handle_y + half_h), handle_edge, 4.0f, 0, 1.0f);
+		for (int line = -2; line <= 2; ++line) {
+			const float y = handle_y + line * 6.0f;
+			grip_draw->AddLine(ImVec2(calc_x - 2.0f, y), ImVec2(calc_x + 2.0f, y), grip_line, 1.2f);
 		}
+		const ImU32 arrow = ImGui::ColorConvertFloat4ToU32(lit ? palette.foreground : palette.accent);
+		grip_draw->AddTriangleFilled(ImVec2(calc_x - 2.0f, handle_y - half_h - 9.0f),
+			ImVec2(calc_x + 2.0f, handle_y - half_h - 9.0f),
+			ImVec2(calc_x, handle_y - half_h - 15.0f), arrow);
+		grip_draw->AddTriangleFilled(ImVec2(calc_x - 2.0f, handle_y + half_h + 9.0f),
+			ImVec2(calc_x + 2.0f, handle_y + half_h + 9.0f),
+			ImVec2(calc_x, handle_y + half_h + 15.0f), arrow);
 		if (hovered || active)
 			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 		if (hovered)
-			ImGui::SetTooltip("Drag to resize the calculator panel\nDouble-click to reset to 360 px");
+			ImGui::SetTooltip("Drag to resize the calculator panel - double-click to reset to 360 px");
 		if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 			g.calculatorWidth = 360.0f;
 			SaveLayout();
 		}
-		else if (ImGui::IsItemActive()) {
+		else if (active) {
 			g.calculatorWidth = std::clamp(g.calculatorWidth - ImGui::GetIO().MouseDelta.x,
 				260.0f, std::max(260.0f, width * 0.6f));
 			SaveLayoutThrottled();
@@ -2748,6 +3045,43 @@ void Initialize() {
 		g.expanded.insert(g.workspace);
 
 	SyncTabsFromSessions();
+
+	if (const char* report = std::getenv("CASIOEMU_PERF_REPORT")) {
+		g.perfReportPath = report;
+		if (const char* frames = std::getenv("CASIOEMU_PERF_FRAMES"))
+			g.perfFrameLimit = std::max(10, std::atoi(frames));
+	}
+	if (const char* count = std::getenv("CASIOEMU_PERF_OUTPUT")) {
+		const int wanted = std::max(1, std::atoi(count));
+		g.output.clear();
+		g.output.reserve(static_cast<size_t>(wanted));
+		for (int index = 0; index < wanted; ++index) {
+			OutputLine line;
+			line.text = "[perf] synthetic output line " + std::to_string(index);
+			line.severity = index % 11 == 0 ? 2 : 0;
+			g.output.push_back(std::move(line));
+		}
+		g.panelVisible = true;
+		g.panelTab = 0;
+	}
+	if (const char* count = std::getenv("CASIOEMU_PERF_PROBLEMS")) {
+		const int wanted = std::max(1, std::atoi(count));
+		g.problems.clear();
+		g.problems.reserve(static_cast<size_t>(wanted));
+		for (int index = 0; index < wanted; ++index) {
+			DiagLine line;
+			line.file = "perf-source.cwiz";
+			line.line = index + 1;
+			line.column = 3;
+			line.severity = index % 7 == 0 ? 2 : (index % 3 == 0 ? 1 : 0);
+			line.code = index % 2 == 0 ? "perf-rule" : "style";
+			line.text = "Synthetic diagnostic line for the clipper performance probe.";
+			line.hint = "Synthetic hint.";
+			g.problems.push_back(std::move(line));
+		}
+		g.panelVisible = true;
+		g.panelTab = 1;
+	}
 
 	// Mirror the plugin host's log into the Output panel.
 	AppendOutput("[shell] CasioEmuMsvc preview shell initialized");
@@ -2862,10 +3196,7 @@ void RequestOpenFolder() {
 }
 
 void RequestInstallPlugin() {
-	if (auto* win = FindWindow("Plugin Manager")) {
-		win->BringToFront();
-		g.toolsVisible = true;
-	}
+	OpenSettings();
 }
 
 void ToggleSidebar() {
@@ -3027,11 +3358,30 @@ bool WriteLayoutReport(const std::string& path) {
 	check(!g.calculatorVisible || std::fabs((g.rectCalculatorGrip.x + g.rectCalculatorGrip.z * 0.5f) - g.rectTools.x) < 2.0f,
 		"calculator splitter sits on the panel's left edge");
 	bool settings_duplicated = false;
+	bool raw_memory_tabs = false;
+	bool plugin_manager_tab = false;
+	bool rop_label_present = false;
+	bool injection_label_present = false;
 	for (const auto* tool : ToolWindows()) {
-		if (tool->name && std::strcmp(tool->name, "Settings") == 0)
+		if (!tool->name)
+			continue;
+		const std::string display = ToolDisplayName(tool);
+		if (std::strcmp(tool->name, "Settings") == 0)
 			settings_duplicated = true;
+		if (std::strcmp(tool->name, "ROM") == 0 || std::strcmp(tool->name, "RAM") == 0 ||
+			std::strcmp(tool->name, "All") == 0)
+			raw_memory_tabs = true;
+		if (std::strcmp(tool->name, "Plugin Manager") == 0)
+			plugin_manager_tab = true;
+		if (display == "Rop Compiler")
+			rop_label_present = true;
+		if (display == "Injection")
+			injection_label_present = true;
 	}
 	check(!settings_duplicated, "Settings is not duplicated in the tool-document strip");
+	check(!raw_memory_tabs, "ROM/RAM/All tool tabs are removed from the tool strip");
+	check(!plugin_manager_tab, "no duplicate Plugins entry in the tool strip");
+	check(!injection_label_present && rop_label_present, "Injection tab is labelled Rop Compiler");
 	output << "panel_tabs=Output,Problems,Terminal\n";
 
 	check(std::fabs((g.rectTitle.y + g.rectTitle.w) - g.rectTabs.y) < eps, "chrome/tab strip do not overlap");
@@ -3065,6 +3415,8 @@ bool WriteLayoutReport(const std::string& path) {
 void Render() {
 	if (!g.initialized)
 		Initialize();
+	EnsureTitleFont();
+	const auto perf_started = std::chrono::steady_clock::now();
 
 	if (const char* second = std::getenv("CASIOEMU_OPEN_SECOND")) {
 		static bool opened_second = false;
@@ -3148,6 +3500,35 @@ void Render() {
 		static bool single_launch_checked = false;
 		static bool plus_welcome_checked = false;
 		static bool settings_tab_checked = false;
+		static bool wiz_source_checked = false;
+		static bool tab_x_close_checked = false;
+		static bool tab_x_dirty_checked = false;
+		static bool copy_problems_checked = false;
+		static bool wiz_build_checked = false;
+		static bool wiz_build_started = false;
+		static bool tab_x_found = false;
+		static bool tab_click_down_sent = false;
+		static bool tab_click_up_sent = false;
+		static float tab_click_x = 0.0f;
+		static float tab_click_y = 0.0f;
+		auto push_tab_mouse = [](float x, float y, bool down) {
+			// Queue the event for the next NewFrame; this exercises the same
+			// ImGui hit-testing the real mouse uses without depending on SDL
+			// window routing in the headless run.
+			ImGuiIO& io = ImGui::GetIO();
+			io.AddMousePosEvent(x, y);
+			io.AddMouseButtonEvent(0, down);
+		};
+		auto find_tab_x = [](const std::string& label, float* x, float* y) {
+			for (const auto& tab : g.mainTabRects) {
+				if (tab.kind == 2 && tab.label == label) {
+					*x = tab.rect.x + tab.rect.z - 12.0f;
+					*y = tab.rect.y + tab.rect.w * 0.5f;
+					return true;
+				}
+			}
+			return false;
+		};
 		if (frame == 1 && !single_launch_checked) {
 			single_launch_checked = session::Count() == 1 && g.tabs.size() == 1;
 		}
@@ -3217,10 +3598,8 @@ void Render() {
 			first.editor.SetText(first.editor.GetText() + "// dirty\n");
 			CloseFileDocument(0);
 			dirty_prompt_checked = g.closeConfirmOpen;
-			if (!std::getenv("CASIOEMU_SHOW_CLOSE_PROMPT")) {
-				g.closeConfirmOpen = false;
-				g.pendingCloseFile = -1;
-			}
+			if (!std::getenv("CASIOEMU_SHOW_CLOSE_PROMPT"))
+				g.dismissClosePrompt = true;
 		}
 		if (frame == 10) {
 			LoadModelChoices();
@@ -3272,6 +3651,60 @@ void Render() {
 			g.panelVisible = true;
 			g.panelTab = 1;
 		}
+		if (frame == 21 && !wiz_source_checked) {
+			wiz_source_checked = !g.files.empty() && IsWizDocument(*g.files.back()) &&
+				g.files.back()->languageIndex == 1;
+			const std::string dump = FormatProblemsForClipboard();
+			copy_problems_checked = !g.problems.empty() &&
+				dump.find("Error") != std::string::npos && dump.find('\n') != std::string::npos;
+		}
+		if (frame == 30 && !tab_click_down_sent) {
+			tab_click_down_sent = true;
+			tab_x_found = find_tab_x("editor-second.cwiz", &tab_click_x, &tab_click_y);
+			tab_click_up_sent = tab_x_found;
+			std::fprintf(stderr, "[selftest] tab x target=%.1f,%.1f found=%s files=%zu\n",
+				tab_click_x, tab_click_y, tab_x_found ? "yes" : "no", g.files.size());
+			if (tab_click_up_sent)
+				push_tab_mouse(tab_click_x, tab_click_y, true);
+		}
+		if (frame == 32 && tab_click_up_sent && !tab_x_close_checked) {
+			push_tab_mouse(tab_click_x, tab_click_y, false);
+			tab_x_close_checked = true;
+		}
+		if (frame == 35 && tab_x_close_checked) {
+			std::fprintf(stderr, "[selftest] after x close files=%zu pending=%d prompt=%d\n",
+				g.files.size(), g.pendingCloseFile, g.closeConfirmOpen ? 1 : 0);
+			tab_x_close_checked = g.files.size() == 3;
+		}
+		if (frame == 37 && tab_x_close_checked && !tab_x_dirty_checked) {
+			float x = 0.0f, y = 0.0f;
+			if (find_tab_x("editor-selftest.cwiz", &x, &y))
+				push_tab_mouse(x, y, true);
+		}
+		if (frame == 39 && tab_x_close_checked) {
+			float x = 0.0f, y = 0.0f;
+			if (find_tab_x("editor-selftest.cwiz", &x, &y))
+				push_tab_mouse(x, y, false);
+		}
+		if (frame == 41 && tab_x_close_checked) {
+			tab_x_dirty_checked = g.closeConfirmOpen;
+			g.dismissClosePrompt = true;
+		}
+		if (frame == 44 && !wiz_build_started) {
+			wiz_build_started = true;
+			const char* root = std::getenv("CASIOEMU_SELFTEST_ROOT");
+			const std::filesystem::path directory = root && *root
+				? std::filesystem::path(root) : (std::filesystem::current_path() / ".editor-selftest");
+			const auto wiz_source = directory / "wiz-build-selftest.wz";
+			{
+				std::ofstream file(wiz_source, std::ios::binary | std::ios::trunc);
+				file << "# Wiz build probe\ndef main():\n    clear()\n    print(4, 4, \"wiz ok\")\n    while True:\n        delay(2)\n";
+			}
+			OpenFileInEditor(wiz_source);
+			RequestBuild(false);
+		}
+		if (frame == 46 && wiz_build_started && !wiz_build_checked)
+			wiz_build_checked = g.lastBuildStatus == "Build succeeded";
 		if (frame == 24) {
 			FocusTerminal();
 			terminal_started = true;
@@ -3298,10 +3731,18 @@ void Render() {
 				report << "single_launch=" << (single_launch_checked ? "PASS" : "FAIL") << "\n";
 				report << "plus_opens_welcome=" << (plus_welcome_checked ? "PASS" : "FAIL") << "\n";
 				report << "settings_tab=" << (settings_tab_checked ? "PASS" : "FAIL") << "\n";
+				report << "wiz_source=" << (wiz_source_checked ? "PASS" : "FAIL") << "\n";
+				report << "tab_x_found=" << (tab_x_found ? "PASS" : "FAIL") << "\n";
+				report << "tab_x_close=" << (tab_x_close_checked ? "PASS" : "FAIL") << "\n";
+				report << "tab_x_dirty_prompt=" << (tab_x_dirty_checked ? "PASS" : "FAIL") << "\n";
+				report << "copy_problems=" << (copy_problems_checked ? "PASS" : "FAIL") << "\n";
+				report << "wiz_build=" << (wiz_build_checked ? "PASS" : "FAIL") << "\n";
 				report << "panel_tab=" << g.panelTab << "\n";
 				report << ((session::Count() >= 2 && g.tabs.size() >= 2 && terminal_ok && lint_checked && lint_cleared &&
 					dirty_prompt_checked && explorer_ops_checked && tabs_switched_checked && single_launch_checked &&
-					plus_welcome_checked && settings_tab_checked) ? "RESULT PASS\n" : "RESULT FAIL\n");
+					plus_welcome_checked && settings_tab_checked && wiz_source_checked &&
+					tab_x_close_checked && tab_x_dirty_checked && copy_problems_checked &&
+					wiz_build_checked) ? "RESULT PASS\n" : "RESULT FAIL\n");
 			}
 		}
 	}
@@ -3310,6 +3751,29 @@ void Render() {
 		g.panelTab = std::clamp(std::atoi(panel), 0, 2);
 	calculator_panel_focused = false;
 	RenderLayout();
+	if (!g.perfReportPath.empty()) {
+		const double elapsed = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - perf_started).count();
+		++g.perfFrames;
+		g.perfTotalMs += elapsed;
+		g.perfMinMs = std::min(g.perfMinMs, elapsed);
+		g.perfMaxMs = std::max(g.perfMaxMs, elapsed);
+		if (g.perfFrames >= g.perfFrameLimit) {
+			std::ofstream report(g.perfReportPath, std::ios::trunc);
+			if (report) {
+				report << "frames=" << g.perfFrames << '\n';
+				report << "avg_ms=" << (g.perfTotalMs / g.perfFrames) << '\n';
+				report << "min_ms=" << g.perfMinMs << '\n';
+				report << "max_ms=" << g.perfMaxMs << '\n';
+				report << "sidebar_scans=" << g.sidebarScanCount << '\n';
+				report << "sidebar_scan_ms=" << g.sidebarScanMs << '\n';
+				report << "output_lines=" << g.output.size() << '\n';
+				report << "problems=" << g.problems.size() << '\n';
+				report << "clipper=" << (PerfNoClip() ? "off" : "on") << '\n';
+			}
+			g.perfReportPath.clear();
+		}
+	}
 }
 
 } // namespace casioemu::shell
