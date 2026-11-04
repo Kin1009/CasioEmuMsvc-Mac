@@ -357,6 +357,20 @@ for (;;) {
 #endif
 	bool guiCreated = false;
 	bool reopen_startup = false;
+	bool quitting = false;
+	auto request_quit = [&]() {
+		if (quitting)
+			return;
+		quitting = true;
+		reopen_startup = false;
+		// Remove the black frame immediately; teardown runs while hidden.
+		if (emulator.window)
+			SDL_HideWindow(emulator.window);
+		casioemu::session::ShutdownAll();
+		emulator.Shutdown();
+	};
+	const auto process_loop_started = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point close_test_closed_at{};
 	auto frame_event = SDL_RegisterEvents(1);
 #ifdef DBG
 	if (!no_dbg) {
@@ -397,9 +411,9 @@ for (;;) {
 #if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 	LoadPlugins();
 #endif
-	while (emulator.Running() || casioemu::session::Count() > 0) {
+	while (!quitting && (emulator.Running() || casioemu::session::Count() > 0)) {
 		if (casioemu::shell::ConsumeQuitRequest()) {
-			emulator.Shutdown();
+			request_quit();
 			break;
 		}
 		Emulator* active_emulator = casioemu::session::Active();
@@ -456,6 +470,27 @@ for (;;) {
 #ifdef SINGLE_WINDOW
 			casioemu::session::PrepareActiveFrame();
 			gui_loop();
+			if (const char* close_test = std::getenv("CASIOEMU_CLOSE_TEST")) {
+				static int close_test_frame = 0;
+				++close_test_frame;
+				if (close_test_frame == 1 && std::getenv("CASIOEMU_CLOSE_PAUSED")) {
+					if (Emulator* active = casioemu::session::Active())
+						active->SetPaused(true);
+				}
+				if (close_test_frame == 2) {
+					SDL_Event close_event{};
+					if (std::strcmp(close_test, "quit") == 0) {
+						close_event.type = SDL_QUIT;
+					}
+					else {
+						close_event.type = SDL_WINDOWEVENT;
+						close_event.window.event = SDL_WINDOWEVENT_CLOSE;
+						close_event.window.windowID = emulator.window ? SDL_GetWindowID(emulator.window) : 0;
+					}
+					close_test_closed_at = std::chrono::steady_clock::now();
+					SDL_PushEvent(&close_event);
+				}
+			}
 			if (const char* shot = std::getenv("CASIOEMU_SHOT_SHELL")) {
 				static int shot_frame = 0;
 				++shot_frame;
@@ -511,6 +546,11 @@ for (;;) {
 		}
 
 	hld:
+		// The shell can close a session during gui_loop.  Never carry a pointer
+		// from before that frame into event routing.
+		active_emulator = casioemu::session::Active();
+		if (!active_emulator)
+			active_emulator = &emulator;
 		int wid, hei;
 		SDL_GetWindowSize(window, &wid, &hei);
 		const Uint32 eventWindowId = GetEventWindowId(event);
@@ -523,8 +563,9 @@ for (;;) {
 		}
 		switch (event.type) {
 		case SDL_QUIT:
-			// Cmd+Q / the application menu still quits normally.
-			emulator.Shutdown();
+			// Cmd+Q / the application menu: hide the window, stop every session,
+			// then leave the loop and let normal teardown destroy it.
+			request_quit();
 			break;
 		case SDL_WINDOWEVENT:
 			switch (event.window.event) {
@@ -537,20 +578,10 @@ for (;;) {
 					(!window || eventWindowId != SDL_GetWindowID(window))) {
 					break;
 				}
-				// Closing the calculator is a session action, not an application
-				// quit.  Destroy this emulator session and let the outer loop open
-				// the startup selector again.  This also covers SINGLE_WINDOW builds,
-				// where the calculator owns the only SDL window.
-				if (emulator.window && eventWindowId == SDL_GetWindowID(emulator.window)) {
-					reopen_startup = true;
-					emulator.Shutdown();
-					break;
-				}
-				// Let main() unwind normally: the emulator destructor joins the
-				// tick thread before the chipset (and the LCD history mutex it
-				// owns) is destroyed. std::exit(0) skipped that join and could
-				// abort in the still-running tick thread ("closed unexpectedly").
-				emulator.Shutdown();
+				// Closing either application window is a real quit.  Hide it, stop
+				// every session, then leave the loop; otherwise the session-count
+				// loop condition would spin on a black, already-shut-down window.
+				request_quit();
 				break;
 			case SDL_WINDOWEVENT_RESIZED:
 				break;
@@ -603,12 +634,24 @@ for (;;) {
 			break;
 		}
 	}
+	if (close_test_closed_at != std::chrono::steady_clock::time_point{}) {
+		const double close_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - close_test_closed_at).count();
+		std::fprintf(stderr, "[close-test] close_to_loop_exit_ms=%.1f\n", close_ms);
+	}
 	if (bg_txt) {
 		SDL_DestroyTexture(bg_txt);
 	}
 #if !defined(CASIOEMU_CORE_WEB) && !defined(__ANDROID__)
+	const auto shutdown_started = std::chrono::steady_clock::now();
 	casioemu::shell::Shutdown();
+	const auto shell_done = std::chrono::steady_clock::now();
 	casioemu::session::ShutdownAll();
+	if (close_test_closed_at != std::chrono::steady_clock::time_point{}) {
+		std::fprintf(stderr, "[close-test] shell_shutdown_ms=%.1f session_shutdown_ms=%.1f\n",
+			std::chrono::duration<double, std::milli>(shell_done - shutdown_started).count(),
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - shell_done).count());
+	}
 #endif
 #if defined(SINGLE_WINDOW) && !defined(__ANDROID__)
 	// Persist the debugger geometry. In single-window builds this window is the
@@ -629,9 +672,21 @@ for (;;) {
 	sentry_close();
 #endif
 	DiscordRPC::Shutdown();
+	if (close_test_closed_at != std::chrono::steady_clock::time_point{}) {
+		const double total_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - process_loop_started).count();
+		std::fprintf(stderr, "[close-test] loop_start_to_teardown_done_ms=%.1f\n", total_ms);
+	}
 	if (reopen_startup) {
 		argv_map["model"].clear();
 		continue;
+	}
+	// Every close path above has already stopped and joined the sessions.  Do
+	// not run SDL audio/renderer destructors on macOS: they can take seconds and
+	// are the reason the black window appeared to hang.  The OS reclaims them.
+	if (quitting) {
+		std::fflush(nullptr);
+		std::_Exit(0);
 	}
 	return 0;
 }
