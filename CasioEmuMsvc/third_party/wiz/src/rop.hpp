@@ -28,4 +28,8 @@ RopResult build_rop(const std::string& source, const std::string& model,
 // True when the source asks for the ROP backend (contains a `#rop` line).
 bool source_is_rop(const std::string& source);
 
+// Assembly of the direct key-matrix scanner used by ROP `key()`.  It is the
+// same loop as the cwapp runtime `__key`, with no OS state.
+std::string rop_key_routine_asm();
+
 } // namespace wiz

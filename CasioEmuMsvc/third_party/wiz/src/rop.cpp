@@ -32,6 +32,7 @@
 // BL-based display routines on the 580.
 
 #include "rop.hpp"
+#include "asm.hpp"
 #include "directives.hpp"
 #include "rop_data.hpp"
 #include "vn_f4.hpp"
@@ -576,6 +577,30 @@ int reg_size(const std::string& r) {
     return c == 'q' ? 8 : c == 'x' ? 4 : c == 'e' ? 2 : 1;
 }
 
+// Direct 8x7 key-matrix scan: the same loop as runtime.asm `__key`.  It only
+// touches F046/F040 and returns 0..63, or -1 when no key is down.
+static const char* kRopKeyAsm =
+    "MOV R0, #0\n"
+    "MOV R1, #0\n"
+    "MOV R2, #80H\n"
+    "__rop_key_x:\n"
+    "ST R2, 0F046H\n"
+    "MOV R3, #80H\n"
+    "__rop_key_y:\n"
+    "L R4, 0F040H\n"
+    "AND R4, R3\n"
+    "BEQ __rop_key_f\n"
+    "ADD R0, #1\n"
+    "SRL R3, #1\n"
+    "CMP R3, #0\n"
+    "BNE __rop_key_y\n"
+    "SRL R2, #1\n"
+    "CMP R2, #0\n"
+    "BNE __rop_key_x\n"
+    "MOV ER0, #-1\n"
+    "__rop_key_f:\n"
+    "RT\n";
+
 std::vector<std::string> stdlib_candidates(const std::string& name) {
     std::vector<std::string> v;
     auto push = [&](std::initializer_list<const char*> xs) { for (auto* x : xs) v.push_back(x); };
@@ -736,6 +761,8 @@ struct Emitter {
     std::map<std::string, size_t> labels;
     std::set<std::string> explicit_labels;  // source labels, for duplicate detection
     std::vector<std::pair<size_t, std::string>> patches;
+    std::vector<size_t> key_call_sites;      // chain words to patch with __rop_key
+    int key_routine_offset = -1;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
     std::map<size_t, std::string> str_text;   // pointer position -> source text
     std::map<size_t, uint32_t> key_words;     // key table offset -> KI/KO word
@@ -1102,6 +1129,22 @@ struct Emitter {
         log += "  ; " + name + " -> inline KI/KO slot [" + hex4(key_slot) +
                "] (cleared before read)\n";
     }
+    // key() - call the direct matrix scanner appended to the payload.  It is
+    // the cwapp `__key` mechanism: no OS buffer, no timers, no D150 state.
+    void emit_key(const StmtP& s) {
+        if (!s->args.empty()) {
+            report_error("key() takes no arguments", "E101");
+            return;
+        }
+        size_t pos = out.size();
+        out.push_back(0);
+        out.push_back(0);
+        out.push_back(0);
+        out.push_back(0);
+        key_call_sites.push_back(pos);
+        log += "  ; key() -> direct matrix scan\n";
+    }
+
     // keytable(0x0480, up, 0x0840, down, ..., 0x0000, loop)
     //
     // Reads the KI/KO word written by getkey(), scans the table with cmp_ea
@@ -1321,7 +1364,8 @@ struct Emitter {
                 }
                 if (key == "rect" || key == "draw_rect") { emit_rect(s); return; }
                 if (key == "bitmap" || key == "draw_bitmap") { emit_bitmap(s); return; }
-                if (key == "getkey" || key == "get_key" || key == "key" ||
+                if (key == "key" || key == "key_scan" || key == "read_key") { emit_key(s); return; }
+                if (key == "getkey" || key == "get_key" ||
                     key == "getkeycode" || key == "get_keycode" ||
                     key == "getscancode_nodelay" || key == "getscancode") { emit_getkey(s); return; }
                 if (key == "keytable" || key == "table") { emit_keytable(s); return; }
@@ -1697,6 +1741,24 @@ struct Emitter {
             out[p.first + 1] = (uint8_t)((target >> 8) & 0xFF);
             log += "  ; patch " + p.second + " -> [" + hex4(target) + "]\n";
         }
+        if (!key_call_sites.empty()) {
+            Assembler as("nX-U16/100");
+            auto img = as.assemble(std::string("ORG 0\n") + kRopKeyAsm);
+            key_routine_offset = (int)out.size();
+            uint32_t routine_size = 0;
+            for (const auto& kv : img)
+                if (kv.first + 1 > routine_size) routine_size = kv.first + 1;
+            for (uint32_t a = 0; a < routine_size; a++)
+                out.push_back(img.count(a) ? img[a] : 0);
+            uint32_t addr = home + (uint32_t)key_routine_offset;
+            for (size_t pos : key_call_sites) {
+                out[pos] = (uint8_t)(addr & 0xFF);
+                out[pos + 1] = (uint8_t)((addr >> 8) & 0xFF);
+                out[pos + 2] = chain_segment(addr);
+                out[pos + 3] = kChainVariantCall;
+            }
+            log += "  ; __rop_key matrix scan @ " + hex4(addr) + "\n";
+        }
         if (prog.funcs.empty()) report_error("no function found in ROP source", "E106");
         // A ROP payload always ends with a null buffer.  The community
         // programs rely on it: the copy performed by the launcher moves a
@@ -2035,6 +2097,8 @@ std::string hex_bytes(const std::vector<uint8_t>& bytes) {
 }
 
 } // namespace
+
+std::string rop_key_routine_asm() { return kRopKeyAsm; }
 
 bool source_is_rop(const std::string& source) {
     std::istringstream in(source);

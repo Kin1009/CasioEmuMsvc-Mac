@@ -1,0 +1,24 @@
+// rop/09_key.cwiz — key() scans the 8x7 matrix directly.
+//
+// This is the same loop as the cwapp runtime `__key`: it strobes F046 and
+// reads F040, with no OS buffer, timer or D150 state.  The result is the
+// 0..63 scan index in ER0 (or -1 when no key is down).  ROP has no dynamic
+// `if`, so this example only demonstrates the read; use getkey()/keytable()
+// when the raw KI/KO word is needed for dispatch.
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+
+int main() {
+    setlr();
+    setsfr();
+    screen_del();
+    print(0x30, 0x01, "KEY() MATRIX SCAN");
+    render();
+    delay(0x20);
+    key();                  // ER0 = scan index or -1
+    goto done;
+done:
+    goto done;
+}
