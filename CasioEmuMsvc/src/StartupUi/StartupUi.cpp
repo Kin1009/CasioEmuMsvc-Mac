@@ -2174,8 +2174,112 @@ namespace casioemu {
 			ImGui::PopStyleColor();
 		}
 
+		static std::filesystem::path PreviousThemeRecordPath() {
+			std::error_code ec;
+			auto path = casioemu::settings::SettingsStore::Instance().FilePath();
+			if (path.empty())
+				path = casioemu::settings::SettingsStore::DefaultFilePath();
+			const auto parent = path.parent_path();
+			if (!parent.empty())
+				std::filesystem::create_directories(parent, ec);
+			return parent / "last-theme.txt";
+		}
+		static std::string ReadPreviousTheme() {
+			std::ifstream in(PreviousThemeRecordPath());
+			std::string value;
+			if (std::getline(in, value) && !value.empty() && value != "anh-sang-cua-dang")
+				return value;
+			return "classic";
+		}
+		static void RememberPreviousTheme(const std::string& id) {
+			if (id.empty() || id == "anh-sang-cua-dang")
+				return;
+			static std::string last;
+			if (last == id)
+				return;
+			last = id;
+			std::ofstream out(PreviousThemeRecordPath(), std::ios::trunc);
+			if (out)
+				out << id << '\n';
+		}
+		bool RenderSpecialTheme() {
+			static SDL_Texture* texture = nullptr;
+			static int image_w = 0;
+			static int image_h = 0;
+			if (!texture) {
+				const char* candidates[] = {
+					"../Resources/themes/anh-sang-cua-dang.jpeg",
+					"Resources/themes/anh-sang-cua-dang.jpeg",
+					"resources/themes/anh-sang-cua-dang.jpeg",
+					"CasioEmuMsvc/resources/themes/anh-sang-cua-dang.jpeg",
+				};
+				for (const char* path : candidates) {
+					SDL_Surface* surface = IMG_Load(path);
+					if (!surface)
+						continue;
+					image_w = surface->w;
+					image_h = surface->h;
+					if (renderer2)
+						texture = SDL_CreateTextureFromSurface(renderer2, surface);
+					SDL_FreeSurface(surface);
+					if (texture)
+						break;
+				}
+			}
+			const ImGuiViewport* viewport = ImGui::GetMainViewport();
+			const ImVec2 pos = viewport->Pos;
+			const ImVec2 size = viewport->Size;
+			ImDrawList* draw = ImGui::GetForegroundDrawList();
+			if (texture && image_w > 0 && image_h > 0 && size.x > 0 && size.y > 0) {
+				const float window_aspect = size.x / size.y;
+				const float image_aspect = static_cast<float>(image_w) / static_cast<float>(image_h);
+				ImVec2 uv0(0.0f, 0.0f);
+				ImVec2 uv1(1.0f, 1.0f);
+				if (window_aspect > image_aspect) {
+					const float visible = image_aspect / window_aspect;
+					uv0.y = (1.0f - visible) * 0.5f;
+					uv1.y = 1.0f - uv0.y;
+				}
+				else {
+					const float visible = window_aspect / image_aspect;
+					uv0.x = (1.0f - visible) * 0.5f;
+					uv1.x = 1.0f - uv0.x;
+				}
+				draw->AddImage(reinterpret_cast<ImTextureID>(texture), pos,
+					ImVec2(pos.x + size.x, pos.y + size.y), uv0, uv1);
+			}
+			else {
+				draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(0, 0, 0, 255));
+			}
+			ImGuiIO& io = ImGui::GetIO();
+			io.WantCaptureMouse = true;
+			io.WantCaptureKeyboard = true;
+			if (std::getenv("CASIOEMU_SPECIAL_THEME_REVERT_TEST")) {
+				static int test_frame = 0;
+				++test_frame;
+				if (test_frame == 12)
+					io.AddMouseButtonEvent(0, true);
+				else if (test_frame == 14)
+					io.AddMouseButtonEvent(0, false);
+			}
+			if (io.MouseClicked[0]) {
+				std::string target = ReadPreviousTheme();
+				std::string error;
+				if (!ThemeManager::Instance().ApplyThemeByName(target, &error))
+					ThemeManager::Instance().ApplyThemeByName("classic", &error);
+				ThemeManager::Instance().SaveSettings();
+				std::fprintf(stderr, "[theme-revert] %s\n", target.c_str());
+			}
+			return true;
+		}
+
 		void RenderLegacy() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
+			const std::string active_theme = ThemeManager::Instance().CurrentThemeName();
+			if (active_theme != "anh-sang-cua-dang")
+				RememberPreviousTheme(active_theme);
+			else if (RenderSpecialTheme())
+				return;
 			if (std::getenv("CASIOEMU_SHOW_MASS_IMPORT")) {
 				static bool once = false;
 				if (!once) { once = true; show_import_dialog = true; }

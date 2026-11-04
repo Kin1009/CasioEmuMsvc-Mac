@@ -3788,9 +3788,43 @@ bool WriteLayoutReport(const std::string& path) {
 	return ok;
 }
 
+std::filesystem::path PreviousThemeRecordPath() {
+	std::error_code ec;
+	auto path = SettingsStore::Instance().FilePath();
+	if (path.empty())
+		path = SettingsStore::DefaultFilePath();
+	const auto parent = path.parent_path();
+	if (!parent.empty())
+		std::filesystem::create_directories(parent, ec);
+	return parent / "last-theme.txt";
+}
+
+std::string ReadPreviousTheme() {
+	std::ifstream in(PreviousThemeRecordPath());
+	std::string value;
+	if (std::getline(in, value) && !value.empty() && value != "anh-sang-cua-dang")
+		return value;
+	return "classic";
+}
+
+void RememberPreviousTheme(const std::string& id) {
+	if (id.empty() || id == "anh-sang-cua-dang")
+		return;
+	static std::string last;
+	if (last == id)
+		return;
+	last = id;
+	std::ofstream out(PreviousThemeRecordPath(), std::ios::trunc);
+	if (out)
+		out << id << '\n';
+}
+
 bool RenderThemeBackdrop() {
-	if (ThemeManager::Instance().CurrentThemeName() != "anh-sang-cua-dang")
+	const std::string theme = ThemeManager::Instance().CurrentThemeName();
+	if (theme != "anh-sang-cua-dang") {
+		RememberPreviousTheme(theme);
 		return false;
+	}
 	static SDL_Texture* texture = nullptr;
 	static int image_w = 0;
 	static int image_h = 0;
@@ -3842,6 +3876,14 @@ bool RenderThemeBackdrop() {
 	ImGuiIO& io = ImGui::GetIO();
 	io.WantCaptureMouse = true;
 	io.WantCaptureKeyboard = true;
+	if (io.MouseClicked[0]) {
+		std::string target = ReadPreviousTheme();
+		std::string error;
+		if (!ThemeManager::Instance().ApplyThemeByName(target, &error))
+			ThemeManager::Instance().ApplyThemeByName("classic", &error);
+		ThemeManager::Instance().SaveSettings();
+		return false;
+	}
 	return true;
 }
 
