@@ -1,5 +1,11 @@
 # Repository Instructions
 
+## Canonical app bundle
+
+- The only project app bundle is `/Users/kin/Desktop/Wiz/preview/CasioEmuMsvc.app` (plus `/Applications/CasioEmuMsvc.app`).
+- Build outputs in `build*/.../CasioEmuMsvc.app` are staging only: delete them after tests, never launch them for the user, and never leave stale copies behind.
+- Boot/UI tests must launch the canonical bundle or a private copy under `Wiz/temp/<area>/app/`.
+
 ## Git (agents)
 
 - You may create branches/worktrees and push your own work. Push **only your own commits/branch**, never the whole working tree.
