@@ -38,6 +38,8 @@ struct ThemePalette {
 struct ThemeResult {
 	std::string name;
 	std::string variant = "dark";
+	// Optional full-screen artwork referenced by the preset (featured themes).
+	std::string image;
 	ThemePalette colors;
 	std::string uiFamily = "SF Pro Text";
 	std::string monoFamily = "SF Mono";

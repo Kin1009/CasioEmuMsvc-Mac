@@ -104,6 +104,8 @@ bool ParseThemeDocument(const std::string& jsonText, ThemeResult& result, std::s
 		result.name = document["name"].get<std::string>();
 	}
 
+	if (document.contains("image") && document["image"].is_string())
+		result.image = document["image"].get<std::string>();
 	result.variant = "dark";
 	if (document.contains("variant")) {
 		if (!document["variant"].is_string()) {

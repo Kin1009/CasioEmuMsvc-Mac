@@ -251,7 +251,7 @@ private:
 	// The requested darkness range leads the list; other shipped presets follow.
 	static const char* preferred_order[] = {
 		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite",
-		"high-contrast-dark", "anh-sang-cua-dang", "solarized", "vscode-dark",
+		"high-contrast-dark", "solarized", "vscode-dark",
 		"vscode-dark-plus", "mono-green", "light-plus", "paper", "snow",
 		"github-light", "high-contrast-light", "vscode-light"
 	};
@@ -290,18 +290,33 @@ private:
 	{
 		ToolUi::PanelScope panel("##theme_list_panel");
 		const float row_height = 44.0f;
-		bool showed_dark_header = false;
-		bool showed_light_header = false;
+		std::vector<ThemeInfo> dark_presets, light_presets, featured_presets, ordered;
 		for (const auto& info : themes) {
-			if (info.dark && !showed_dark_header) {
+			if (info.featured)
+				featured_presets.push_back(info);
+			else if (info.dark)
+				dark_presets.push_back(info);
+			else
+				light_presets.push_back(info);
+		}
+		ordered.reserve(themes.size());
+		ordered.insert(ordered.end(), dark_presets.begin(), dark_presets.end());
+		ordered.insert(ordered.end(), light_presets.begin(), light_presets.end());
+		ordered.insert(ordered.end(), featured_presets.begin(), featured_presets.end());
+		const size_t light_start = dark_presets.size();
+		const size_t featured_start = light_start + light_presets.size();
+		for (size_t theme_index = 0; theme_index < ordered.size(); ++theme_index) {
+			if (theme_index == 0 && !dark_presets.empty())
 				ImGui::TextDisabled("Dark presets");
-				showed_dark_header = true;
-			}
-			else if (!info.dark && !showed_light_header) {
+			if (theme_index == light_start && !light_presets.empty()) {
 				ImGui::Spacing();
 				ImGui::TextDisabled("Light presets");
-				showed_light_header = true;
 			}
+			if (theme_index == featured_start && !featured_presets.empty()) {
+				ImGui::Spacing();
+				ImGui::TextDisabled("Featured");
+			}
+			const ThemeInfo& info = ordered[theme_index];
 			ImGui::PushID(info.id.c_str());
 			const bool selected = info.id == effective;
 			const ImVec2 row = ImGui::GetCursorScreenPos();

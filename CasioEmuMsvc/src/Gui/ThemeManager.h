@@ -237,6 +237,7 @@ struct ThemeInfo {
 	std::string id;   // file stem, e.g. "vscode-dark"
 	std::string name; // human readable name from the JSON document
 	bool dark = true;
+	bool featured = false;
 };
 
 class ThemeManager {

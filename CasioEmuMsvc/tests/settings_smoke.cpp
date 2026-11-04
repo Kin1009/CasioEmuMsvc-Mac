@@ -322,10 +322,27 @@ void TestThemeFiles() {
 			continue;
 		}
 		Check(it->second.value("name", std::string()) == name, id + ".json is named '" + name + "'");
-		std::cout << "[theme] " << name << " (" << id << ") bg="
+		const bool featured = it->second.contains("image") && it->second["image"].is_string();
+		const char* group = featured ? "featured"
+			: (it->second.value("variant", std::string()) == "light" ? "light" : "dark");
+		std::cout << "[theme] " << name << " (" << id << ") group=" << group << " bg="
 			<< it->second["tokens"]["colors"].value("background", std::string())
 			<< " surface=" << it->second["tokens"]["colors"].value("surface", std::string()) << '\n';
 	}
+	// Exactly one artwork theme, and it is its own group rather than a dark preset.
+	int featured_count = 0;
+	std::string featured_id;
+	for (const auto& [id, document] : by_id) {
+		if (document.contains("image") && document["image"].is_string()) {
+			++featured_count;
+			featured_id = id;
+		}
+	}
+	Check(featured_count == 1, "exactly one featured theme exists");
+	Check(featured_id == "anh-sang-cua-dang", "anh-sang-cua-dang is the featured theme");
+	Check(featured_count == 1 && by_id.count(featured_id) != 0 &&
+		by_id[featured_id].value("variant", std::string()) == "dark",
+		"the featured theme is excluded from the dark group by its image field");
 	if (auto it = by_id.find("anh-sang-cua-dang"); it != by_id.end()) {
 		Check(it->second.value("image", std::string()) == "anh-sang-cua-dang.jpeg",
 			"anh-sang-cua-dang points at its image asset");
