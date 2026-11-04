@@ -397,7 +397,7 @@ for (;;) {
 #if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 	LoadPlugins();
 #endif
-	while (emulator.Running()) {
+	while (emulator.Running() || casioemu::session::Count() > 0) {
 		if (casioemu::shell::ConsumeQuitRequest()) {
 			emulator.Shutdown();
 			break;

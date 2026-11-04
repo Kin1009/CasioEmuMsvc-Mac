@@ -275,6 +275,7 @@ public:
 		for (int index = 0; index < static_cast<int>(sizeof(kTargets) / sizeof(kTargets[0])); ++index) {
 			if (target == kTargets[index].name) {
 				target_idx_ = index;
+				picked_target_ = true;
 				return;
 			}
 		}
@@ -412,6 +413,52 @@ private:
 	}
 
 	// The model in the emulator decides which calculator we program for.
+	// A source may carry its own #for sections.  Prefer the running model's
+	// target when that section exists, otherwise use the only section present.
+	void PickTargetFromSource(const std::string& source) {
+		std::vector<std::string> sections;
+		std::istringstream in(source);
+		std::string line;
+		while (std::getline(in, line)) {
+			const size_t first = line.find_first_not_of(" \t");
+			if (first == std::string::npos || line[first] != '#')
+				continue;
+			std::istringstream rest(line.substr(first + 1));
+			std::string directive;
+			rest >> directive;
+			if (directive != "for")
+				continue;
+			std::string value;
+			rest >> value;
+			if (!value.empty() && std::find(sections.begin(), sections.end(), value) == sections.end())
+				sections.push_back(value);
+		}
+		if (sections.empty())
+			return;
+		auto index_for = [](const std::string& value) -> int {
+			if (value == "880" || value == "cwii") return 0;
+			if (value == "580" || value == "cw") return 1;
+			if (value == "cwapp") return 2;
+			if (value == "cwrop" || value == "580rop") return 3;
+			if (value == "cwiirop" || value == "880rop") return 4;
+			return -1;
+		};
+		const int model_index = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
+		int chosen = -1;
+		for (const auto& section : sections) {
+			if (index_for(section) == model_index) {
+				chosen = model_index;
+				break;
+			}
+		}
+		if (chosen < 0 && sections.size() == 1)
+			chosen = index_for(sections.front());
+		if (chosen >= 0 && chosen != target_idx_) {
+			target_idx_ = chosen;
+			AddLog(Sev::Note, wiz::fmt("source selects target %s", kTargets[target_idx_].name));
+		}
+	}
+
 	void PickTargetFromModel() {
 		if (picked_target_ || !m_emu)
 			return;
@@ -435,8 +482,8 @@ private:
 	// Compile once; a failure comes back as a single diagnostic.
 	bool Compile(const std::string& src, wiz::BuildResult& out, Diag& diag,
 				 const std::string& forced_target = std::string()) {
+		const std::string target = forced_target.empty() ? HardwareTarget() : forced_target;
 		try {
-			const std::string target = forced_target.empty() ? HardwareTarget() : forced_target;
 			if (EffectiveLang() == "cwiz")
 				out = wiz::build_cwiz(src, target, file_name_);
 			else
@@ -444,6 +491,11 @@ private:
 			return true;
 		} catch (const wiz::CompileError& e) {
 			diag = {Sev::Error, e.line, e.col, e.what()};
+			std::string message = e.what();
+			if (message.find("section") != std::string::npos && message.find("for") != std::string::npos) {
+				diag.msg += "  (selected target " + target +
+					"; choose the Target that matches the source's #for section, or add #for " + target + ")";
+			}
 			return false;
 		} catch (const std::exception& e) {
 			diag = {Sev::Error, -1, -1, e.what()};
@@ -463,6 +515,8 @@ private:
 		wiz::set_data_dir(WizDataDir());
 
 		const std::string src = editor_.GetText();
+		PickTargetFromModel();
+		PickTargetFromSource(src);
 		// A ROP target (or a `#rop` source) is a gadget-chain payload, not a ROM
 		// image: compile it with the ROP backend and hand the bytes to the
 		// debugger.

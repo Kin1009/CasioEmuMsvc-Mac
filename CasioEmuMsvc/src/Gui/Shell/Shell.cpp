@@ -1340,9 +1340,10 @@ void RenderTabStrip(const ThemePalette& palette) {
 		CloseFileDocument(close_file);
 	else if (close_session >= 0) {
 		SessionTab& tab = g.tabs[static_cast<size_t>(close_session)];
-		if (close_session > 0 && tab.live) {
+		if (tab.live && (session::Count() > 1 || close_session > 0)) {
 			session::CloseSession(close_session);
 			SyncTabsFromSessions();
+			SaveSessions();
 		}
 		else if (tab.live) {
 			g.showWelcome = true;
@@ -1630,49 +1631,54 @@ void RenderWelcome(const ThemePalette& palette) {
 	ImGui::PopTextWrapPos();
 
 	ImGui::Dummy(ImVec2(0.0f, 14.0f));
-	const float column_width = std::min(available, std::max(240.0f, available * 0.6f));
-	auto section = [&](const char* title) {
-		ImGui::SetCursorPosX(pad);
-		ImGui::TextDisabled("%s", title);
-	};
-	auto link = [&](const char* label, const std::string& command) {
-		ImGui::SetCursorPosX(pad);
-		ImGui::PushStyleColor(ImGuiCol_Text, palette.link);
-		if (ImGui::Selectable(label, false, ImGuiSelectableFlags_None, ImVec2(column_width, 0.0f)))
-			ExecuteCommand(command);
-		ImGui::PopStyleColor();
-	};
-
-	section("Start");
-	link("New Calculator", "session.new");
-	ImGui::Dummy(ImVec2(0.0f, 10.0f));
-	section("Recent");
 	const auto& data = SettingsStore::Instance().Data();
-	bool any_recent = false;
-	const float recent_width = std::min(360.0f, available);
-	for (const auto& session : data.sessions) {
-		any_recent = true;
-		ImGui::SetCursorPosX(pad);
-		if (ImGui::Selectable((std::string("> ") + (session.title.empty() ? session.model : session.title)).c_str(), false,
-				ImGuiSelectableFlags_None, ImVec2(recent_width, 0.0f))) {
-			if (!session.modelPath.empty())
-				OpenModelAt(session.modelPath);
-			else
-				RequestOpenModel();
+	ImGui::SetCursorPosX(pad);
+	if (ImGui::BeginTable("##welcome_columns", 2,
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
+		ImGui::TableSetupColumn("Recent", ImGuiTableColumnFlags_WidthStretch, 0.44f);
+		ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthStretch, 0.56f);
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextDisabled("Recent models");
+		bool any_recent = false;
+		const float recent_width = ImGui::GetContentRegionAvail().x - 4.0f;
+		for (const auto& session : data.sessions) {
+			any_recent = true;
+			const std::string row = std::string("> ") + (session.title.empty() ? session.model : session.title);
+			if (ImGui::Selectable(row.c_str(), false, ImGuiSelectableFlags_None, ImVec2(recent_width, 0.0f))) {
+				if (!session.modelPath.empty())
+					OpenModelAt(session.modelPath);
+				else
+					RequestOpenModel();
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s\n%s", session.model.c_str(), session.rom.c_str());
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("%s\n%s", session.model.c_str(), session.rom.c_str());
-	}
-	for (const auto& file : data.workspace.recentFiles) {
-		any_recent = true;
-		ImGui::SetCursorPosX(pad);
-		if (ImGui::Selectable((std::string("> ") + BaseName(file)).c_str(), false,
-				ImGuiSelectableFlags_None, ImVec2(recent_width, 0)))
-			OpenExternal(file);
-	}
-	if (!any_recent) {
-		ImGui::SetCursorPosX(pad);
-		ImGui::TextDisabled("No recent sessions or files");
+		for (const auto& file : data.workspace.recentFiles) {
+			any_recent = true;
+			const std::string row = std::string("> ") + BaseName(file);
+			if (ImGui::Selectable(row.c_str(), false, ImGuiSelectableFlags_None, ImVec2(recent_width, 0)))
+				OpenExternal(file);
+		}
+		if (!any_recent)
+			ImGui::TextDisabled("No recent sessions or files");
+
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Dummy(ImVec2(0.0f, 2.0f));
+		ImGui::TextDisabled("Start");
+		auto link = [&](const char* label, const std::string& command) {
+			ImGui::PushStyleColor(ImGuiCol_Text, palette.link);
+			if (ImGui::Selectable(label, false, ImGuiSelectableFlags_None,
+					ImVec2(ImGui::GetContentRegionAvail().x - 4.0f, 0.0f)))
+				ExecuteCommand(command);
+			ImGui::PopStyleColor();
+		};
+		link("New Calculator", "session.new");
+		link("Open Folder...", "folder.open");
+		ImGui::Dummy(ImVec2(0.0f, 12.0f));
+		ImGui::TextDisabled("Workspace");
+		ImGui::TextWrapped("%s", g.workspace.empty() ? "(none)" : g.workspace.c_str());
+		ImGui::EndTable();
 	}
 }
 
@@ -3551,6 +3557,14 @@ void Render() {
 		static bool copy_problems_checked = false;
 		static bool wiz_build_checked = false;
 		static bool wiz_build_started = false;
+		static bool model_close_inactive_checked = false;
+		static bool model_close_active_checked = false;
+		static bool model_reopen_checked = false;
+		static std::string model_reopen_path;
+		static std::string model_inactive_title;
+		static std::string model_active_title;
+		static bool example_build_checked = false;
+		static bool example_build_started = false;
 		static bool tab_x_found = false;
 		static bool tab_click_down_sent = false;
 		static bool tab_click_up_sent = false;
@@ -3564,9 +3578,9 @@ void Render() {
 			io.AddMousePosEvent(x, y);
 			io.AddMouseButtonEvent(0, down);
 		};
-		auto find_tab_x = [](const std::string& label, float* x, float* y) {
+		auto find_tab_x = [](const std::string& label, int kind, float* x, float* y) {
 			for (const auto& tab : g.mainTabRects) {
-				if (tab.kind == 2 && tab.label == label) {
+				if (tab.kind == kind && tab.label == label) {
 					*x = tab.rect.x + tab.rect.z - 12.0f;
 					*y = tab.rect.y + tab.rect.w * 0.5f;
 					return true;
@@ -3705,7 +3719,7 @@ void Render() {
 		}
 		if (frame == 30 && !tab_click_down_sent) {
 			tab_click_down_sent = true;
-			tab_x_found = find_tab_x("editor-second.cwiz", &tab_click_x, &tab_click_y);
+			tab_x_found = find_tab_x("editor-second.cwiz", 2, &tab_click_x, &tab_click_y);
 			tab_click_up_sent = tab_x_found;
 			std::fprintf(stderr, "[selftest] tab x target=%.1f,%.1f found=%s files=%zu\n",
 				tab_click_x, tab_click_y, tab_x_found ? "yes" : "no", g.files.size());
@@ -3723,12 +3737,12 @@ void Render() {
 		}
 		if (frame == 37 && tab_x_close_checked && !tab_x_dirty_checked) {
 			float x = 0.0f, y = 0.0f;
-			if (find_tab_x("editor-selftest.cwiz", &x, &y))
+			if (find_tab_x("editor-selftest.cwiz", 2, &x, &y))
 				push_tab_mouse(x, y, true);
 		}
 		if (frame == 39 && tab_x_close_checked) {
 			float x = 0.0f, y = 0.0f;
-			if (find_tab_x("editor-selftest.cwiz", &x, &y))
+			if (find_tab_x("editor-selftest.cwiz", 2, &x, &y))
 				push_tab_mouse(x, y, false);
 		}
 		if (frame == 41 && tab_x_close_checked) {
@@ -3750,6 +3764,55 @@ void Render() {
 		}
 		if (frame == 46 && wiz_build_started && !wiz_build_checked)
 			wiz_build_checked = g.lastBuildStatus == "Build succeeded";
+		if (frame == 48) {
+			if (g.tabs.size() >= 2) {
+				const int inactive = (g.activeTab == 0) ? 1 : 0;
+				model_inactive_title = g.tabs[static_cast<size_t>(inactive)].title;
+				model_reopen_path = g.tabs[static_cast<size_t>(inactive)].modelPath;
+				float x = 0.0f, y = 0.0f;
+				if (find_tab_x(model_inactive_title, 1, &x, &y))
+					push_tab_mouse(x, y, true);
+			}
+		}
+		if (frame == 49) {
+			float x = 0.0f, y = 0.0f;
+			if (!model_inactive_title.empty() && find_tab_x(model_inactive_title, 1, &x, &y))
+				push_tab_mouse(x, y, false);
+		}
+		if (frame == 51) {
+			model_close_inactive_checked = session::Count() == 1 && g.tabs.size() == 1;
+			if (!model_reopen_path.empty())
+				OpenModelAt(model_reopen_path);
+		}
+		if (frame == 53) {
+			model_reopen_checked = session::Count() == 2 && g.tabs.size() == 2;
+			if (g.tabs.size() >= 2) {
+				const int active = session::ActiveIndex();
+				model_active_title = g.tabs[static_cast<size_t>(active)].title;
+				float x = 0.0f, y = 0.0f;
+				if (find_tab_x(model_active_title, 1, &x, &y))
+					push_tab_mouse(x, y, true);
+			}
+		}
+		if (frame == 54) {
+			float x = 0.0f, y = 0.0f;
+			if (!model_active_title.empty() && find_tab_x(model_active_title, 1, &x, &y))
+				push_tab_mouse(x, y, false);
+		}
+		if (frame == 56) {
+			model_close_active_checked = session::Count() == 1 && g.tabs.size() == 1;
+			if (!model_reopen_path.empty())
+				OpenModelAt(model_reopen_path);
+		}
+		if (frame == 58 && !example_build_started) {
+			if (const char* example = std::getenv("CASIOEMU_SELFTEST_WIZ_EXAMPLE")) {
+				example_build_started = true;
+				OpenFileInEditor(example);
+				RequestBuild(false);
+			}
+		}
+		if (frame == 60 && example_build_started)
+			example_build_checked = g.lastBuildStatus == "Build succeeded";
 		if (frame == 24) {
 			FocusTerminal();
 			terminal_started = true;
@@ -3782,12 +3845,17 @@ void Render() {
 				report << "tab_x_dirty_prompt=" << (tab_x_dirty_checked ? "PASS" : "FAIL") << "\n";
 				report << "copy_problems=" << (copy_problems_checked ? "PASS" : "FAIL") << "\n";
 				report << "wiz_build=" << (wiz_build_checked ? "PASS" : "FAIL") << "\n";
+				report << "model_close_inactive=" << (model_close_inactive_checked ? "PASS" : "FAIL") << "\n";
+				report << "model_close_active=" << (model_close_active_checked ? "PASS" : "FAIL") << "\n";
+				report << "model_reopen=" << (model_reopen_checked ? "PASS" : "FAIL") << "\n";
+				report << "example_build=" << (example_build_checked ? "PASS" : "FAIL") << "\n";
 				report << "panel_tab=" << g.panelTab << "\n";
 				report << ((session::Count() >= 2 && g.tabs.size() >= 2 && terminal_ok && lint_checked && lint_cleared &&
 					dirty_prompt_checked && explorer_ops_checked && tabs_switched_checked && single_launch_checked &&
 					plus_welcome_checked && settings_tab_checked && wiz_source_checked &&
 					tab_x_close_checked && tab_x_dirty_checked && copy_problems_checked &&
-					wiz_build_checked) ? "RESULT PASS\n" : "RESULT FAIL\n");
+					wiz_build_checked && model_close_inactive_checked && model_close_active_checked &&
+					model_reopen_checked && example_build_checked) ? "RESULT PASS\n" : "RESULT FAIL\n");
 			}
 		}
 	}
