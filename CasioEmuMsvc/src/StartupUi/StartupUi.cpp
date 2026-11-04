@@ -2280,6 +2280,22 @@ namespace casioemu {
 				RememberPreviousTheme(active_theme);
 			else if (RenderSpecialTheme())
 				return;
+			if (settings_page && std::getenv("CASIOEMU_STARTUP_APPEARANCE")) {
+				static int click_frame = 0;
+				++click_frame;
+				ImGuiIO& io = ImGui::GetIO();
+				if (click_frame == 16) {
+					io.AddMousePosEvent(420.0f, 115.0f);
+					io.AddMouseButtonEvent(0, true);
+				}
+				else if (click_frame == 18) {
+					io.AddMouseButtonEvent(0, false);
+				}
+				else if (click_frame >= 22 && click_frame <= 30) {
+					io.AddMousePosEvent(800.0f, 620.0f);
+					io.AddMouseWheelEvent(0.0f, -4.0f);
+				}
+			}
 			if (std::getenv("CASIOEMU_SHOW_MASS_IMPORT")) {
 				static bool once = false;
 				if (!once) { once = true; show_import_dialog = true; }

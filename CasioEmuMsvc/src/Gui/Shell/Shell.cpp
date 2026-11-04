@@ -3720,6 +3720,34 @@ bool WriteLayoutReport(const std::string& path) {
 	check(inset_ok(g.rectTools, g.rectToolsBody, 8.0f), "calculator content keeps >= 8 px on all sides");
 	check(inset_ok(g.rectStatus, g.rectStatusContent, 8.0f), "status bar content keeps >= 8 px on all sides");
 	check(inset_ok(g.rectTabs, g.rectTabsContent, 8.0f), "tab strip content keeps >= 8 px on all sides");
+	const auto themes = ThemeManager::Instance().AvailableThemes();
+	bool featured_ok = false;
+	bool image_only_featured = false;
+	int dark_count = 0, light_count = 0, featured_count = 0;
+	for (const auto& info : themes) {
+		if (info.featured) {
+			++featured_count;
+			if (info.id == "anh-sang-cua-dang") {
+				featured_ok = true;
+				image_only_featured = !info.dark;
+			}
+		}
+		else if (info.dark) {
+			++dark_count;
+			if (info.id == "anh-sang-cua-dang")
+				image_only_featured = false;
+		}
+		else {
+			++light_count;
+			if (info.id == "anh-sang-cua-dang")
+				image_only_featured = false;
+		}
+	}
+	output << "theme_groups=dark:" << dark_count << ",light:" << light_count
+		<< ",featured:" << featured_count << "\n";
+	check(featured_ok && image_only_featured, "image theme is grouped only under Featured");
+	check(dark_count >= 1 && light_count >= 1 && featured_count >= 1,
+		"theme groups Dark, Light and Featured are all present in order");
 	check(g.chromeTitleCenterY == g.chromeMenuCenterY && g.chromeTitleCenterY == g.chromeActionCenterY,
 		"title, menus and actions share one baseline");
 	check(std::fabs(g.chromeTitleCenterY - (g.rectTitle.y + 14.0f)) < 1.0f,
