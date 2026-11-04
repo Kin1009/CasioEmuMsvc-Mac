@@ -166,9 +166,9 @@ void Activate(int index) {
 void CloseSession(int index) {
 	if (index < 0 || index >= static_cast<int>(g_entries.size()))
 		return;
-	// The primary entry is owned by main(); it may be closed only when another
-	// live session can take over the loop.  The last session is never removed.
-	if (index == 0 && g_entries.size() <= 1)
+	// The primary entry is owned by main() and shares the only SDL window; it is
+	// not removable at runtime.  Secondary model tabs are fully closable.
+	if (index <= 0)
 		return;
 	Entry& entry = g_entries[static_cast<size_t>(index)];
 	if (entry.mirror)

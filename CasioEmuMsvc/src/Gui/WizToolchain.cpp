@@ -1242,7 +1242,11 @@ private:
 
 	void RenderToolbar() {
 		ChooserLabel("Target");
-		ImGui::SetNextItemWidth(230.0f);
+		float target_width = 0.0f;
+		for (const auto& choice : kTargets)
+			target_width = std::max(target_width, ImGui::CalcTextSize(choice.label).x);
+		target_width += ImGui::GetFrameHeight() + 18.0f;
+		ImGui::SetNextItemWidth(target_width);
 		if (ImGui::BeginCombo("##wiz_target", kTargets[target_idx_].label)) {
 			for (int i = 0; i < IM_ARRAYSIZE(kTargets); ++i) {
 				const bool selected = i == target_idx_;

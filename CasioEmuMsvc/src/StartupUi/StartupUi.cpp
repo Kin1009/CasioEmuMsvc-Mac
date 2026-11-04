@@ -25,6 +25,7 @@
 #include "Ui.hpp"
 #include "sdl_win32_extra.h"
 #include <Gui.h>
+#include <Gui/Theme.h>
 #include <Gui/ThemeManager.h>
 #include "Ext/MacWindow.h"
 #include "Ext/Screenshot.h"
@@ -38,6 +39,7 @@
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <set>
 
@@ -934,6 +936,7 @@ namespace casioemu {
 				printf("[StartupUI][Warn] \"roms.db\" not found. Names may be inaccurate!\n");
 			}
 			Reload();
+			settings_window.reset(MakeSettingsWindow());
 		}
 		~StartupUi() {
 			if (reload_thread.joinable())
@@ -1057,6 +1060,7 @@ namespace casioemu {
 		std::atomic<bool> loading{false};
 		std::thread reload_thread;
 		bool settings_page = false;
+		std::unique_ptr<UIWindow> settings_window;
 		bool show_shortcut_popup = false;
 		std::filesystem::path shortcut_model_path{};
 		char shortcut_name[260]{};
@@ -1916,6 +1920,13 @@ namespace casioemu {
 
 		void RenderLegacy() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
+			if (std::getenv("CASIOEMU_STARTUP_SETTINGS")) {
+				static bool opened = false;
+				if (!opened) {
+					opened = true;
+					settings_page = true;
+				}
+			}
 			if (std::getenv("CASIOEMU_SHOW_ONLINE")) {
 				static bool online_opened = false;
 				if (!online_opened) {
@@ -1980,18 +1991,31 @@ namespace casioemu {
 			draw->AddRectFilled(ImVec2(viewport->Pos.x, strip_top),
 				ImVec2(viewport->Pos.x + viewport->Size.x, strip_top + strip_height),
 				ImGui::ColorConvertFloat4ToU32(palette.surface));
-			// The launcher's welcome row no longer carries a Settings tab: the
-			// one canonical Settings document lives in the runtime shell's
-			// models/session tab strip.
+			// Welcome | Settings.  Each screen has exactly one Settings entry;
+			// this launcher page renders the same SettingsWindow as the shell.
+			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x, strip_top));
+			ImGui::InvisibleButton("##launcher_welcome_tab", ImVec2(120.0f, strip_height));
+			if (ImGui::IsItemClicked())
+				settings_page = false;
+			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + 120.0f, strip_top));
+			ImGui::InvisibleButton("##launcher_settings_tab", ImVec2(110.0f, strip_height));
+			if (ImGui::IsItemClicked())
+				settings_page = true;
 			draw->AddRectFilled(ImVec2(viewport->Pos.x, strip_top),
 				ImVec2(viewport->Pos.x + 120.0f, strip_top + strip_height),
-				ImGui::ColorConvertFloat4ToU32(palette.tabActive));
-			draw->AddRectFilled(ImVec2(viewport->Pos.x + 4.0f, strip_top),
-				ImVec2(viewport->Pos.x + 116.0f, strip_top + 2.0f),
+				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.tabInactive : palette.tabActive));
+			draw->AddRectFilled(ImVec2(viewport->Pos.x + 120.0f, strip_top),
+				ImVec2(viewport->Pos.x + 230.0f, strip_top + strip_height),
+				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.tabActive : palette.tabInactive));
+			draw->AddRectFilled(ImVec2(viewport->Pos.x + (settings_page ? 124.0f : 4.0f), strip_top),
+				ImVec2(viewport->Pos.x + (settings_page ? 226.0f : 116.0f), strip_top + 2.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.accent));
 			draw->AddText(ImVec2(viewport->Pos.x + 18.0f,
 				strip_top + (strip_height - ImGui::GetTextLineHeight()) * 0.5f),
-				ImGui::ColorConvertFloat4ToU32(palette.foreground), "Welcome");
+				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.muted : palette.foreground), "Welcome");
+			draw->AddText(ImVec2(viewport->Pos.x + 134.0f,
+				strip_top + (strip_height - ImGui::GetTextLineHeight()) * 0.5f),
+				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.foreground : palette.muted), "Settings");
 			if (import_busy) {
 				static constexpr char spinner[] = "|/-\\";
 				const int frame = static_cast<int>(ImGui::GetTime() * 8.0) & 3;
@@ -2008,7 +2032,21 @@ namespace casioemu {
 			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x, viewport->Pos.y + body_y));
 			RenderStartupSidebar(palette, sidebar_w, body_h);
 			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + sidebar_w + 1.0f, viewport->Pos.y + body_y));
-			RenderStartupWelcome(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
+			if (settings_page) {
+				const float settings_w = viewport->Size.x - sidebar_w - 1.0f;
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, palette.background);
+				ImGui::BeginChild("##startup_settings_host", ImVec2(settings_w, body_h), ImGuiChildFlags_None);
+				ImGui::SetCursorPos(ImVec2(12.0f, 10.0f));
+				ImGui::BeginChild("##startup_settings_body", ImVec2(settings_w - 24.0f, body_h - 20.0f), ImGuiChildFlags_None);
+				if (settings_window)
+					settings_window->RenderCore();
+				ImGui::EndChild();
+				ImGui::EndChild();
+				ImGui::PopStyleColor();
+			}
+			else {
+				RenderStartupWelcome(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
+			}
 			RenderStartupStatus(palette, viewport->Size.x, status_h);
 			RenderOnlineModels();
 			PollImportTask();

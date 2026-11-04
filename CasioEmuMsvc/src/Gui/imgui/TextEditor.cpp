@@ -940,23 +940,55 @@ void TextEditor::Render()
 				drawList->AddRectFilled(start, end, mPalette[(int)PaletteIndex::Breakpoint]);
 			}
 
-			// Draw error markers
+			// Draw diagnostics: error = red, warning = amber, note = muted.
+			// The map is only rebuilt when lint/save/typing updates it, so this
+			// path is one lookup per visible line.
+			auto diagnosticIt = mDiagnosticMarkers.find(lineNo + 1);
 			auto errorIt = mErrorMarkers.find(lineNo + 1);
-			if (errorIt != mErrorMarkers.end())
+			if (diagnosticIt != mDiagnosticMarkers.end() || errorIt != mErrorMarkers.end())
 			{
+				MarkerSeverity severity = MarkerSeverity::Error;
+				const std::string* message = nullptr;
+				if (diagnosticIt != mDiagnosticMarkers.end()) {
+					severity = diagnosticIt->second.severity;
+					message = &diagnosticIt->second.message;
+				}
+				else {
+					message = &errorIt->second;
+				}
+				ImU32 fill = mPalette[(int)PaletteIndex::ErrorMarker];
+				ImU32 underline = IM_COL32(235, 76, 76, 190);
+				ImU32 gutter = IM_COL32(235, 76, 76, 255);
+				const char* label = "Error";
+				if (severity == MarkerSeverity::Warning) {
+					fill = IM_COL32(210, 170, 40, 90);
+					underline = IM_COL32(230, 185, 50, 200);
+					gutter = IM_COL32(230, 185, 50, 255);
+					label = "Warning";
+				}
+				else if (severity == MarkerSeverity::Info) {
+					fill = IM_COL32(140, 140, 140, 70);
+					underline = IM_COL32(150, 150, 150, 170);
+					gutter = IM_COL32(150, 150, 150, 255);
+					label = "Note";
+				}
 				auto end = ImVec2(lineStartScreenPos.x + contentSize.x + 2.0f * scrollX, lineStartScreenPos.y + mCharAdvance.y);
-				drawList->AddRectFilled(start, end, mPalette[(int)PaletteIndex::ErrorMarker]);
+				drawList->AddRectFilled(start, end, fill);
+				drawList->AddRectFilled(ImVec2(start.x, end.y - 1.0f), ImVec2(end.x, end.y), underline);
+				// Gutter marker beside the line number.
+				const float gutterX = lineStartScreenPos.x + mTextStart - 54.0f;
+				drawList->AddRectFilled(ImVec2(gutterX, start.y + 1.0f),
+					ImVec2(gutterX + 3.0f, end.y - 1.0f), gutter);
 
-				if (ImGui::IsMouseHoveringRect(lineStartScreenPos, end))
+				if (ImGui::IsMouseHoveringRect(lineStartScreenPos, end) && message)
 				{
 					ImGui::BeginTooltip();
-					ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
-					ImGui::Text("Error at line %d:", errorIt->first);
+					ImGui::PushStyleColor(ImGuiCol_Text, severity == MarkerSeverity::Error ? ImVec4(1.0f, 0.25f, 0.25f, 1.0f) :
+						(severity == MarkerSeverity::Warning ? ImVec4(1.0f, 0.78f, 0.25f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f)));
+					ImGui::Text("%s at line %d:", label, lineNo + 1);
 					ImGui::PopStyleColor();
 					ImGui::Separator();
-					ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.2f, 1.0f));
-					ImGui::Text("%s", errorIt->second.c_str());
-					ImGui::PopStyleColor();
+					ImGui::TextUnformatted(message->c_str());
 					ImGui::EndTooltip();
 				}
 			}
