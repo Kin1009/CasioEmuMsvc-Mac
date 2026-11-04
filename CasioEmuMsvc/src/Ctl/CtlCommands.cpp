@@ -556,6 +556,12 @@ namespace casioctl {
 			result["ram"]["size"] = static_cast<uint64_t>(casioemu::GetRamSize(emulator.hardware_id));
 			result["run_mode"] = chipset ? RunModeName(chipset->GetStatus()) : "unknown";
 			result["running"] = emulator.Running();
+			Json lcd = Json::Object();
+			lcd["publish_count"] = emulator.lcd_publish_count.load(std::memory_order_relaxed);
+			lcd["latency_last_us"] = emulator.lcd_latency_last_ns.load(std::memory_order_relaxed) / 1000;
+			lcd["latency_max_us"] = emulator.lcd_latency_max_ns.load(std::memory_order_relaxed) / 1000;
+			lcd["changed_pixels"] = emulator.lcd_last_changed_pixels.load(std::memory_order_relaxed);
+			result["lcd"] = std::move(lcd);
 			outcome.result = std::move(result);
 			return outcome;
 		}

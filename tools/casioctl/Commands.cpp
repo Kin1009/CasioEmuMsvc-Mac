@@ -249,6 +249,15 @@ namespace casioctl {
 			out << "path       " << field("model_path") << "\n";
 			out << "rom        " << field("rom_path") << "\n";
 			out << "state      " << (result.Find("paused") && result.Find("paused")->AsBool() ? "paused" : "running") << "\n";
+			if (const Json* lcd = result.Find("lcd")) {
+				auto number = [&](const char* key) -> long long {
+					const Json* value = lcd->Find(key);
+					return value ? value->AsInt(0) : 0;
+				};
+				out << "lcd        frames " << number("publish_count")
+					<< "  latency " << number("latency_last_us") << " us (max "
+					<< number("latency_max_us") << " us)  changed " << number("changed_pixels") << " px\n";
+			}
 			const Json* registers = result.Find("registers");
 			auto register_value = [&](const char* name) -> std::string {
 				if (!registers)
