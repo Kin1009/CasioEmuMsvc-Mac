@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <vector>
@@ -37,6 +38,16 @@ SDL_Renderer* g_mainRenderer = nullptr;
 
 std::string ExecutableDirString() {
 	return casioemu::settings::SettingsStore::ExecutableDir().string();
+}
+
+std::string CanonicalModelPath(const std::string& path) {
+	if (path.empty())
+		return path;
+	std::error_code ec;
+	const auto canonical = std::filesystem::weakly_canonical(path, ec);
+	if (!ec)
+		return canonical.string();
+	return std::filesystem::absolute(path, ec).string();
 }
 
 void ApplyClockRates() {
@@ -95,9 +106,11 @@ bool OpenSession(const std::string& modelPath, std::string* error) {
 			*error = "model path is empty";
 		return false;
 	}
+	const std::string wanted = CanonicalModelPath(modelPath);
 	for (const auto& entry : g_entries) {
-		if (entry.modelPath == modelPath && entry.live) {
-			// Already open: just select it.
+		if (entry.live && CanonicalModelPath(entry.modelPath) == wanted) {
+			// Already open: just select it.  Canonicalising both sides keeps
+			// "models/X", "./models/X" and an absolute path the same session.
 			Activate(static_cast<int>(&entry - g_entries.data()));
 			return true;
 		}

@@ -8,6 +8,7 @@
 #include "OnlineLoopbackServer.h"
 #include "OnlineModelClient.h"
 #include "OnlineModelPackage.h"
+#include "ModelImport.h"
 #include "UpdateChecker.h"
 #include <OnlineBuildConfig.h>
 #include "3rd_licenses.h"
@@ -30,6 +31,7 @@
 #include <SDL.h>
 #include <SDL_image.h>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <imgui.h>
 #include <fstream>
@@ -764,6 +766,87 @@ static bool CreateDesktopShortcut(const std::filesystem::path& model_path, const
 #endif
 
 namespace casioemu {
+	namespace {
+		constexpr float kStartupChromeHeight = 28.0f;
+		constexpr float kStartupDialogRounding = 10.0f;
+		constexpr float kStartupDialogPadding = 14.0f;
+
+		inline ImVec4 WithAlphaColor(ImVec4 color, float alpha) {
+			color.w = alpha;
+			return color;
+		}
+
+		void PushStartupDialogStyle(const plugin::ThemePalette& palette) {
+			ImGui::PushStyleColor(ImGuiCol_WindowBg, palette.surface);
+			ImGui::PushStyleColor(ImGuiCol_PopupBg, palette.surface);
+			ImGui::PushStyleColor(ImGuiCol_Border, palette.borderStrong);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, kStartupDialogRounding);
+			ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, kStartupDialogRounding);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kStartupDialogPadding, kStartupDialogPadding));
+		}
+
+		void PopStartupDialogStyle() {
+			ImGui::PopStyleVar(4);
+			ImGui::PopStyleColor(3);
+		}
+
+		void DrawStartupDialogHeader(const plugin::ThemePalette& palette, const char* title, bool* open,
+				bool close_enabled = true) {
+			ImDrawList* draw = ImGui::GetWindowDrawList();
+			const ImVec2 window_pos = ImGui::GetWindowPos();
+			const float width = ImGui::GetWindowWidth();
+			const float height = 34.0f;
+			const float text_h = ImGui::GetTextLineHeight();
+			draw->AddText(ImVec2(window_pos.x + kStartupDialogPadding,
+				window_pos.y + (height - text_h) * 0.5f),
+				ImGui::ColorConvertFloat4ToU32(palette.foreground), title);
+			const float close_size = 22.0f;
+			ImGui::SetCursorPos(ImVec2(width - kStartupDialogPadding - close_size, 6.0f));
+			const bool clicked = ImGui::InvisibleButton("##startup_dialog_close", ImVec2(close_size, close_size));
+			const bool hovered = ImGui::IsItemHovered();
+			const ImVec2 close_min = ImGui::GetItemRectMin();
+			const ImVec2 close_max = ImGui::GetItemRectMax();
+			if (hovered)
+				draw->AddRectFilled(close_min, close_max,
+					ImGui::ColorConvertFloat4ToU32(palette.hover), 4.0f);
+			const ImU32 color = ImGui::ColorConvertFloat4ToU32(
+				!close_enabled ? WithAlphaColor(palette.muted, 0.4f) : (hovered ? palette.foreground : palette.muted));
+			const float inset = 6.5f;
+			draw->AddLine(ImVec2(close_min.x + inset, close_min.y + inset),
+				ImVec2(close_max.x - inset, close_max.y - inset), color, 1.4f);
+			draw->AddLine(ImVec2(close_max.x - inset, close_min.y + inset),
+				ImVec2(close_min.x + inset, close_max.y - inset), color, 1.4f);
+			draw->AddLine(ImVec2(window_pos.x, window_pos.y + height),
+				ImVec2(window_pos.x + width, window_pos.y + height),
+				ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
+			ImGui::SetCursorPos(ImVec2(kStartupDialogPadding, height + 10.0f));
+			if (clicked && close_enabled) {
+				if (open)
+					*open = false;
+				ImGui::CloseCurrentPopup();
+			}
+		}
+
+		bool BeginStartupModal(const plugin::ThemePalette& palette, const char* id, const char* title,
+				bool* open, const ImVec2& size) {
+			ImGui::SetNextWindowSize(size, ImGuiCond_Appearing);
+			PushStartupDialogStyle(palette);
+			if (!ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+					ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking)) {
+				PopStartupDialogStyle();
+				return false;
+			}
+			DrawStartupDialogHeader(palette, title, open);
+			return true;
+		}
+
+		void EndStartupModal() {
+			ImGui::EndPopup();
+			PopStartupDialogStyle();
+		}
+	} // namespace
+
 	class StartupUi {
 	public:
 		std::map<std::array<char, 8>, std::string> RomNames;
@@ -819,8 +902,11 @@ namespace casioemu {
 		bool update_result_consumed = false;
 		StartupUi() {
 			// The update check reaches out to GitHub, so it only runs when the
-			// user left the setting enabled (Theme > Integrations).
-			if (ThemeManager::Instance().Settings().enableUpdateChecker)
+			// user left the setting enabled (Theme > Integrations).  Headless
+			// verification modes skip it so a notification cannot cover the
+			// window under test.
+			if (ThemeManager::Instance().Settings().enableUpdateChecker &&
+				!std::getenv("CASIOEMU_SHOT_STARTUP") && !std::getenv("CASIOEMU_SHOW_ONLINE"))
 				update_checker.Start();
 			std::ifstream api_settings{"online_api.cfg"};
 			if (api_settings) {
@@ -849,12 +935,21 @@ namespace casioemu {
 			}
 			Reload();
 		}
+		~StartupUi() {
+			if (reload_thread.joinable())
+				reload_thread.join();
+		}
 		void Reload() {
+			if (reload_thread.joinable())
+				reload_thread.join();
 			loading = true;
-			std::filesystem::create_directory("models");
-			std::thread thd([&]() {
+			std::error_code ec;
+			const std::filesystem::path models_dir = startup::DefaultModelsDirectory();
+			std::filesystem::create_directories(models_dir, ec);
+			reload_thread = std::thread([this, models_dir]() {
 				models.clear();
-				for (auto& dir : std::filesystem::directory_iterator("models")) {
+				std::error_code iter_ec;
+				for (auto& dir : std::filesystem::directory_iterator(models_dir, iter_ec)) {
 					if (dir.path().filename() == ".online") continue;
 					if (dir.is_directory()) {
 						try {
@@ -954,13 +1049,13 @@ namespace casioemu {
 				}
 				loading = false;
 			});
-			thd.detach();
 		}
 		std::vector<std::string> recently_used{};
 		char search_txt[200]{};
 		const char* current_filter = "##";
 		bool not_show_emu = false;
-		bool loading = false;
+		std::atomic<bool> loading{false};
+		std::thread reload_thread;
 		bool settings_page = false;
 		bool show_shortcut_popup = false;
 		std::filesystem::path shortcut_model_path{};
@@ -971,6 +1066,16 @@ namespace casioemu {
 		std::filesystem::path current_file{};
 		RomPackage current_rp{};
 		bool password_error = false;
+
+		// Model package import (Import... button and the encrypted-password flow).
+		std::filesystem::path pending_import_package{};
+		std::string import_status;
+		bool import_error = false;
+		bool import_busy = false;
+		std::future<startup::ModelImportResult> import_task;
+		bool show_import_result = false;
+		startup::ModelImportResult last_import{};
+		bool import_password_pending = false;
 
 		inline std::string generate_random_string(size_t length) {
 			return util::Random::random_string(length);
@@ -987,6 +1092,111 @@ namespace casioemu {
 		void SaveOnlineApiAddress() {
 			std::ofstream settings{"online_api.cfg", std::ios::trunc};
 			if (settings) settings << online_api;
+		}
+
+		void BeginImportModelPackage(const std::filesystem::path& package_path) {
+			if (import_busy)
+				return;
+			pending_import_package = package_path;
+			import_busy = true;
+			import_error = false;
+			import_password_pending = false;
+			password[0] = '\0';
+			password_error = false;
+			import_status = "Importing " + package_path.filename().string() + "...";
+			const std::filesystem::path models_dir = startup::DefaultModelsDirectory();
+			import_task = std::async(std::launch::async, [package_path, models_dir] {
+				return startup::ImportModelPackage(package_path, models_dir);
+			});
+		}
+
+		void RetryImportModelPackage(const std::string& key) {
+			if (import_busy || pending_import_package.empty())
+				return;
+			import_busy = true;
+			import_error = false;
+			import_password_pending = false;
+			import_status = "Decrypting and importing " + pending_import_package.filename().string() + "...";
+			const std::filesystem::path package_path = pending_import_package;
+			const std::filesystem::path models_dir = startup::DefaultModelsDirectory();
+			import_task = std::async(std::launch::async, [package_path, models_dir, key] {
+				return startup::ImportModelPackage(package_path, models_dir, key);
+			});
+		}
+
+		void PollImportTask() {
+			if (!import_busy || !import_task.valid() ||
+				import_task.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+				return;
+			startup::ModelImportResult result = import_task.get();
+			import_busy = false;
+			last_import = result;
+			if (result.needsPassword) {
+				import_password_pending = true;
+				password[0] = '\0';
+				password_error = false;
+				import_status = "Encrypted package: enter its password.";
+				return;
+			}
+			show_import_result = true;
+			if (result.ok) {
+				import_error = false;
+				import_status = "Imported " + result.modelName + " (" +
+					std::to_string(result.files.size()) + " files)";
+				Reload();
+			}
+			else {
+				import_error = true;
+				import_status = "Import failed: " + result.error;
+			}
+		}
+
+		void RunImportSelfTest(const std::filesystem::path& package_path, const std::filesystem::path& report_path) {
+			std::error_code ec;
+			if (reload_thread.joinable())
+				reload_thread.join();
+			loading = false;
+			const std::filesystem::path models_dir = startup::DefaultModelsDirectory();
+			if (!std::getenv("CASIOEMU_MODELS_DIR")) {
+				std::ofstream report(report_path, std::ios::trunc);
+				if (report)
+					report << "RESULT FAIL\nCASIOEMU_MODELS_DIR is required for the import self-test.\n";
+				return;
+			}
+			std::filesystem::remove_all(models_dir, ec);
+			const char* password = std::getenv("CASIOEMU_SELFTEST_PACKAGE_PASSWORD");
+			startup::ModelImportResult result = startup::ImportModelPackage(package_path, models_dir,
+				password ? password : std::string());
+			ModelInfo registered{};
+			std::string load_error;
+			const bool registered_ok = result.ok &&
+				LoadModelInfoFromFolder(result.targetPath, registered, nullptr, &load_error);
+			std::ofstream report(report_path, std::ios::trunc);
+			if (!report)
+				return;
+			report << "package=" << package_path.string() << '\n';
+			report << "models_dir=" << models_dir.string() << '\n';
+			report << "import=" << (result.ok ? "PASS" : "FAIL") << '\n';
+			report << "encrypted=" << (result.encrypted ? "yes" : "no") << '\n';
+			report << "needs_password=" << (result.needsPassword ? "yes" : "no") << '\n';
+			report << "model_name=" << result.modelName << '\n';
+			report << "target=" << result.targetPath << '\n';
+			report << "files=";
+			for (size_t i = 0; i < result.files.size(); ++i)
+				report << (i ? "," : "") << result.files[i];
+			report << '\n';
+			report << "registered=" << (registered_ok ? "PASS" : "FAIL") << '\n';
+			if (!result.ok)
+				report << "error=" << result.error << '\n';
+			if (!load_error.empty())
+				report << "load_error=" << load_error << '\n';
+			const bool expect_password_prompt = std::getenv("CASIOEMU_SELFTEST_EXPECT_PASSWORD") != nullptr;
+			const bool prompt_ok = expect_password_prompt && result.needsPassword;
+			report << "password_prompt=" << (prompt_ok ? "PASS" : "FAIL") << '\n';
+			report << ((result.ok && registered_ok) || prompt_ok ? "RESULT PASS\n" : "RESULT FAIL\n");
+			report.close();
+			if (result.ok)
+				Reload();
 		}
 
 		bool OnlineBusy() const {
@@ -1238,6 +1448,7 @@ namespace casioemu {
 		}
 
 		void RenderOnlineModels() {
+			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
 			if (show_online_popup) {
 				ImGui::OpenPopup("StartupUI.OnlineModels"_lc);
 				show_online_popup = false;
@@ -1271,12 +1482,16 @@ namespace casioemu {
 				(std::min)(820.0f, viewport_size.y * 0.88f));
 #endif
 			ImGui::SetNextWindowSize(online_popup_size, ImGuiCond_Appearing);
-			ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+			PushStartupDialogStyle(palette);
 			if (!ImGui::BeginPopupModal("StartupUI.OnlineModels"_lc, nullptr,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
-				ImGui::PopStyleColor();
+				PopStartupDialogStyle();
 				return;
 			}
+			bool online_dialog_open = true;
+			DrawStartupDialogHeader(palette, "StartupUI.OnlineModels"_lc, &online_dialog_open, !OnlineBusy());
 			if (close_online_popup_requested) {
 				close_online_popup_requested = false;
 				ImGui::CloseCurrentPopup();
@@ -1379,12 +1594,13 @@ namespace casioemu {
 
 			const bool launch_controls_disabled = OnlineBusy();
 			if (launch_controls_disabled) ImGui::BeginDisabled();
-			if (ImGui::Button("StartupUI.OnlineLaunch"_lc)) BeginDownloadOnlineModel();
+			ImGui::Dummy(ImVec2(0.0f, 4.0f));
+			if (ImGui::Button("StartupUI.OnlineLaunch"_lc, ImVec2(0, 26))) BeginDownloadOnlineModel();
 			ImGui::SameLine();
-			if (ImGui::Button("Button.Negative"_lc)) ImGui::CloseCurrentPopup();
+			if (ImGui::Button("Button.Negative"_lc, ImVec2(0, 26))) ImGui::CloseCurrentPopup();
 			if (launch_controls_disabled) ImGui::EndDisabled();
 			ImGui::EndPopup();
-			ImGui::PopStyleColor();
+			PopStartupDialogStyle();
 		}
 
 		void LaunchModel(const Model& model) {
@@ -1402,36 +1618,57 @@ namespace casioemu {
 			const ImVec2 pos = ImGui::GetMainViewport()->Pos;
 			const float width = ImGui::GetMainViewport()->Size.x;
 			ImDrawList* draw = ImGui::GetWindowDrawList();
-			draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + 38.0f),
+			draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + kStartupChromeHeight),
 				ImGui::ColorConvertFloat4ToU32(palette.titleBar));
-			draw->AddText(ImVec2(pos.x + 94.0f, pos.y + 8.0f),
+			const float center_y = pos.y + kStartupChromeHeight * 0.5f;
+			const float text_h = ImGui::GetTextLineHeight();
+			const float text_top = center_y - text_h * 0.5f;
+			const float control_top = center_y - 11.0f;
+			draw->AddText(ImVec2(pos.x + 94.0f, text_top),
 				ImGui::ColorConvertFloat4ToU32(palette.foreground), "CasioEmuMsvc");
-			draw->AddLine(ImVec2(pos.x, pos.y + 37.0f), ImVec2(pos.x + width, pos.y + 37.0f),
+			draw->AddLine(ImVec2(pos.x, pos.y + kStartupChromeHeight - 1.0f),
+				ImVec2(pos.x + width, pos.y + kStartupChromeHeight - 1.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.border));
-			ImGui::SetCursorScreenPos(ImVec2(pos.x + width - 266.0f, pos.y + 6.0f));
-			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
-			ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
-			if (ImGui::Button("Import...", ImVec2(80, 25))) {
-				SystemDialogs::OpenFileDialog([&](std::filesystem::path f) {
-					try {
-						std::ifstream ifs{f, std::ios::binary};
-						RomPackage rp{};
-						Binary::Read(ifs, rp);
-						rp.ExtractTo("./models/" + create_unique_directory(f.stem().string()));
+
+			struct Action {
+				const char* label;
+				int id;
+				float width;
+			};
+			const Action actions[] = {
+				{ "Import...", 0, ImGui::CalcTextSize("Import...").x + 20.0f },
+				{ "Refresh", 1, ImGui::CalcTextSize("Refresh").x + 20.0f },
+				{ "Online", 2, ImGui::CalcTextSize("Online").x + 20.0f },
+			};
+			float total = 0.0f;
+			for (const auto& action : actions)
+				total += action.width + 6.0f;
+			float action_x = pos.x + width - total - 10.0f;
+			for (const auto& action : actions) {
+				ImGui::SetCursorScreenPos(ImVec2(action_x, control_top));
+				ImGui::PushID(action.id + 2000);
+				const bool clicked = ImGui::InvisibleButton("##startup_action", ImVec2(action.width, 22.0f));
+				const bool hovered = ImGui::IsItemHovered();
+				if (hovered || ImGui::IsItemActive())
+					draw->AddRectFilled(ImVec2(action_x, control_top),
+						ImVec2(action_x + action.width, control_top + 22.0f),
+						ImGui::ColorConvertFloat4ToU32(palette.hover), 4.0f);
+				draw->AddText(ImVec2(action_x + 10.0f, text_top),
+					ImGui::ColorConvertFloat4ToU32(palette.foreground), action.label);
+				ImGui::PopID();
+				if (clicked) {
+					if (action.id == 0) {
+						SystemDialogs::OpenFileDialog([this](std::filesystem::path file) {
+							BeginImportModelPackage(file);
+						});
+					}
+					else if (action.id == 1)
 						Reload();
-					}
-					catch (const std::exception&) {
-						SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Import Error",
-							"The selected file is not a valid or supported ROM package.", nullptr);
-					}
-				});
+					else
+						show_online_popup = true;
+				}
+				action_x += action.width + 6.0f;
 			}
-			ImGui::SameLine();
-			if (ImGui::Button("Refresh", ImVec2(82, 25))) Reload();
-			ImGui::SameLine();
-			if (ImGui::Button("Online", ImVec2(76, 25))) show_online_popup = true;
-			ImGui::PopStyleColor(3);
 		}
 
 		void RenderModelRow(Model& model, int& id) {
@@ -1524,12 +1761,14 @@ namespace casioemu {
 			ImGui::SetCursorPosX(36.0f);
 			ImGui::TextDisabled("Start");
 			link("New Calculator", [&] {
-				if (!selected_path.empty()) {
-					auto iter = std::find_if(models.begin(), models.end(),
-						[&](const Model& item) { return item.path == selected_path; });
-					if (iter != models.end()) LaunchModel(*iter);
+				if (selected_path.empty()) {
+					import_status = "Select a model from the Models list first.";
+					import_error = true;
+					return;
 				}
-				else if (!models.empty()) LaunchModel(models.front());
+				auto iter = std::find_if(models.begin(), models.end(),
+					[&](const Model& item) { return item.path == selected_path; });
+				if (iter != models.end()) LaunchModel(*iter);
 			});
 			link("Open Folder...", [&] {
 				SystemDialogs::OpenFolderDialog([](std::filesystem::path folder) {
@@ -1542,14 +1781,18 @@ namespace casioemu {
 			ImGui::SetCursorPosX(36.0f);
 			ImGui::TextDisabled("Recent");
 			bool any = false;
-			for (const auto& path : recently_used) {
+			if (loading) {
+				ImGui::SetCursorPosX(36.0f);
+				ImGui::TextDisabled("Scanning models...");
+			}
+			for (const auto& path : loading ? std::vector<std::string>{} : recently_used) {
 				auto iter = std::find_if(models.begin(), models.end(),
 					[&](const Model& item) { return item.path == path; });
 				if (iter == models.end()) continue;
 				any = true;
 				link(iter->name.c_str(), [&] { LaunchModel(*iter); });
 			}
-			if (!any) {
+			if (!any && !loading) {
 				const auto& saved = casioemu::settings::SettingsStore::Instance().Data().sessions;
 				for (const auto& record : saved) {
 					any = true;
@@ -1558,13 +1801,22 @@ namespace casioemu {
 					const std::string row = record.title.empty() ? record.model : record.title;
 					if (ImGui::Selectable(row.c_str(), false, ImGuiSelectableFlags_None, ImVec2(360, 0))) {
 						auto iter = std::find_if(models.begin(), models.end(),
-							[&](const Model& item) { return item.path.string().find(record.model) != std::string::npos; });
+							[&](const Model& item) {
+								if (!record.modelPath.empty()) {
+									std::error_code path_ec;
+									const auto lhs = std::filesystem::weakly_canonical(item.path, path_ec);
+									const auto rhs = std::filesystem::weakly_canonical(record.modelPath, path_ec);
+									if (!path_ec && lhs == rhs)
+										return true;
+								}
+								return !record.model.empty() && item.name == record.model;
+							});
 						if (iter != models.end()) LaunchModel(*iter);
 					}
 					ImGui::PopStyleColor();
 				}
 			}
-			if (!any) {
+			if (!any && !loading) {
 				ImGui::SetCursorPosX(36.0f);
 				ImGui::TextDisabled("No recent models yet");
 			}
@@ -1579,9 +1831,20 @@ namespace casioemu {
 			draw->AddRectFilled(min, ImVec2(min.x + width, min.y + height),
 				ImGui::ColorConvertFloat4ToU32(palette.statusBar));
 			char count[96];
-			std::snprintf(count, sizeof(count), "Models: %d", (int)models.size());
+			if (loading)
+				std::snprintf(count, sizeof(count), "Scanning models...");
+			else
+				std::snprintf(count, sizeof(count), "Models: %d", (int)models.size());
 			draw->AddText(ImVec2(min.x + 12.0f, min.y + 2.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.statusBarForeground), count);
+			if (!import_status.empty()) {
+				const float count_width = ImGui::CalcTextSize(count).x;
+				const ImU32 status_color = ImGui::ColorConvertFloat4ToU32(
+					import_error ? palette.error : palette.statusBarForeground);
+				std::string status = (import_error ? "   |   " : "   |   ") + import_status;
+				draw->AddText(ImVec2(min.x + 12.0f + count_width + 8.0f, min.y + 2.0f),
+					status_color, status.c_str());
+			}
 			const std::string right = std::string("Language: ") + g_local.GetCurrentLanguage() +
 				"   |   Settings: JSON   |   Schema 1   |   build " CASIOEMU_BUILD_COMMIT " " CASIOEMU_BUILD_TIME;
 			const float right_width = ImGui::CalcTextSize(right.c_str()).x;
@@ -1653,6 +1916,14 @@ namespace casioemu {
 
 		void RenderLegacy() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
+			if (std::getenv("CASIOEMU_SHOW_ONLINE")) {
+				static bool online_opened = false;
+				if (!online_opened) {
+					online_opened = true;
+					show_online_popup = true;
+					online_status = "Sign in to browse online models.";
+				}
+			}
 			if (std::getenv("CASIOEMU_SHOW_UPDATE")) {
 				update_info.tag = "v9.9.9";
 				update_info.title = "Preview verification build";
@@ -1667,10 +1938,10 @@ namespace casioemu {
 				show_update = !update_info.tag.empty();
 			}
 			if (show_update) {
-				ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Appearing);
 				ImGui::OpenPopup("StartupUI.UpdateAvailableTitle"_lc);
-				if (ImGui::BeginPopupModal("StartupUI.UpdateAvailableTitle"_lc, &show_update,
-						ImGuiWindowFlags_AlwaysAutoResize)) {
+				bool open = show_update;
+				if (BeginStartupModal(palette, "StartupUI.UpdateAvailableTitle"_lc,
+						"Update Available", &open, ImVec2(460.0f, 205.0f))) {
 					ImGui::TextWrapped("%s %s", "StartupUI.UpdateAvailableMessage"_lc, update_info.tag.c_str());
 					if (!update_info.notes.empty()) {
 						std::string first_line = update_info.notes.substr(0, update_info.notes.find('\n'));
@@ -1678,14 +1949,18 @@ namespace casioemu {
 							first_line = first_line.substr(0, 117) + "...";
 						ImGui::TextDisabled("%s", first_line.c_str());
 					}
-					ImGui::Spacing();
-					if (ImGui::Button("StartupUI.OpenReleasePage"_lc))
+					ImGui::Dummy(ImVec2(0.0f, 6.0f));
+					if (ImGui::Button("StartupUI.OpenReleasePage"_lc, ImVec2(0, 26)))
 						SDL_OpenURL(update_info.url.c_str());
 					ImGui::SameLine();
-					if (ImGui::Button("StartupUI.UpdateLater"_lc))
+					if (ImGui::Button("StartupUI.UpdateLater"_lc, ImVec2(0, 26))) {
 						show_update = false;
-					ImGui::EndPopup();
+						ImGui::CloseCurrentPopup();
+					}
+					EndStartupModal();
 				}
+				if (!open)
+					show_update = false;
 			}
 			const ImGuiViewport* viewport = ImGui::GetMainViewport();
 			ImGui::SetNextWindowPos(viewport->Pos);
@@ -1700,76 +1975,117 @@ namespace casioemu {
 				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
 			DrawStartupTitleBar(palette);
 			ImDrawList* draw = ImGui::GetWindowDrawList();
-			draw->AddRectFilled(ImVec2(viewport->Pos.x, viewport->Pos.y + 38.0f),
-				ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + 64.0f),
+			const float strip_top = viewport->Pos.y + kStartupChromeHeight;
+			const float strip_height = 26.0f;
+			draw->AddRectFilled(ImVec2(viewport->Pos.x, strip_top),
+				ImVec2(viewport->Pos.x + viewport->Size.x, strip_top + strip_height),
 				ImGui::ColorConvertFloat4ToU32(palette.surface));
-			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x, viewport->Pos.y + 38.0f));
-			ImGui::InvisibleButton("##welcome_tab", ImVec2(120.0f, 26.0f));
-			if (ImGui::IsItemClicked()) settings_page = false;
-			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + 120.0f, viewport->Pos.y + 38.0f));
-			ImGui::InvisibleButton("##settings_tab", ImVec2(110.0f, 26.0f));
-			if (ImGui::IsItemClicked()) settings_page = true;
-			draw->AddRectFilled(ImVec2(viewport->Pos.x, viewport->Pos.y + 38.0f),
-				ImVec2(viewport->Pos.x + 120.0f, viewport->Pos.y + 64.0f),
-				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.tabInactive : palette.tabActive));
-			draw->AddRectFilled(ImVec2(viewport->Pos.x + 120.0f, viewport->Pos.y + 38.0f),
-				ImVec2(viewport->Pos.x + 230.0f, viewport->Pos.y + 64.0f),
-				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.tabActive : palette.tabInactive));
-			if (!settings_page)
-				draw->AddRectFilled(ImVec2(viewport->Pos.x + 4.0f, viewport->Pos.y + 38.0f),
-					ImVec2(viewport->Pos.x + 116.0f, viewport->Pos.y + 40.0f),
-					ImGui::ColorConvertFloat4ToU32(palette.accent));
-			else
-				draw->AddRectFilled(ImVec2(viewport->Pos.x + 124.0f, viewport->Pos.y + 38.0f),
-					ImVec2(viewport->Pos.x + 226.0f, viewport->Pos.y + 40.0f),
-					ImGui::ColorConvertFloat4ToU32(palette.accent));
+			// The launcher's welcome row no longer carries a Settings tab: the
+			// one canonical Settings document lives in the runtime shell's
+			// models/session tab strip.
+			draw->AddRectFilled(ImVec2(viewport->Pos.x, strip_top),
+				ImVec2(viewport->Pos.x + 120.0f, strip_top + strip_height),
+				ImGui::ColorConvertFloat4ToU32(palette.tabActive));
+			draw->AddRectFilled(ImVec2(viewport->Pos.x + 4.0f, strip_top),
+				ImVec2(viewport->Pos.x + 116.0f, strip_top + 2.0f),
+				ImGui::ColorConvertFloat4ToU32(palette.accent));
 			draw->AddText(ImVec2(viewport->Pos.x + 18.0f,
-				viewport->Pos.y + 38.0f + (26.0f - ImGui::GetTextLineHeight()) * 0.5f),
-				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.muted : palette.foreground), "Welcome");
-			draw->AddText(ImVec2(viewport->Pos.x + 134.0f,
-				viewport->Pos.y + 38.0f + (26.0f - ImGui::GetTextLineHeight()) * 0.5f),
-				ImGui::ColorConvertFloat4ToU32(settings_page ? palette.foreground : palette.muted), "Settings");
-			const float body_y = 65.0f;
+				strip_top + (strip_height - ImGui::GetTextLineHeight()) * 0.5f),
+				ImGui::ColorConvertFloat4ToU32(palette.foreground), "Welcome");
+			if (import_busy) {
+				static constexpr char spinner[] = "|/-\\";
+				const int frame = static_cast<int>(ImGui::GetTime() * 8.0) & 3;
+				const std::string busy = std::string(1, spinner[frame]) + "  " + import_status;
+				const float busy_w = ImGui::CalcTextSize(busy.c_str()).x;
+				draw->AddText(ImVec2(viewport->Pos.x + viewport->Size.x - busy_w - 16.0f,
+					strip_top + (strip_height - ImGui::GetTextLineHeight()) * 0.5f),
+					ImGui::ColorConvertFloat4ToU32(palette.muted), busy.c_str());
+			}
+			const float body_y = kStartupChromeHeight + strip_height + 1.0f;
 			const float status_h = 22.0f;
 			const float body_h = viewport->Size.y - body_y - status_h;
 			const float sidebar_w = std::min(300.0f, viewport->Size.x * 0.32f);
 			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x, viewport->Pos.y + body_y));
 			RenderStartupSidebar(palette, sidebar_w, body_h);
 			ImGui::SetCursorScreenPos(ImVec2(viewport->Pos.x + sidebar_w + 1.0f, viewport->Pos.y + body_y));
-			if (settings_page)
-				RenderStartupSettings(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
-			else
-				RenderStartupWelcome(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
+			RenderStartupWelcome(palette, viewport->Size.x - sidebar_w - 1.0f, body_h);
 			RenderStartupStatus(palette, viewport->Size.x, status_h);
 			RenderOnlineModels();
-			if (show_password_input) ImGui::OpenPopup("StartupUI.EnterPassword"_lc);
-			if (ImGui::BeginPopupModal("StartupUI.EnterPassword"_lc, NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-				ImGui::TextUnformatted("StartupUI.PasswordPopupHint"_lc);
-				ImGui::InputText("##password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
-				if (password_error) ImGui::TextColored(ImVec4(1, 0, 0, 1), "Password incorrect. Please try again.");
-				if (ImGui::Button("Button.Positive"_lc)) {
-					try {
-						if (password[0] == '\0') password_error = true;
+			PollImportTask();
+
+			if (import_password_pending)
+				ImGui::OpenPopup("##import_password");
+			if (import_password_pending) {
+				bool open = true;
+				if (BeginStartupModal(palette, "##import_password", "Encrypted Package", &open,
+						ImVec2(470.0f, 220.0f))) {
+					ImGui::TextWrapped("%s", last_import.error.empty()
+						? "This package is encrypted. Enter its password to import it."
+						: last_import.error.c_str());
+					ImGui::Dummy(ImVec2(0.0f, 4.0f));
+					ImGui::SetNextItemWidth(-1.0f);
+					const bool submitted = ImGui::InputText("##import_password_value", password,
+						IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+					if (password_error)
+						ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "Wrong password. Try again.");
+					ImGui::Dummy(ImVec2(0.0f, 6.0f));
+					if (ImGui::Button("Import", ImVec2(110, 26)) || submitted) {
+						if (password[0] == '\0') {
+							password_error = true;
+						}
 						else {
-							current_rp.Decrypt(password);
-							current_rp.ExtractTo("./models/" + create_unique_directory(current_file.stem().string()));
-							Reload();
-							show_password_input = false;
-							password_error = false;
+							RetryImportModelPackage(password);
+							import_password_pending = false;
 							ImGui::CloseCurrentPopup();
 						}
 					}
-					catch (const std::exception&) { password_error = true; }
+					ImGui::SameLine();
+					if (ImGui::Button("Cancel", ImVec2(110, 26))) {
+						import_password_pending = false;
+						import_status = "Import cancelled.";
+						ImGui::CloseCurrentPopup();
+					}
+					EndStartupModal();
 				}
-				ImGui::SameLine();
-				if (ImGui::Button("Button.Negative"_lc)) { show_password_input = false; password_error = false; ImGui::CloseCurrentPopup(); }
-				ImGui::EndPopup();
+				if (!open) {
+					import_password_pending = false;
+					import_status = "Import cancelled.";
+				}
+			}
+
+			if (show_import_result)
+				ImGui::OpenPopup("##import_result");
+			if (show_import_result) {
+				bool open = true;
+				if (BeginStartupModal(palette, "##import_result",
+						last_import.ok ? "Import Complete" : "Import Failed", &open,
+						ImVec2(520.0f, last_import.ok ? 220.0f : 200.0f))) {
+					if (last_import.ok) {
+						ImGui::Text("Imported %s", last_import.modelName.c_str());
+						ImGui::TextDisabled("%s", last_import.targetPath.c_str());
+						ImGui::Dummy(ImVec2(0.0f, 4.0f));
+						std::string files;
+						for (size_t i = 0; i < last_import.files.size(); ++i)
+							files += (i ? ", " : "") + last_import.files[i];
+						ImGui::TextWrapped("Registered files: %s", files.c_str());
+					}
+					else {
+						ImGui::TextWrapped("%s", last_import.error.c_str());
+					}
+					ImGui::Dummy(ImVec2(0.0f, 8.0f));
+					if (ImGui::Button("OK", ImVec2(110, 26))) {
+						show_import_result = false;
+						ImGui::CloseCurrentPopup();
+					}
+					EndStartupModal();
+				}
+				if (!open)
+					show_import_result = false;
 			}
 			ImGui::End();
 			ImGui::PopStyleVar(3);
 			ImGui::PopStyleColor();
 		}
-
 		void RenderHeaders() {
 			ImGui::TableSetupColumn("StartupUI.RomName"_lc, ImGuiTableColumnFlags_WidthStretch, 200);
 			ImGui::TableSetupColumn("StartupUI.RomVer"_lc, ImGuiTableColumnFlags_WidthFixed, 120);
@@ -2069,6 +2385,16 @@ StartupSelection sui_loop() {
 	SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
 	windows2 = new std::vector<UIWindow*>();
 	casioemu::StartupUi ui;
+	if (const char* report = std::getenv("CASIOEMU_SELFTEST_IMPORT")) {
+		const char* package = std::getenv("CASIOEMU_SELFTEST_PACKAGE");
+		if (package && *package)
+			ui.RunImportSelfTest(package, report);
+		else {
+			std::ofstream output(report, std::ios::trunc);
+			if (output)
+				output << "RESULT FAIL\nCASIOEMU_SELFTEST_PACKAGE is required.\n";
+		}
+	}
 	{
 		std::ifstream ifs1{"recent.bin", std::ifstream::binary};
 		if (ifs1) {
@@ -2202,14 +2528,16 @@ StartupSelection sui_loop() {
 			}
 			ImVec2 center = ImGui::GetMainViewport()->GetCenter();
 			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-			if (ImGui::BeginPopupModal("LanguageChooser", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-				ImGui::Text("Please choose your language to continue");
-				ImGui::Separator();
-				ImGui::Spacing();
+			bool language_open = true;
+			if (casioemu::BeginStartupModal(ThemeManager::Instance().Colors(), "LanguageChooser",
+					"Choose Language", &language_open, ImVec2(430.0f, 195.0f))) {
+				ImGui::TextWrapped("Please choose your language to continue.");
+				ImGui::Dummy(ImVec2(0.0f, 4.0f));
 				if (!languages.empty()) {
 					const char* preview_value = languages[selected_language_index].c_str();
-					if (ImGui::BeginCombo("Language", preview_value)) {
-						for (int n = 0; n < languages.size(); n++) {
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::BeginCombo("##language_choice", preview_value)) {
+						for (int n = 0; n < (int)languages.size(); n++) {
 							const bool is_selected = (selected_language_index == n);
 							if (ImGui::Selectable(languages[n].c_str(), is_selected)) {
 								selected_language_index = n;
@@ -2221,10 +2549,8 @@ StartupSelection sui_loop() {
 						ImGui::EndCombo();
 					}
 				}
-				ImGui::Spacing();
-				ImGui::Separator();
-				ImGui::Spacing();
-				if (ImGui::Button("Ok", ImVec2(120, 0))) {
+				ImGui::Dummy(ImVec2(0.0f, 8.0f));
+				if (ImGui::Button("Ok", ImVec2(120, 26))) {
 					if (!languages.empty() && selected_language_index < languages.size()) {
 						const std::string& selected_lang = languages[selected_language_index];
 						g_local.ChangeLanguage(selected_lang);
@@ -2233,7 +2559,7 @@ StartupSelection sui_loop() {
 						DiscordRPC::UpdatePresence("");
 					}
 				}
-				ImGui::EndPopup();
+				casioemu::EndStartupModal();
 			}
 			ImGui::EndFrame();
 			ImGui::Render();
