@@ -253,6 +253,12 @@ void TestThemeFiles() {
 		{ "midnight-blue", "Midnight Blue" },
 		{ "graphite", "Graphite" },
 		{ "high-contrast-dark", "High Contrast Dark" },
+		{ "light-plus", "Light+" },
+		{ "paper", "Paper" },
+		{ "snow", "Snow" },
+		{ "github-light", "GitHub Light" },
+		{ "high-contrast-light", "High Contrast Light" },
+		{ "anh-sang-cua-dang", "\u00c1nh s\u00e1ng c\u1ee7a \u0110\u1ea3ng" },
 		{ "solarized", "Solarized" },
 		{ "vscode-light", "VS Code Light Modern" },
 	};
@@ -320,6 +326,10 @@ void TestThemeFiles() {
 			<< it->second["tokens"]["colors"].value("background", std::string())
 			<< " surface=" << it->second["tokens"]["colors"].value("surface", std::string()) << '\n';
 	}
+	if (auto it = by_id.find("anh-sang-cua-dang"); it != by_id.end()) {
+		Check(it->second.value("image", std::string()) == "anh-sang-cua-dang.jpeg",
+			"anh-sang-cua-dang points at its image asset");
+	}
 	if (auto it = by_id.find("amoled"); it != by_id.end()) {
 		const auto& colors = it->second["tokens"]["colors"];
 		Check(colors.value("background", std::string()) == "#000000", "AMOLED background is #000000");
@@ -342,7 +352,9 @@ void TestThemeFiles() {
 	// pass (Solarized, VS Code) are kept byte-for-byte as-is, so the strict
 	// checks apply to the new darkness range only.
 	const std::vector<std::string> darkness_ids = {
-		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite", "high-contrast-dark"
+		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite",
+		"high-contrast-dark", "light-plus", "paper", "snow", "github-light",
+		"high-contrast-light", "anh-sang-cua-dang"
 	};
 	for (const auto& [id, document] : by_id) {
 		if (std::find(darkness_ids.begin(), darkness_ids.end(), id) == darkness_ids.end())
@@ -363,9 +375,6 @@ void TestThemeFiles() {
 			Check(false, id + " colors parse as hex");
 			continue;
 		}
-		const bool light = document.value("variant", "dark") == "light";
-		if (light)
-			continue;
 		Check(ContrastRatio(foreground, background) >= 7.0f, id + " foreground contrast >= 7");
 		Check(ContrastRatio(muted, background) >= 4.5f, id + " muted contrast >= 4.5");
 		Check(ContrastRatio(error, background) >= 4.5f, id + " error contrast >= 4.5");

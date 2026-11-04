@@ -251,8 +251,9 @@ private:
 	// The requested darkness range leads the list; other shipped presets follow.
 	static const char* preferred_order[] = {
 		"dark", "dark-plus", "darker", "amoled", "midnight-blue", "graphite",
-		"high-contrast-dark", "solarized", "vscode-dark", "vscode-dark-plus",
-		"mono-green", "vscode-light"
+		"high-contrast-dark", "anh-sang-cua-dang", "solarized", "vscode-dark",
+		"vscode-dark-plus", "mono-green", "light-plus", "paper", "snow",
+		"github-light", "high-contrast-light", "vscode-light"
 	};
 	const auto rank = [](const std::string& id) {
 		for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(preferred_order)); ++i)

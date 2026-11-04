@@ -82,8 +82,8 @@ struct PageScope {
 	// the panel edge.  The shell's document child has no padding of its own, so
 	// the margin has to come from here.  `inset=false` is used by pages the shell
 	// already pads (the calculator panel).
-	explicit PageScope(const char* page_name = "Tool", bool inset = true)
-		: name(page_name), inset_(inset) {
+	explicit PageScope(const char* page_name = "Tool", bool inset = true, bool scroll = true)
+		: name(page_name), inset_(inset), scroll_(scroll) {
 		if (std::getenv("CASIOEMU_PERF_TIMING"))
 			timing_ = std::getenv("CASIOEMU_PERF_TIMING")[0] != '0';
 		start_ = std::chrono::steady_clock::now();
@@ -96,9 +96,19 @@ struct PageScope {
 			ImGui::Indent(8.0f);
 			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
 		}
+		ImGuiWindowFlags page_flags = ImGuiWindowFlags_NoBackground;
+		if (!scroll_)
+			page_flags |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 		ImGui::BeginChild("##tool_page",
 			inset_ ? ImVec2(avail.x - 16.0f, avail.y - 16.0f) : ImVec2(0.0f, 0.0f),
-			ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+			ImGuiChildFlags_None, page_flags);
+		if (!scroll_) {
+			// Window state (including a stale scroll offset from an earlier
+			// scrollable layout) is persisted by id; pin it so the content
+			// region equals the visible area and the fixed footer cannot drift.
+			ImGui::SetScrollX(0.0f);
+			ImGui::SetScrollY(0.0f);
+		}
 	}
 	~PageScope() {
 		if (timing_) {
@@ -125,6 +135,7 @@ struct PageScope {
 
 private:
 	bool inset_ = true;
+	bool scroll_ = true;
 	bool timing_ = false;
 	std::chrono::steady_clock::time_point start_{};
 

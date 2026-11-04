@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Snow",
+  "variant": "light",
+  "tokens": {
+    "colors": {
+      "background": "#FFFFFF",
+      "surface": "#F7F9FC",
+      "surfaceAlt": "#EDF1F7",
+      "foreground": "#16202A",
+      "muted": "#52606F",
+      "border": "#D8DFE8",
+      "borderStrong": "#B6C2D1",
+      "accent": "#1B5FBF",
+      "accentHover": "#2B73D6",
+      "selection": "#D6E6FF",
+      "hover": "#EAF1FA",
+      "error": "#B3261E",
+      "warning": "#7A5800",
+      "success": "#1E6B34",
+      "link": "#1B5FBF",
+      "titleBar": "#F7F9FC",
+      "activityBar": "#F7F9FC",
+      "statusBar": "#FFFFFF",
+      "panel": "#F7F9FC",
+      "tabActive": "#FFFFFF",
+      "tabInactive": "#EDF1F7"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

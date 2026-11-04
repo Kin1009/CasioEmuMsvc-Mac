@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -69,9 +71,14 @@ Placement DrawCentred(ImTextureID image, int width, int height, float footer, bo
 		ImVec2(place.x - 6.0f, place.y - 6.0f),
 		ImVec2(place.x + place.w + 6.0f, place.y + place.h + 6.0f),
 		ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().border), 8.0f);
+	// Clip to the picture area: at 400 % the image is larger than the panel and
+	// must never paint over (or steal hit-testing from) the zoom/status rows.
+	ImGui::PushClipRect(ImVec2(origin.x, origin.y),
+		ImVec2(origin.x + area_w, origin.y + area_h), true);
 	ImGui::SetCursorScreenPos(ImVec2(place.x, place.y));
 	ImGui::Image(image, ImVec2(place.w, place.h));
 	place.hovered = ImGui::IsItemHovered();
+	ImGui::PopClipRect();
 	// Leave the cursor below the picture so the controls line up at the bottom.
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + area_h));
 	return place;
@@ -96,9 +103,13 @@ public:
 			ImGui::TextDisabled("The calculator is not running.");
 			return;
 		}
-		ToolUi::PageScope page("Calculator", false);
+		ToolUi::PageScope page("Calculator", false, false);
 
-		const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+		// Two control rows plus a safety inset: the calculator host clips a few
+		// pixels above the page child's nominal bottom, so the status line must
+		// not sit on the last row.
+		const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f +
+			ImGui::GetStyle().ItemSpacing.y + 20.0f;
 
 #ifdef SINGLE_WINDOW
 		// The whole calculator, as the external window used to render it.
@@ -167,6 +178,47 @@ private:
 			m_emu->ModelMouseEvent(mx, my, false);
 	}
 
+	// Verification hook: drive a real slider drag through ImGui IO events so the
+	// headless check exercises hit-testing, not just the stored value.
+	void RunScriptedZoomDrag(const ImVec2& min, const ImVec2& max) {
+		const char* spec = std::getenv("CASIOEMU_CALC_ZOOM_DRAG");
+		if (!spec)
+			return;
+		static int from = -1, to = -1, frame = 0;
+		static bool pressed = false;
+		if (from < 0) {
+			from = 100;
+			to = 250;
+			std::sscanf(spec, "%d,%d", &from, &to);
+			if (from < 25 || from > 400) from = 100;
+			if (to < 25 || to > 400) to = 250;
+		}
+		const int start = 8;
+		const int steps = 24;
+		ImGuiIO& io = ImGui::GetIO();
+		if (frame == start - 1) {
+			fit_ = false;
+			zoom_ = from / 100.0f;
+			SaveZoom();
+		}
+		if (frame >= start && frame <= start + steps) {
+			const float t = static_cast<float>(frame - start) / static_cast<float>(steps);
+			const float pct = from + (to - from) * t;
+			const float x = min.x + 3.0f +
+				(max.x - min.x - 6.0f) * ((pct - 25.0f) / (400.0f - 25.0f));
+			io.AddMousePosEvent(x, (min.y + max.y) * 0.5f);
+			if (!pressed) {
+				io.AddMouseButtonEvent(0, true);
+				pressed = true;
+			}
+			if (frame == start + steps) {
+				io.AddMouseButtonEvent(0, false);
+				pressed = false;
+			}
+		}
+		++frame;
+	}
+
 	void DrawControls(float effective_scale) {
 		if (!m_emu)
 			return;
@@ -176,26 +228,43 @@ private:
 		LoadZoomOnce();
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
 		float percent = fit_ ? effective_scale * 100.0f : zoom_ * 100.0f;
-		const float slider_width = std::max(90.0f,
-			ToolUi::RemainingWidth() - ImGui::CalcTextSize("Fit").x - 76.0f);
+		// Keep Fit and 100 % on the same row as the slider: reserve their real
+		// padded widths so the slider never pushes them into a wrapped row that
+		// would collide with the status line.
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const float fit_width = ImGui::CalcTextSize("Fit").x + style.FramePadding.x * 2.0f;
+		const float pct_width = ImGui::CalcTextSize("100%").x + style.FramePadding.x * 2.0f;
+		// Inside the fixed-size calculator page child the content region is the
+		// authoritative row width (RemainingWidth can include the child's outer
+		// size, which is wider than the parent's clip).
+		const float row_width = ImGui::GetContentRegionAvail().x;
+		const float slider_width = std::max(70.0f, row_width -
+			fit_width - pct_width - style.ItemSpacing.x * 2.0f - 24.0f);
 		ImGui::SetNextItemWidth(slider_width);
-		if (fit_)
-			ImGui::BeginDisabled();
-		if (ImGui::SliderFloat("##calculator_zoom", &percent, 25.0f, 400.0f, "%.0f%%")) {
+		// Always interactive.  In Fit mode the slider shows the computed scale;
+		// the first drag switches to an explicit zoom instead of being dead.
+		const bool zoom_changed = ImGui::SliderFloat("##calculator_zoom", &percent, 25.0f, 400.0f, "%.0f%%");
+		const ImVec2 zoom_min = ImGui::GetItemRectMin();
+		const ImVec2 zoom_max = ImGui::GetItemRectMax();
+		if (zoom_changed) {
 			fit_ = false;
 			zoom_ = std::clamp(percent / 100.0f, 0.25f, 4.0f);
+			if (fit_ == false && std::getenv("CASIOEMU_CALC_ZOOM_DRAG"))
+				std::fprintf(stderr, "[zoom] drag=%.0f%%\n", percent);
 		}
 		if (ImGui::IsItemDeactivatedAfterEdit())
 			SaveZoom();
-		if (fit_)
-			ImGui::EndDisabled();
+		if (fit_ && ImGui::IsItemHovered())
+			ImGui::SetTooltip("Fit: drag to zoom, or use 100%% for 1:1 pixels.");
+		RunScriptedZoomDrag(zoom_min, zoom_max);
 		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Fit").x + 20.0f)) {
 			if (ImGui::Button("Fit")) {
 				fit_ = true;
 				SaveZoom();
 			}
 		}
-		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("100%").x + 20.0f)) {
+		const bool pct_same_line = ToolUi::SameLineOrWrap(ImGui::CalcTextSize("100%").x + 20.0f);
+		if (pct_same_line) {
 			if (ImGui::Button("100%")) {
 				fit_ = false;
 				zoom_ = 1.0f;

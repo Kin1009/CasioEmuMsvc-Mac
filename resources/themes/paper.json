@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "Paper",
+  "variant": "light",
+  "tokens": {
+    "colors": {
+      "background": "#F7F3E8",
+      "surface": "#F1EBDC",
+      "surfaceAlt": "#E8E0CC",
+      "foreground": "#2B2A26",
+      "muted": "#5E5A50",
+      "border": "#D6CCB4",
+      "borderStrong": "#B9AC90",
+      "accent": "#7A3E12",
+      "accentHover": "#94521F",
+      "selection": "#E3D4B6",
+      "hover": "#EDE6D5",
+      "error": "#A3261E",
+      "warning": "#7A5200",
+      "success": "#2F6B3A",
+      "link": "#7A3E12",
+      "titleBar": "#F1EBDC",
+      "activityBar": "#F1EBDC",
+      "statusBar": "#F7F3E8",
+      "panel": "#F1EBDC",
+      "tabActive": "#FFFDF7",
+      "tabInactive": "#E8E0CC"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}

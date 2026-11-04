@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "GitHub Light",
+  "variant": "light",
+  "tokens": {
+    "colors": {
+      "background": "#FFFFFF",
+      "surface": "#F6F8FA",
+      "surfaceAlt": "#EAEEF2",
+      "foreground": "#1F2328",
+      "muted": "#57606A",
+      "border": "#D0D7DE",
+      "borderStrong": "#AFB8C1",
+      "accent": "#0969DA",
+      "accentHover": "#0A5FC2",
+      "selection": "#DDF4FF",
+      "hover": "#EFF2F5",
+      "error": "#CF222E",
+      "warning": "#7D4E00",
+      "success": "#1A7F37",
+      "link": "#0969DA",
+      "titleBar": "#F6F8FA",
+      "activityBar": "#F6F8FA",
+      "statusBar": "#F6F8FA",
+      "panel": "#F6F8FA",
+      "tabActive": "#FFFFFF",
+      "tabInactive": "#EAEEF2"
+    },
+    "metrics": {
+      "windowRounding": 6,
+      "childRounding": 6,
+      "popupRounding": 6,
+      "frameRounding": 4,
+      "tabRounding": 4,
+      "grabRounding": 4,
+      "scrollbarRounding": 4,
+      "borderSize": 1,
+      "frameBorderSize": 0,
+      "scrollbarSize": 10,
+      "spacing": 8,
+      "padding": 8,
+      "framePaddingX": 8,
+      "framePaddingY": 4
+    },
+    "typography": {
+      "uiFamily": "SF Pro Text",
+      "monoFamily": "SF Mono",
+      "scale": 1.0
+    }
+  }
+}
