@@ -491,6 +491,7 @@ private:
 		ImGui::TextDisabled("|");
 		ImGui::SameLine();
 
+		ImGui::NewLine();
 		// ── Database badge ────────────────────────────────────────
 		if (databaseLoaded_) {
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.95f, 0.35f, 1.0f));
@@ -524,6 +525,7 @@ private:
 		ImGui::TextDisabled("|");
 		ImGui::SameLine();
 
+		ImGui::NewLine();
 		// ── Base address + length ─────────────────────────────────
 		ImGui::TextUnformatted("RopCompiler.Base"_lc);
 		ImGui::SameLine();
@@ -543,6 +545,7 @@ private:
 		ImGui::TextDisabled("|");
 		ImGui::SameLine();
 
+		ImGui::NewLine();
 		// ── Secondary actions ─────────────────────────────────────
 		if (ImGui::SmallButton("RopCompiler.CopyHex"_lc)) {
 			copyOutputHexToClipboard();
