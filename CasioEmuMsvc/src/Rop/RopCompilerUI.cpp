@@ -11,6 +11,7 @@
 #include "Ui.hpp"
 #include "hex.hpp"
 #include "ToolUi.hpp"
+#include "Gui/Shell/Shell.h"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -81,9 +82,7 @@ public:
 			drawNoDatabaseBanner();
 		}
 
-		const float diagnosticsHeight = 135.0f;
-		const float mainHeight =
-			ImGui::GetContentRegionAvail().y - diagnosticsHeight - ImGui::GetStyle().ItemSpacing.y;
+		const float mainHeight = std::max(120.0f, ImGui::GetContentRegionAvail().y);
 
 		if (ImGui::BeginTable("##compiler_layout", 2,
 				ImGuiTableFlags_Resizable |
@@ -103,7 +102,6 @@ public:
 			ImGui::EndTable();
 		}
 
-		drawDiagnosticsPanel(diagnosticsHeight);
 		handleShortcuts();
 	}
 
@@ -707,11 +705,13 @@ private:
 			if (diagnosticsText_.empty()) {
 				diagnosticsText_ = g_local.Format("RopCompiler.CompileSuccess",
 					(int)outputBytes_.size());
+				casioemu::shell::AppendOutput("[rop] " + diagnosticsText_);
 			}
 		}
 		catch (const std::exception& e) {
 			lastCompileOk_ = false;
 			diagnosticsText_ = e.what();
+			casioemu::shell::AppendDiagnostic(casioemu::shell::LogSeverity::Error, e.what());
 			TextEditor::ErrorMarkers markers;
 			markers[1] = e.what();
 			editor_.SetErrorMarkers(markers);
@@ -738,6 +738,8 @@ private:
 				oss << g_local["RopCompiler.DiagWarning"] << ": ";
 			}
 			oss << d.message << "\n";
+			casioemu::shell::AppendDiagnostic(d.error ? casioemu::shell::LogSeverity::Error :
+				casioemu::shell::LogSeverity::Warning, d.message);
 		}
 
 		diagnosticsText_ = oss.str();
