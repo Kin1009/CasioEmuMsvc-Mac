@@ -1,9 +1,13 @@
 #pragma once
 #include "Localization.h"
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 #ifdef __ANDROID__
@@ -178,7 +182,125 @@ inline std::string GetCJKFontPath(int* font_no = nullptr) {
 	return FindBestFont(candidates);
 }
 
-// Theme/font/scaling globals are now managed by ThemeManager.
+// Korean needs a separate face on macOS: the Chinese-first fallbacks (Heiti,
+// Hiragino) do not contain Hangul.  Returns the face that covers Hangul.
+inline std::string GetKoreanFontPath(int* font_no = nullptr) {
+	if (font_no) {
+		*font_no = 0;
+	}
+#ifdef _WIN32
+	const std::vector<std::string> candidates = {
+		"C:\\Windows\\Fonts\\malgun.ttf",
+		"C:\\Windows\\Fonts\\gulim.ttc",
+		"C:\\Windows\\Fonts\\batang.ttc"};
+#elif defined(__ANDROID__)
+	if (auto system_font = FindAndroidSystemCJKFont("KR")) {
+		if (font_no) {
+			*font_no = system_font->collection_index;
+		}
+		return system_font->path;
+	}
+	const std::vector<std::string> candidates = {
+		"/system/fonts/NotoSansCJK-Regular.ttc",
+		"/system/fonts/DroidSansFallback.ttf"};
+#elif defined(__APPLE__)
+	const std::vector<std::string> candidates = {
+		"/System/Library/Fonts/AppleSDGothicNeo.ttc",
+		"/System/Library/Fonts/Supplemental/AppleGothic.ttf"};
+#else
+	const std::vector<std::string> candidates = {
+		"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+		"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+		"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc"};
+#endif
+	return FindBestFont(candidates);
+}
+
+// A face that contains U+FFFD so ImGui's missing-glyph fallback is a
+// replacement character rather than the ASCII '?'.
+inline std::string GetFallbackGlyphFontPath() {
+#ifdef _WIN32
+	return FindBestFont({
+		"C:\\Windows\\Fonts\\arialuni.ttf",
+		"C:\\Windows\\Fonts\\seguisym.ttf",
+		"C:\\Windows\\Fonts\\segoeui.ttf"});
+#elif defined(__ANDROID__)
+	return FindBestFont({
+		"/system/fonts/NotoSansCJK-Regular.ttc",
+		"/system/fonts/DroidSansFallback.ttf"});
+#elif defined(__APPLE__)
+	return FindBestFont({
+		"/System/Library/Fonts/Supplemental/Arial Unicode.ttf"});
+#else
+	return FindBestFont({
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"});
+#endif
+}
+
+// ImGui chooses '?' when the atlas has no U+FFFD.  Prefer the replacement
+// glyph, then a hollow box, and only fall back to the font's own default.
+inline void SetSafeFallbackGlyph(ImFont* font) {
+	if (font == nullptr) {
+		return;
+	}
+	const ImFontGlyph* glyph = font->FindGlyphNoFallback(0xFFFD);
+	if (glyph == nullptr) {
+		glyph = font->FindGlyphNoFallback(0x25A1); // WHITE SQUARE
+	}
+	if (glyph == nullptr) {
+		glyph = font->FindGlyphNoFallback(0x2588); // FULL BLOCK
+	}
+	if (glyph != nullptr && glyph != font->FallbackGlyph) {
+		font->FallbackChar = static_cast<ImWchar>(glyph->Codepoint);
+		font->FallbackGlyph = glyph;
+		font->FallbackAdvanceX = glyph->AdvanceX;
+	}
+}
+
+// Text of the shipped documentation bundle.  Adding it to the atlas guarantees
+// that Chinese/Japanese/Korean documentation renders in English mode even when
+// the common CJK range does not contain a rare character.
+inline const std::string& CollectDocumentationGlyphText() {
+	static const std::string text = [] {
+		std::string result;
+		std::error_code ec;
+		const auto cwd = std::filesystem::current_path(ec);
+		const std::filesystem::path candidates[] = {
+			cwd / ".." / "Resources" / "docs",
+			cwd / "Resources" / "docs",
+			cwd / "docs"};
+		for (const auto& root : candidates) {
+			if (!std::filesystem::is_directory(root, ec)) {
+				ec.clear();
+				continue;
+			}
+			for (auto it = std::filesystem::recursive_directory_iterator(root,
+					std::filesystem::directory_options::skip_permission_denied, ec);
+				it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+				if (ec) {
+					ec.clear();
+					continue;
+				}
+				std::string extension = it->path().extension().string();
+				std::transform(extension.begin(), extension.end(), extension.begin(),
+					[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (extension != ".md" && extension != ".markdown" && extension != ".txt")
+					continue;
+				std::ifstream input(it->path(), std::ios::binary);
+				if (!input)
+					continue;
+				result.append(std::istreambuf_iterator<char>(input),
+					std::istreambuf_iterator<char>());
+				result.push_back('\n');
+			}
+			break;
+		}
+		return result;
+	}();
+	return text;
+}
+
 // See ThemeManager.h for the unified API.
 
 extern ImFont* g_mono_font;
@@ -289,9 +411,9 @@ inline void RebuildFont(float scale = 0.0f) {
 #endif
 
 	// 2. 合并 CJK 字体
+#ifdef __ANDROID__
 	const std::string enable_cjk = "Localization.EnableCJK"_l;
 	const bool locale_needs_cjk = enable_cjk == "1" || enable_cjk == "true";
-#ifdef __ANDROID__
 	const std::string runtime_glyph_text = RuntimeFontGlyphCache::Instance().GetText();
 	const bool needs_cjk_font = locale_needs_cjk || !runtime_glyph_text.empty();
 	if (needs_cjk_font) {
@@ -329,6 +451,7 @@ inline void RebuildFont(float scale = 0.0f) {
 		}
 	}
 	const bool font_build_succeeded = io.Fonts->Build();
+	SetSafeFallbackGlyph(g_mono_font);
 	if (extended_script_sample != 0) {
 		const bool sample_present = font_build_succeeded && !io.Fonts->Fonts.empty()
 			&& io.Fonts->Fonts[0]->FindGlyphNoFallback(extended_script_sample) != nullptr;
@@ -363,17 +486,102 @@ inline void RebuildFont(float scale = 0.0f) {
 			sample_present ? "true" : "false");
 	}
 #else
-	if (locale_needs_cjk) {
-		const std::string cjk_font_path = GetCJKFontPath();
-		if (!cjk_font_path.empty()) {
-			ImFontConfig merge_config = config;
-			merge_config.MergeMode = true;
-			const ImWchar* ranges = "Localization.CJKPreference"_l == "KR"
-				? io.Fonts->GetGlyphRangesKorean()
-				: GetCJKRanges();
-			io.Fonts->AddFontFromFileTTF(cjk_font_path.c_str(), 16 * scale, &merge_config, ranges);
+	// The atlas must carry CJK even when the UI locale is English: the
+	// documentation viewer, file names, model names and plugin output can all
+	// contain Chinese/Japanese/Korean text.  EnableCJK selects the full CJK
+	// block; otherwise a common + kana + Hangul range is always present.
+	// The atlas keeps a pointer to this range array and may rebuild the atlas
+	// later (for example when the title face is added), so it must outlive this
+	// call.
+	static ImVector<ImWchar> cjk_ranges;
+	cjk_ranges.clear();
+	{
+		const std::string enable_cjk = "Localization.EnableCJK"_l;
+		const bool locale_needs_cjk = enable_cjk == "1" || enable_cjk == "true";
+		const std::string language = g_local.GetCurrentLanguage();
+
+		ImFontGlyphRangesBuilder cjk_builder;
+		// EnableCJK selects the full CJK block for CJK UI locales.  Other
+		// locales always get the common CJK + kana + Hangul ranges plus the
+		// exact text of the shipped documentation, so Chinese docs render in
+		// English mode without paying for the full 21k-ideograph atlas.
+		if (locale_needs_cjk || language.rfind("zh", 0) == 0 ||
+			language.rfind("ja", 0) == 0 || language.rfind("ko", 0) == 0) {
+			cjk_builder.AddRanges(GetCJKRanges());
 		}
+		else {
+			cjk_builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+			cjk_builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
+		}
+		cjk_builder.AddRanges(io.Fonts->GetGlyphRangesKorean());
+		cjk_builder.AddText("\xEF\xBF\xBD"); // U+FFFD replacement character
+		const std::string localized_text = g_local.CollectFontGlyphText();
+		if (!localized_text.empty()) {
+			cjk_builder.AddText(localized_text.c_str());
+		}
+		const std::string& documentation_text = CollectDocumentationGlyphText();
+		if (!documentation_text.empty()) {
+			cjk_builder.AddText(documentation_text.c_str());
+		}
+		cjk_builder.BuildRanges(&cjk_ranges);
+
+		int codepoint_count = 0;
+		for (int index = 0; index + 1 < cjk_ranges.Size && cjk_ranges[index] != 0; index += 2) {
+			codepoint_count += static_cast<int>(cjk_ranges[index + 1]) -
+				static_cast<int>(cjk_ranges[index]) + 1;
+		}
+
+		int cjk_font_no = 0;
+		const std::string cjk_font_path = GetCJKFontPath(&cjk_font_no);
+		ImFontConfig merge_config = config;
+		merge_config.MergeMode = true;
+		merge_config.FontNo = cjk_font_no;
+		// CJK glyphs are dense; 1x oversampling keeps the atlas sane.
+		merge_config.OversampleH = 1;
+		merge_config.OversampleV = 1;
+		if (!cjk_font_path.empty()) {
+			io.Fonts->AddFontFromFileTTF(cjk_font_path.c_str(), 16 * scale,
+				&merge_config, cjk_ranges.Data);
+		}
+
+		int korean_font_no = 0;
+		const std::string korean_font_path = GetKoreanFontPath(&korean_font_no);
+		if (!korean_font_path.empty() && korean_font_path != cjk_font_path) {
+			ImFontConfig korean_config = merge_config;
+			korean_config.FontNo = korean_font_no;
+			io.Fonts->AddFontFromFileTTF(korean_font_path.c_str(), 16 * scale,
+				&korean_config, io.Fonts->GetGlyphRangesKorean());
+		}
+
+		const std::string fallback_font_path = GetFallbackGlyphFontPath();
+		if (!fallback_font_path.empty()) {
+			static const ImWchar replacement_range[] = {0xFFFD, 0xFFFD, 0};
+			ImFontConfig fallback_config = merge_config;
+			fallback_config.FontNo = 0;
+			io.Fonts->AddFontFromFileTTF(fallback_font_path.c_str(), 16 * scale,
+				&fallback_config, replacement_range);
+		}
+
+		fprintf(stderr,
+			"[Font] locale=%s enable_cjk=%d cjk=%s korean=%s fallback=%s ranges=%d codepoints=%d\n",
+			language.c_str(), locale_needs_cjk ? 1 : 0,
+			cjk_font_path.empty() ? "(none)" : cjk_font_path.c_str(),
+			korean_font_path.empty() ? "(none)" : korean_font_path.c_str(),
+			fallback_font_path.empty() ? "(none)" : fallback_font_path.c_str(),
+			cjk_ranges.Size, codepoint_count);
 	}
 	io.Fonts->Build();
+	SetSafeFallbackGlyph(g_mono_font);
+	if (!io.Fonts->Fonts.empty()) {
+		ImFont* font = io.Fonts->Fonts[0];
+		const size_t pixels = static_cast<size_t>(io.Fonts->TexWidth) *
+			static_cast<size_t>(io.Fonts->TexHeight);
+		fprintf(stderr,
+			"[Font] glyphs=%d atlas=%dx%d alpha=%.1fMB rgba=%.1fMB fallback=U+%04X\n",
+			font->Glyphs.Size, io.Fonts->TexWidth, io.Fonts->TexHeight,
+			static_cast<double>(pixels) / (1024.0 * 1024.0),
+			static_cast<double>(pixels * 4) / (1024.0 * 1024.0),
+			static_cast<unsigned int>(font->FallbackChar));
+	}
 #endif
 }

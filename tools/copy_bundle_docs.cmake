@@ -21,6 +21,7 @@ set(ALLOWED_DOCS
     PLUGIN-GUIDE.md
     PLUGIN_SPEC.md
     PRIVACY.md
+    QR.md
     ROP.md
     STATUS_ICONS.md
     WIZ-COMPILER.md
