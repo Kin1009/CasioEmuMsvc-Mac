@@ -562,8 +562,8 @@ std::vector<ThemeInfo> ThemeManager::AvailableThemes() const {
 			ThemeInfo info;
 			info.id = entry.path().stem().string();
 			info.name = result.name.empty() ? info.id : result.name;
-			info.dark = result.variant != "light";
 			info.featured = !result.image.empty();
+			info.dark = result.variant != "light" && !info.featured;
 			themes.push_back(std::move(info));
 		}
 	}

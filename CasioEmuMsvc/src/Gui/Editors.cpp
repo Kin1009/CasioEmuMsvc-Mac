@@ -32,7 +32,11 @@ static void DrawColumnSelector(MemoryEditor& editor) {
 	const int max_columns = std::clamp(
 		static_cast<int>((ImGui::GetContentRegionAvail().x - char_width * 22.0f) / (char_width * 4.0f)),
 		2, 64);
-	if (editor.Cols > max_columns)
+	if (const char* forced = std::getenv("CASIOEMU_HEX_COLS"))
+		editor.Cols = std::clamp(std::atoi(forced), 1, 64);
+	if (const char* target = std::getenv("CASIOEMU_HEX_GOTO"))
+		editor.GotoAddr = static_cast<size_t>(std::strtoul(target, nullptr, 16));
+	else if (editor.Cols > max_columns)
 		editor.Cols = max_columns;
 	ToolUi::Field("Columns");
 	ImGui::SetNextItemWidth(std::min(160.0f, std::max(90.0f, ImGui::GetContentRegionAvail().x * 0.4f)));

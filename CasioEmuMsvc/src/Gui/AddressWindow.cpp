@@ -20,7 +20,7 @@ public:
 		std::lock_guard lock(addresses_mutex);
 		ToolUi::PageScope page("Memory");
 		ToolUi::Section("AddressWindow.Header"_lc);
-		ToolUi::Description("Pin a memory address to inspect its value every frame. Locked addresses force their value on reads and writes.");
+		ToolUi::Description("Watch an address; locked values are enforced.");
 		ImGui::Spacing();
 
 		RenderAddressTable();
@@ -38,7 +38,7 @@ public:
 				addresses.emplace_back(newAddress, 0, false);
 			ImGui::EndDisabled();
 			if (addresses.empty())
-				ToolUi::Hint("No addresses are watched yet.");
+				ToolUi::Hint("Nothing watched yet.");
 		}
 	}
 
@@ -90,7 +90,7 @@ private:
 	void RenderAddressTable() {
 		if (addresses.empty()) {
 			ToolUi::PanelScope panel("##address_empty");
-			ToolUi::EmptyState("No watched addresses. Add one below.");
+			ToolUi::EmptyState("No watched addresses.");
 			return;
 		}
 		int remove_index = -1;

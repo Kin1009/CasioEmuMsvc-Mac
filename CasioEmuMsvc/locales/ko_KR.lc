@@ -385,7 +385,7 @@ ClickableAddress.CodeJump=코드로 이동 (코드 뷰어)
 ClickableAddress.MemJump=메모리로 이동 (Hex 에디터)
 ClickableAddress.CodeJumpTooltip=클릭하여 코드 뷰어의 0x%05X 주소로 이동
 ClickableAddress.MemJumpTooltip=클릭하여 메모리 에디터의 0x%05X 주소로 이동
-ClickableAddress.BothTooltip=0x%05X — 클릭하여 이동
+ClickableAddress.BothTooltip=0x%05X - 클릭하여 이동
 ClickableAddress.RightClickHint=우클릭하여 추가 옵션 표시
 
 MemBP.ColPC=PC 주소

@@ -154,7 +154,7 @@ float LabelViewer::RenderRows(const char* tableId, const std::vector<Row>& rows,
 void LabelViewer::RenderCore() {
 	ToolUi::PageScope page("Labels");
 	ToolUi::Section("Labels");
-	ToolUi::Description("Memory labels and hardware registers for the active model. Click an address to jump there.");
+	ToolUi::Description("Labels and registers for the active model.");
 
 	ToolUi::Field("Search");
 	ImGui::SetNextItemWidth(std::min(320.0f, ToolUi::RemainingWidth()));
@@ -173,10 +173,10 @@ void LabelViewer::RenderCore() {
 	int shown = 0;
 	RenderRows("##labels_table", m_labels, m_visibleLabels, list_height, shown);
 	if (shown == 0)
-		ToolUi::Hint("No memory labels match the search.");
+		ToolUi::Hint("No matching labels.");
 
 	ToolUi::Section("Label.SfrsHeader"_lc);
 	RenderRows("##regs_table", m_regions, m_visibleRegions, list_height, shown);
 	if (shown == 0)
-		ToolUi::Hint("No hardware registers match the search.");
+		ToolUi::Hint("No matching registers.");
 }

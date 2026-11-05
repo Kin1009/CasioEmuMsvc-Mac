@@ -268,7 +268,7 @@ void WatchWindow::RenderCore() {
 			const auto frames = core->StackFrames();
 			ToolUi::PanelScope panel("##t4x_stack");
 			if (frames.empty())
-				ToolUi::EmptyState("No stack frames. Run or step to update the stack trace.");
+				ToolUi::EmptyState("No stack frames.");
 			for (auto it = frames.rbegin(); it != frames.rend(); ++it) {
 				UIHelpers::ClickableAddress(it->pc, UIHelpers::JumpTarget::Code);
 				ImGui::SameLine();

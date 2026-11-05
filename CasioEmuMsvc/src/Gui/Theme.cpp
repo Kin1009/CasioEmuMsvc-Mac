@@ -2,6 +2,7 @@
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "Peripheral/ScreenGate.hpp"
 #include "FileDialog.hpp"
+#include "Markdown.hpp"
 #include "ModelInfo.h"
 #include "Models.h"
 #include "Settings/Settings.h"
@@ -18,11 +19,17 @@
 #include <Gui.h>
 #include <Localization.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fstream>
+#include <map>
 #include <string>
+#include <sstream>
+#include <system_error>
+#include <vector>
 #include <vibration.h>
 #ifndef CASIOEMU_CORE_WEB
 #include "Ext/DiscordRPC.h"
@@ -56,6 +63,7 @@ private:
 		kLanguage,
 		kWindow,
 		kAdvanced,
+		kDocumentation,
 		kCategoryCount
 	};
 
@@ -66,6 +74,27 @@ private:
 	double statusTime = 0.0;
 	bool confirmReset = false;
 	char tempInjectionFilePath[256]{};
+
+	struct DocEntry {
+		std::string title;
+		std::string category;
+		std::string modified;
+		std::string rel;
+		std::filesystem::path path;
+	};
+	std::vector<DocEntry> docs;
+	bool docsScanned = false;
+	int docSelected = -1;
+	char docSearch[96]{};
+	std::string docBody;
+	std::string docLoadedPath;
+	float docPendingScroll = -1.0f;
+	float docCurrentScroll = 0.0f;
+	int docScrollApply = 0;
+	std::map<std::string, float> docScroll;
+	DocEntry* DocAt(int index) {
+		return index >= 0 && index < static_cast<int>(docs.size()) ? &docs[static_cast<size_t>(index)] : nullptr;
+	}
 
 	// Short labels keep the navigation readable at 140 px; the full group name
 	// is shown as a tooltip on hover.
@@ -82,6 +111,7 @@ private:
 		case kLanguage: return "Language";
 		case kWindow: return "Window";
 		case kAdvanced: return "Advanced";
+		case kDocumentation: return "Documentation";
 		default: return "Settings";
 		}
 	}
@@ -165,7 +195,7 @@ private:
 	// ---------------------------------------------------------------- general
 	void RenderGeneral(casioemu::settings::SettingsData& data) {
 		ToolUi::Section("Application");
-		ToolUi::Description("CasioEmuMsvc debugger and calculator emulator. Settings are stored as JSON and survive restarts.");
+		ToolUi::Description("Stored as JSON and applied on launch.");
 		ImGui::Spacing();
 		{
 			ToolUi::PanelScope panel("##settings_about");
@@ -197,9 +227,9 @@ private:
 			if (ImGui::Button("Open Recent"))
 				casioemu::shell::OpenQuickOpen();
 			if (!data.workspace.recentFolders.empty())
-				ToolUi::Hint("Recent folders are listed in the Explorer sidebar.");
+				ToolUi::Hint("Recent folders are in the Explorer.");
 			else
-				ToolUi::Hint("No recent folders yet.");
+				ToolUi::Hint("No recent folders.");
 		}
 
 		ToolUi::Section("Sessions");
@@ -207,7 +237,7 @@ private:
 			ToolUi::PanelScope panel("##settings_sessions");
 			const auto sessions = casioemu::session::List();
 			if (sessions.empty()) {
-				ToolUi::Hint("No live sessions. Open a model to start one.");
+				ToolUi::Hint("No live sessions.");
 			}
 			else {
 				for (const auto& session : sessions) {
@@ -269,8 +299,7 @@ private:
 	});
 
 	ToolUi::Section("Color theme");
-	ToolUi::Description("Click a preset to apply it immediately; the choice is saved. "
-		"Swatches preview the background, surface, accent and foreground of each theme.");
+	ToolUi::Description("Click a preset; swatches show its palette.");
 	ImGui::Spacing();
 
 	const std::string saved = tm.CurrentThemeName();
@@ -285,7 +314,7 @@ private:
 	if (saved == "classic")
 		currentLabel = "Dark (built-in classic)";
 	if (tm.IsPluginThemeActive())
-		ToolUi::Status("A theme plugin currently owns the style; choosing a preset replaces it.", UIHelpers::kColorWarning);
+		ToolUi::Status("A plugin theme is active.", UIHelpers::kColorWarning);
 
 	{
 		ToolUi::PanelScope panel("##theme_list_panel");
@@ -423,7 +452,7 @@ private:
 			}
 			ImGui::TextDisabled("Typography: %s / %s", tm.Typography().uiFamily.c_str(),
 				tm.Typography().monoFamily.c_str());
-			ToolUi::Hint("The UI must remain usable at 0.8 scale on a 13-inch display.");
+			ToolUi::Hint("Stays usable down to 0.8 scale on 13-inch.");
 		}
 
 		ToolUi::Section("Auto-tint");
@@ -450,7 +479,7 @@ private:
 				}
 			}
 			else {
-				ToolUi::Hint("Auto-tint derives the accent palette from the background image.");
+				ToolUi::Hint("Accent colour comes from the background.");
 			}
 		}
 
@@ -489,7 +518,7 @@ private:
 
 		ToolUi::Section("Advanced style editor");
 		if (ImGui::CollapsingHeader("Legacy ImGui style editor")) {
-			ImGui::TextWrapped("%s", "Preset colors are authoritative. Edits here are kept in the legacy theme.bin mirror and may be replaced when a preset is applied.");
+			ImGui::TextWrapped("%s", "Style edits are a legacy mirror.");
 			auto& base = settings.isDarkMode ? settings.igs_dark : settings.igs_light;
 			ImGuiStyle ims_backup;
 			std::memcpy(&ims_backup, &ImGui::GetStyle(), sizeof(base));
@@ -505,7 +534,7 @@ private:
 	// ----------------------------------------------------------------- editor
 	void RenderEditor(ThemeManager& tm, casioemu::settings::SettingsData& data) {
 		ToolUi::Section("Text editor");
-		ToolUi::Description("Defaults for source documents opened in the editor column. Changes apply to newly opened documents.");
+		ToolUi::Description("Defaults for newly opened documents.");
 		ImGui::Spacing();
 		bool changed = false;
 		{
@@ -518,7 +547,7 @@ private:
 			ToolUi::Field("Tab size");
 			ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x * 0.3f));
 			changed |= ImGui::SliderInt("##editor_tab", &data.editor.tabSize, 1, 16);
-			ToolUi::Hint("The editor keeps indentation, undo history and scroll position per document.");
+			ToolUi::Hint("Per-document state is preserved.");
 		}
 		if (changed)
 			SaveNow();
@@ -536,7 +565,7 @@ private:
 		casioemu::settings::SettingsData& data) {
 		auto& emu = data.emulator;
 		ToolUi::Section("Performance");
-		ToolUi::Description("The emulator runs the model's clock rate by default. Background sessions use the throttle below.");
+		ToolUi::Description("Defaults to the model clock.");
 		ImGui::Spacing();
 		{
 			ToolUi::PanelScope panel("##settings_perf");
@@ -577,7 +606,7 @@ private:
 			}
 			if (ImGui::IsItemDeactivatedAfterEdit())
 				SaveNow();
-			ToolUi::Hint("Fraction of the active session's cycle rate used by inactive sessions.");
+			ToolUi::Hint("Cycle rate for inactive sessions.");
 
 			bool low_performance = settings.lowPerformanceMode;
 			if (ImGui::Checkbox("Power saving mode", &low_performance)) {
@@ -586,7 +615,7 @@ private:
 				emu.lowPerformanceMode = low_performance;
 				SaveNow();
 			}
-			ToolUi::Hint("Caps the frame rate at 25 FPS to reduce CPU and battery use.");
+			ToolUi::Hint("Caps at 25 FPS to save power.");
 		}
 
 		ToolUi::Section("Run state");
@@ -602,7 +631,7 @@ private:
 				ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Reboot").x + 20.0f);
 				if (ImGui::Button("Reboot"))
 					m_emu->ResetToMainMenu();
-				ToolUi::Hint("Reboot returns to the calculator's power-on main menu without closing the debugger.");
+				ToolUi::Hint("Returns to the power-on menu.");
 			}
 		}
 
@@ -613,7 +642,7 @@ private:
 				audio_enable = emu.audioEnabled;
 				SaveNow();
 			}
-			ToolUi::Hint("Turns the model's buzzer output on or off. The audio device stays open.");
+			ToolUi::Hint("Enable the model buzzer.");
 		}
 
 		ToolUi::Section("Display");
@@ -647,7 +676,7 @@ private:
 				SaveNow();
 			ImGui::EndDisabled();
 			if (!lcd_options)
-				ToolUi::Hint("These options apply to the ordinary LCD models only.");
+				ToolUi::Hint("Ordinary LCD models only.");
 		}
 
 		ToolUi::Section("Screenshots and recording");
@@ -711,7 +740,7 @@ private:
 	void RenderCalculator(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
 		ToolUi::Section("Model");
-		ToolUi::Description("The active session's calculator model and ROM. Switching models creates or activates a session.");
+		ToolUi::Description("Model and ROM of the active session.");
 		ImGui::Spacing();
 		{
 			ToolUi::PanelScope panel("##settings_model");
@@ -795,7 +824,7 @@ private:
 				data.calculator.zoom = 0.0f;
 				SaveNow();
 			}
-			ToolUi::Hint("The calculator keeps the model's aspect ratio. Zoom is nearest-neighbour sampled, so it stays crisp. The shell owns the resizer.");
+			ToolUi::Hint("Nearest-neighbour zoom.");
 		}
 		(void)tm;
 		(void)settings;
@@ -805,7 +834,7 @@ private:
 	void RenderPaths(ThemeManager& tm, ThemeSettings& settings,
 		casioemu::settings::SettingsData& data) {
 		ToolUi::Section("Injection file");
-		ToolUi::Description("Hex payloads and custom injections are read from this file. The Payload tool reloads it when it changes.");
+		ToolUi::Description("Payloads are read from this file.");
 		ImGui::Spacing();
 		{
 			ToolUi::PanelScope panel("##settings_paths");
@@ -885,7 +914,7 @@ private:
 			if (tm.IsPluginThemeActive())
 				ToolUi::Status("A theme plugin currently owns the ImGui style.", UIHelpers::kColorSuccess);
 			else
-				ToolUi::Hint("No theme plugin is active; the built-in preset is in use.");
+				ToolUi::Hint("No plugin theme active.");
 			ImGui::Text("Active preset: %s", tm.CurrentThemeName().empty() ? "(none)" : tm.CurrentThemeName().c_str());
 		}
 
@@ -898,12 +927,11 @@ private:
 			ImGui::Spacing();
 			if (ImGui::Button("Install Plugin..."))
 				casioemu::shell::RequestInstallPlugin();
-			ToolUi::Hint("Switch to a session tab to open the Plugin Manager document; Settings keeps its own tab.");
+			ToolUi::Hint("Open the Plugin Manager from a session tab.");
 		}
 
 		ToolUi::Section("Safety");
-		ToolUi::Hint("Native plugin code runs in-process. Review the permissions in the trust prompt before approving a plugin. "
-			"Declarative plugins (theme, inject, layout, tool) never execute native code.");
+		ToolUi::Hint("Native plugins run in-process; review permissions.");
 	}
 
 	// ----------------------------------------------------------- integrations
@@ -921,7 +949,7 @@ private:
 					DiscordRPC::UpdatePresence("");
 #endif
 			}
-			ToolUi::Hint("Publishes the active model name and session state through Discord Rich Presence.");
+			ToolUi::Hint("Show the active model in Discord.");
 		}
 
 		ToolUi::Section("Updates");
@@ -931,7 +959,7 @@ private:
 				ThemeManager::Instance().Settings().enableUpdateChecker = data.integrations.updateChecker;
 				SaveNow();
 			}
-			ToolUi::Hint("Update checks are read-only: the release page opens in your browser and nothing is installed automatically.");
+			ToolUi::Hint("Opens the release page in your browser.");
 		}
 	}
 
@@ -955,7 +983,7 @@ private:
 		};
 
 		ToolUi::Section("Language");
-		ToolUi::Description("The interface language. Missing translations fall back to English.");
+		ToolUi::Description("Missing translations fall back to English.");
 		ImGui::Spacing();
 
 		if (strlen(settings.language) == 0)
@@ -1004,8 +1032,8 @@ private:
 			}
 		}
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Delete the cached language file and reload the built-in translation.");
-		ToolUi::Hint("Some plugin-provided strings are English-only.");
+			ImGui::SetTooltip("Reload the built-in translation.");
+		ToolUi::Hint("Plugin strings may be English-only.");
 	}
 
 	// ------------------------------------------------------------ window/layout
@@ -1013,7 +1041,7 @@ private:
 		casioemu::settings::SettingsData& data) {
 		auto& shell = data.shell;
 		ToolUi::Section("Panels");
-		ToolUi::Description("Visibility changes apply immediately. Width and height changes apply now or on next launch where the shell owns the splitter.");
+		ToolUi::Description("Some sizes apply on next launch.");
 		ImGui::Spacing();
 		{
 			ToolUi::PanelScope panel("##settings_panels");
@@ -1068,7 +1096,7 @@ private:
 
 			if (ImGui::Checkbox("Calculator panel", &shell.calculator.visible))
 				casioemu::shell::SetCalculatorVisible(shell.calculator.visible);
-			ToolUi::Hint("Sidebar and bottom-panel visibility apply immediately; width and height changes are kept for the next launch because the shell owns those splitters.");
+			ToolUi::Hint("Widths apply on next launch.");
 			ToolUi::Field("Calculator width");
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
 			if (ImGui::SliderInt("##calc_width", &shell.calculator.width, 260, 700, "%d px")) {
@@ -1106,7 +1134,7 @@ private:
 		}
 
 		ToolUi::Section("Tool documents");
-		ToolUi::Description("Hidden tools stay listed here so they can always be restored. Settings is always available.");
+		ToolUi::Description("Hidden tools stay listed.");
 		{
 			ToolUi::PanelScope panel("##settings_tabs");
 			bool tabVisibilityChanged = false;
@@ -1190,15 +1218,13 @@ private:
 				}
 				ImGui::EndCombo();
 			}
-			ToolUi::Hint("The renderer is chosen before the window exists, so the change applies on the next launch. "
-				"A crash switches the backend automatically.");
+			ToolUi::Hint("Applies on next launch.");
 		}
 
 		ToolUi::Section("Reset");
 		{
 			ToolUi::PanelScope panel("##settings_reset");
-			ImGui::TextWrapped("Reset every setting to its built-in default. Themes, paths, layout and plugin state are cleared. "
-				"The settings file is rewritten; open documents and snapshots are not touched.");
+			ImGui::TextWrapped("Restore all defaults. Documents and snapshots are kept.");
 			ImGui::Spacing();
 			if (ImGui::Button("Reset All Settings"))
 				confirmReset = true;
@@ -1234,6 +1260,482 @@ private:
 			}
 		}
 		(void)data;
+	}
+
+	// -------------------------------------------------------- documentation
+	static std::string DocTitle(const std::filesystem::path& path) {
+		std::ifstream input(path, std::ios::binary);
+		if (input) {
+			std::string line;
+			for (int count = 0; count < 200 && std::getline(input, line); ++count) {
+				size_t level = 0;
+				while (level < line.size() && line[level] == '#')
+					++level;
+				if (level == 0 || level > 6)
+					continue;
+				std::string title = line.substr(level);
+				const auto first = title.find_first_not_of(" \t\r");
+				if (first == std::string::npos)
+					continue;
+				const auto last = title.find_last_not_of(" \t\r");
+				title = title.substr(first, last - first + 1);
+				std::string plain;
+				for (size_t index = 0; index < title.size();) {
+					const char ch = title[index];
+					if (ch == '[') {
+						const auto close = title.find("](", index + 1);
+						const auto end = close == std::string::npos ? std::string::npos : title.find(')', close + 2);
+						if (close != std::string::npos && end != std::string::npos) {
+							plain += title.substr(index + 1, close - index - 1);
+							index = end + 1;
+							continue;
+						}
+					}
+					if (ch == '`' || ch == '*' || ch == '_') {
+						++index;
+						continue;
+					}
+					plain.push_back(ch);
+					++index;
+				}
+				return plain;
+			}
+		}
+		return path.stem().string();
+	}
+
+	static std::string DocModified(const std::filesystem::path& path) {
+		std::error_code ec;
+		const auto stamp = std::filesystem::last_write_time(path, ec);
+		if (ec)
+			return {};
+		const auto system = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+			stamp - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+		const std::time_t time = std::chrono::system_clock::to_time_t(system);
+		std::tm local{};
+#ifdef _WIN32
+		localtime_s(&local, &time);
+#else
+		localtime_r(&time, &local);
+#endif
+		char buffer[32];
+		std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &local);
+		return buffer;
+	}
+
+	void AddDoc(const std::filesystem::path& path, const char* category) {
+		std::error_code ec;
+		if (!std::filesystem::is_regular_file(path, ec))
+			return;
+		const auto canonical = std::filesystem::weakly_canonical(path, ec);
+		const std::filesystem::path key = ec ? path : canonical;
+		for (const auto& doc : docs)
+			if (doc.path == key)
+				return;
+		if (docs.size() >= 600)
+			return;
+		DocEntry entry;
+		entry.title = DocTitle(key);
+		for (unsigned char ch : entry.title) {
+			if (ch >= 0x80) {
+				entry.title = key.stem().string();
+				break;
+			}
+		}
+		entry.category = category;
+		entry.modified = DocModified(key);
+		entry.path = key;
+		entry.rel = key.filename().string();
+		docs.push_back(std::move(entry));
+	}
+
+	void AddDocTree(const std::filesystem::path& root, const char* category, bool recursive) {
+		std::error_code ec;
+		if (!std::filesystem::is_directory(root, ec))
+			return;
+		const auto wanted = [](const std::filesystem::path& path) {
+			std::string ext = path.extension().string();
+			std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			return ext == ".md" || ext == ".markdown" || ext == ".txt";
+		};
+		if (recursive) {
+			for (auto it = std::filesystem::recursive_directory_iterator(root,
+					std::filesystem::directory_options::skip_permission_denied, ec);
+				it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+				if (ec) {
+					ec.clear();
+					continue;
+				}
+				std::error_code file_error;
+				if (it->is_regular_file(file_error) && wanted(it->path()))
+					AddDoc(it->path(), category);
+			}
+		}
+		else {
+			for (const auto& entry : std::filesystem::directory_iterator(root,
+					std::filesystem::directory_options::skip_permission_denied, ec)) {
+				if (ec)
+					break;
+				std::error_code file_error;
+				if (entry.is_regular_file(file_error) && wanted(entry.path()))
+					AddDoc(entry.path(), category);
+			}
+		}
+	}
+
+	static std::string ManifestDate(const std::string& stamp) {
+		// ISO 8601 "YYYY-MM-DDTHH:MM:SSZ" -> "YYYY-MM-DD HH:MM".
+		if (stamp.size() < 16)
+			return stamp;
+		std::string text = stamp.substr(0, 16);
+		if (text.size() > 10 && text[10] == 'T')
+			text[10] = ' ';
+		return text;
+	}
+
+	void ScanManifest(const std::filesystem::path& root) {
+		std::ifstream input(root / "manifest.tsv");
+		if (!input)
+			return;
+		std::string line;
+		bool header = true;
+		while (std::getline(input, line)) {
+			if (header) {
+				header = false;
+				if (line.rfind("path\t", 0) == 0)
+					continue;
+			}
+			std::vector<std::string> fields;
+			std::string field;
+			for (char ch : line) {
+				if (ch == '\t') {
+					fields.push_back(field);
+					field.clear();
+				}
+				else if (ch != '\r') {
+					field.push_back(ch);
+				}
+			}
+			fields.push_back(field);
+			if (fields.size() < 2 || fields[0].empty())
+				continue;
+			const std::filesystem::path relative = fields[0];
+			const std::filesystem::path full = root / relative;
+			std::error_code ec;
+			if (!std::filesystem::is_regular_file(full, ec))
+				continue;
+			DocEntry entry;
+			entry.path = std::filesystem::weakly_canonical(full, ec);
+			entry.rel = fields[0];
+			const std::string category_path = relative.generic_string();
+			if (category_path.rfind("wiz/", 0) == 0)
+				entry.category = "Wiz";
+			else if (category_path == "README.md" || category_path == "SNAPSHOT.md" ||
+				category_path == "BUILD-MACOS.md" || category_path == "PRIVACY.md")
+				entry.category = "Project";
+			else
+				entry.category = "Emulator";
+			entry.title = DocTitle(entry.path);
+			std::string manifest_title = casioemu::markdown::detail::Trim(fields[1]);
+			if (!manifest_title.empty())
+				entry.title = manifest_title;
+			entry.modified = fields.size() > 3 ? ManifestDate(fields[3]) : DocModified(entry.path);
+			docs.push_back(std::move(entry));
+		}
+	}
+
+	void ScanDocuments() {
+		docs.clear();
+		const auto exe = casioemu::settings::SettingsStore::ExecutableDir();
+		std::error_code ec;
+		const auto cwd = std::filesystem::current_path(ec);
+		const auto bundle_docs = exe / ".." / "Resources" / "docs";
+		bool manifest_found = std::filesystem::is_regular_file(bundle_docs / "manifest.tsv", ec);
+		if (manifest_found)
+			ScanManifest(bundle_docs);
+		if (!manifest_found) {
+			for (const auto& [root, category] : {
+					std::pair{ bundle_docs / "emulator", "Emulator" },
+					std::pair{ bundle_docs / "project", "Project" },
+					std::pair{ bundle_docs / "wiz", "Wiz" } })
+				AddDocTree(root, category, true);
+			for (const char* name : { "README.md", "SNAPSHOT.md", "BUILD-MACOS.md", "PRIVACY.md" })
+				AddDoc(bundle_docs / "project" / name, "Project");
+			AddDocTree(cwd / "docs", "Emulator", true);
+			for (const char* name : { "README.md", "SNAPSHOT.md", "BUILD-MACOS.md", "PRIVACY.md" })
+				AddDoc(cwd / name, "Project");
+			if (std::filesystem::is_directory(cwd, ec)) {
+				for (const auto& entry : std::filesystem::directory_iterator(cwd,
+						std::filesystem::directory_options::skip_permission_denied, ec)) {
+					if (ec)
+						break;
+					if (entry.is_regular_file(ec) && entry.path().extension() == ".md")
+						AddDoc(entry.path(), "Project");
+				}
+			}
+			AddDocTree(cwd.parent_path() / "Wiz" / "docs", "Wiz", true);
+		}
+		std::sort(docs.begin(), docs.end(), [](const DocEntry& lhs, const DocEntry& rhs) {
+			if (lhs.category != rhs.category)
+				return lhs.category < rhs.category;
+			return lhs.title < rhs.title;
+		});
+		docsScanned = true;
+		docSelected = -1;
+		docBody.clear();
+		docLoadedPath.clear();
+		if (const char* search = std::getenv("CASIOEMU_SETTINGS_DOC_SEARCH"))
+			std::snprintf(docSearch, sizeof(docSearch), "%s", search);
+		if (const char* wanted = std::getenv("CASIOEMU_SETTINGS_DOC_OPEN")) {
+			std::string needle = wanted;
+			std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			for (int index = 0; index < static_cast<int>(docs.size()); ++index) {
+				std::string haystack = docs[static_cast<size_t>(index)].title + " " +
+					docs[static_cast<size_t>(index)].path.string();
+				std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char ch) {
+					return static_cast<char>(std::tolower(ch));
+				});
+				if (haystack.find(needle) != std::string::npos) {
+					SelectDocument(index);
+					break;
+				}
+			}
+		}
+		if (const char* scroll = std::getenv("CASIOEMU_SETTINGS_DOC_SCROLL")) {
+			docPendingScroll = static_cast<float>(std::atof(scroll));
+			docScrollApply = 4;
+		}
+	}
+
+	void SelectDocument(int index) {
+		if (index == docSelected)
+			return;
+		if (auto* old = DocAt(docSelected))
+			docScroll[old->path.string()] = docCurrentScroll;
+		docSelected = index;
+		docBody.clear();
+		docLoadedPath.clear();
+		docPendingScroll = 0.0f;
+		docScrollApply = 0;
+		if (auto* doc = DocAt(index)) {
+			std::ifstream input(doc->path, std::ios::binary);
+			std::stringstream buffer;
+			buffer << input.rdbuf();
+			docBody = buffer.str();
+			// The pane already shows the title; drop a leading H1 that repeats it.
+			if (!docBody.empty() && docBody[0] == '#') {
+				const auto newline = docBody.find('\n');
+				const std::string first = docBody.substr(0, newline == std::string::npos ? docBody.size() : newline);
+				if (first.rfind("# ", 0) == 0)
+					docBody.erase(0, newline == std::string::npos ? docBody.size() : newline + 1);
+			}
+			docLoadedPath = doc->path.string();
+			const auto found = docScroll.find(docLoadedPath);
+			docPendingScroll = found != docScroll.end() ? found->second : 0.0f;
+			docScrollApply = 4;
+		}
+	}
+
+	void RenderDocList(float width, float height) {
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, ToolUi::WithAlpha(ToolUi::Palette().surfaceAlt, 0.7f));
+		ImGui::PushStyleColor(ImGuiCol_Border, ToolUi::Palette().border);
+		ImGui::BeginChild("##doc_list", ImVec2(width, height),
+			ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding);
+
+		std::string filter = docSearch;
+		std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		int visible_count = 0;
+		for (int index = 0; index < static_cast<int>(docs.size()); ++index) {
+			const auto& doc = docs[static_cast<size_t>(index)];
+			if (!filter.empty()) {
+				std::string haystack = doc.title + " " + doc.category + " " + doc.path.string();
+				std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char ch) {
+					return static_cast<char>(std::tolower(ch));
+				});
+				if (haystack.find(filter) == std::string::npos)
+					continue;
+			}
+			++visible_count;
+			const bool selected = index == docSelected;
+			ImGui::PushID(index);
+			const float row_width = ImGui::GetContentRegionAvail().x;
+			const ImVec2 top = ImGui::GetCursorScreenPos();
+			const float wrap = std::max(40.0f, row_width - 12.0f);
+			const ImVec2 title_size = ImGui::CalcTextSize(doc.title.c_str(), nullptr, false, wrap);
+			const ImVec2 rel_size = ImGui::CalcTextSize(doc.rel.c_str(), nullptr, false, wrap);
+			const float row_height = title_size.y + rel_size.y + ImGui::GetTextLineHeightWithSpacing() + 10.0f;
+			ImGui::InvisibleButton("##doc_row", ImVec2(row_width, row_height));
+			const bool hovered = ImGui::IsItemHovered();
+			if (ImGui::IsItemClicked())
+				SelectDocument(index);
+			ImDrawList* draw = ImGui::GetWindowDrawList();
+			draw->AddRectFilled(top, ImVec2(top.x + row_width, top.y + row_height),
+				ImGui::ColorConvertFloat4ToU32(selected ? ToolUi::WithAlpha(ToolUi::Palette().selection, 0.65f)
+					: (hovered ? ToolUi::Palette().hover : ImVec4(0, 0, 0, 0))), 5.0f);
+			ImGui::SetCursorScreenPos(ImVec2(top.x + 6.0f, top.y + 4.0f));
+			ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+			ImGui::TextUnformatted(doc.title.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::SetCursorScreenPos(ImVec2(top.x + 6.0f, top.y + 4.0f + title_size.y + 1.0f));
+			ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+			ImGui::PushStyleColor(ImGuiCol_Text, ToolUi::Palette().muted);
+			ImGui::TextUnformatted(doc.rel.c_str());
+			ImGui::PopStyleColor();
+			ImGui::PopTextWrapPos();
+			ImGui::SetCursorScreenPos(ImVec2(top.x + 6.0f, top.y + 4.0f + title_size.y + rel_size.y + 2.0f));
+			char detail[160];
+			const std::string date = doc.modified.size() >= 10 ? doc.modified.substr(0, 10) : doc.modified;
+			std::snprintf(detail, sizeof(detail), "%s  %s", doc.category.c_str(), date.c_str());
+			ImGui::TextDisabled("%s", detail);
+			ImGui::SetCursorScreenPos(ImVec2(top.x, top.y + row_height));
+			ImGui::PopID();
+		}
+		if (visible_count == 0)
+			ToolUi::EmptyState("No documentation found.");
+		ImGui::EndChild();
+		ImGui::PopStyleColor(2);
+		ImGui::PopStyleVar(2);
+	}
+
+	void RenderDocumentation() {
+		ToolUi::Section("Documentation");
+		ToolUi::Description("Browse and search project docs.");
+		if (!docsScanned)
+			ScanDocuments();
+
+		ToolUi::Field("Search");
+		ImGui::SetNextItemWidth(std::min(300.0f, std::max(120.0f, ToolUi::RemainingWidth() - 170.0f)));
+		ImGui::InputTextWithHint("##doc_search", "Title or path", docSearch, sizeof(docSearch));
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Refresh").x + 20.0f);
+		if (ImGui::Button("Refresh")) {
+			docs.clear();
+			docsScanned = false;
+			ScanDocuments();
+		}
+		ToolUi::SameLineOrWrap(ImGui::CalcTextSize("000 / 000 docs").x + 20.0f);
+		{
+			std::string filter = docSearch;
+			std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			int visible = 0;
+			for (const auto& doc : docs) {
+				std::string haystack = doc.title + " " + doc.category + " " + doc.path.string();
+				std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char ch) {
+					return static_cast<char>(std::tolower(ch));
+				});
+				if (filter.empty() || haystack.find(filter) != std::string::npos)
+					++visible;
+			}
+			ImGui::TextDisabled("%d / %d docs", visible, static_cast<int>(docs.size()));
+		}
+
+		ImGui::NewLine();
+		const float avail = ToolUi::RemainingWidth();
+		const bool stacked = avail < 480.0f;
+		if (stacked && docSelected < 0) {
+			RenderDocList(0.0f, 0.0f);
+			return;
+		}
+		if (stacked) {
+			if (ImGui::Button("Back to list")) {
+				SelectDocument(-1);
+				return;
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("%d docs", static_cast<int>(docs.size()));
+		}
+		else {
+			const float list_width = std::min(320.0f, std::max(220.0f, avail * 0.32f));
+			RenderDocList(list_width, 0.0f);
+			ImGui::SameLine();
+		}
+
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, ToolUi::WithAlpha(ToolUi::Palette().surfaceAlt, 0.35f));
+		ImGui::PushStyleColor(ImGuiCol_Border, ToolUi::Palette().border);
+		ImGui::BeginChild("##doc_view", ImVec2(0.0f, 0.0f),
+			ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding);
+		if (docScrollApply > 0 && docPendingScroll >= 0.0f) {
+			ImGui::SetScrollY(docPendingScroll);
+			--docScrollApply;
+		}
+		if (auto* doc = DocAt(docSelected)) {
+			ImGui::PushStyleColor(ImGuiCol_Text, ToolUi::Palette().accent);
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextUnformatted(doc->title.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::PopStyleColor();
+			ImGui::PushStyleColor(ImGuiCol_Text, ToolUi::Palette().muted);
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextUnformatted(doc->path.string().c_str());
+			if (!doc->modified.empty())
+				ImGui::Text("Modified %s", doc->modified.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::PopStyleColor();
+			ImGui::Separator();
+			casioemu::markdown::detail::g_link_valid = false;
+			casioemu::markdown::detail::SetBaseDirectory(doc->path.parent_path());
+			casioemu::markdown::Render(docBody);
+			docCurrentScroll = ImGui::GetScrollY();
+		}
+		else {
+			ToolUi::EmptyState("Select a document.");
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleColor(2);
+		ImGui::PopStyleVar(2);
+
+		if (std::getenv("CASIOEMU_DOC_LINK_TEST")) {
+			static int link_stage = 0;
+			ImGuiIO& io = ImGui::GetIO();
+			if (link_stage == 0 && docScrollApply == 0 && casioemu::markdown::detail::g_link_valid) {
+				io.AddMousePosEvent((casioemu::markdown::detail::g_link_min.x + casioemu::markdown::detail::g_link_max.x) * 0.5f,
+					(casioemu::markdown::detail::g_link_min.y + casioemu::markdown::detail::g_link_max.y) * 0.5f);
+				io.AddMouseButtonEvent(0, true);
+				link_stage = 1;
+			}
+			else if (link_stage == 1) {
+				io.AddMouseButtonEvent(0, false);
+				link_stage = 2;
+			}
+		}
+
+		if (std::getenv("CASIOEMU_SETTINGS_DOC_SCROLLTEST") && !docs.empty()) {
+			static int stage = 0;
+			static float before = -1.0f;
+			static int first = -1;
+			if (stage == 0 && docSelected >= 0) {
+				first = docSelected;
+				docPendingScroll = 180.0f;
+				docScrollApply = 4;
+				stage = 1;
+			}
+			else if (stage == 1 && docScrollApply == 0) {
+				before = docCurrentScroll;
+				SelectDocument((first + 1) % static_cast<int>(docs.size()));
+				stage = 2;
+			}
+			else if (stage == 2 && docScrollApply == 0) {
+				SelectDocument(first);
+				stage = 3;
+			}
+			else if (stage == 3 && docScrollApply == 0) {
+				const float after = docCurrentScroll;
+				std::fprintf(stderr, "[docs] scroll before=%.1f after=%.1f %s\n", before, after,
+					std::fabs(before - after) < 2.0f ? "PASS" : "FAIL");
+				stage = 4;
+			}
+		}
 	}
 
 public:
@@ -1316,6 +1818,7 @@ public:
 		case kLanguage: RenderLanguage(tm, settings, data); break;
 		case kWindow: RenderWindowLayout(tm, settings, data); break;
 		case kAdvanced: RenderAdvanced(tm, settings, data); break;
+		case kDocumentation: RenderDocumentation(); break;
 		default: break;
 		}
 		// Verification hook: park the settings page at a scroll offset so a

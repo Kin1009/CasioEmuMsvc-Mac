@@ -342,7 +342,7 @@ ClickableAddress.CodeJump=コードへ移動 (コードビューア)
 ClickableAddress.MemJump=メモリへ移動 (ヘックスエディタ)
 ClickableAddress.CodeJumpTooltip=クリックしてコードビューアの 0x%05X に移動
 ClickableAddress.MemJumpTooltip=クリックしてメモリエディタの 0x%05X に移動
-ClickableAddress.BothTooltip=0x%05X — クリックして移動
+ClickableAddress.BothTooltip=0x%05X - クリックして移動
 ClickableAddress.RightClickHint=右クリックでオプションを表示
 
 MemBP.ColPC=PCアドレス

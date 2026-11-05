@@ -471,7 +471,7 @@ bool Injector::ApplyInjection(const CustomInjection& inj, bool& show_info, std::
 }
 
 void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
-	ToolUi::Description("Injections are read from the injection file configured in Settings > Calculator.");
+	ToolUi::Description("Uses the injection file from Settings.");
 	static bool autoCheckFileChanges = true;
 	{
 		ToolUi::PanelScope panel("##custom_inject_toolbar");
@@ -539,7 +539,7 @@ void Injector::RenderCustomInjectTab(bool& show_info, std::string& info_msg) {
 	const auto plugin_payloads = casioemu::plugin::PluginPayloads();
 	if (!plugin_payloads.empty()) {
 		ToolUi::Section("Plugin payloads");
-		ToolUi::Description("Registered by installed inject plugins.");
+		ToolUi::Description("From installed inject plugins.");
 		for (const auto& payload : plugin_payloads) {
 			ImGui::PushID(payload.id.c_str());
 			if (ImGui::CollapsingHeader(payload.name.c_str())) {
@@ -658,7 +658,7 @@ void Injector::RenderCore() {
 	}
 	if (!m_emu || !me_mmu || !n_ram_buffer) {
 		ToolUi::Section("Payload");
-		ToolUi::EmptyState("The injector is unavailable until the emulator RAM is ready.");
+		ToolUi::EmptyState("RAM is not ready.");
 		return;
 	}
 	auto inputbase = m_emu->hardware_id == casioemu::HardwareId::HW_CLASSWIZ_II ? 0x9268 : 0xD180;
@@ -718,7 +718,7 @@ void Injector::RenderCore() {
 	{
 		if (rop_tab == 0) {
 			ToolUi::Section("An input");
-			ToolUi::Description("Fill the answer input area with dummy digits of the requested length.");
+			ToolUi::Description("Fill the answer input with dummy digits.");
 			ImGui::Spacing();
 			{
 				ToolUi::PanelScope panel("##rop_an_panel");
@@ -745,7 +745,7 @@ void Injector::RenderCore() {
 		}
 		else if (rop_tab == 1) {
 			ToolUi::Section("Hex injection");
-			ToolUi::Description("Write hex bytes to any address. Semicolons start a comment until the end of the line.");
+			ToolUi::Description("Write hex bytes to any address.");
 			ImGui::Spacing();
 			if (ToolUi::AccentButton("Rop.AddInjector"_lc)) {
 				injectors.push_back(InjectorData());
@@ -777,7 +777,7 @@ void Injector::RenderCore() {
 		}
 		else if (rop_tab == 2) {
 			ToolUi::Section("Input buffer");
-			ToolUi::Description("Edit the raw bytes that Load to Input Area copies into the input region.");
+			ToolUi::Description("Bytes copied by Load to Input Area.");
 			ImGui::Spacing();
 			ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
 			ImGui::BeginChild("RopInput", ImVec2(0, std::max(160.0f, ImGui::GetContentRegionAvail().y - 80.0f)),

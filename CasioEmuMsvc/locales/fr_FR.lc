@@ -385,7 +385,7 @@ ClickableAddress.CodeJump=Aller au Code (Code Viewer)
 ClickableAddress.MemJump=Aller à la Mémoire (Hex Editor)
 ClickableAddress.CodeJumpTooltip=Cliquez pour naviguer vers 0x%05X dans le Code Viewer
 ClickableAddress.MemJumpTooltip=Cliquez pour naviguer vers 0x%05X dans l'Éditeur Mémoire
-ClickableAddress.BothTooltip=0x%05X — Cliquez pour naviguer
+ClickableAddress.BothTooltip=0x%05X - Cliquez pour naviguer
 ClickableAddress.RightClickHint=Clic droit pour plus d'options
 
 MemBP.ColPC=Adresse PC

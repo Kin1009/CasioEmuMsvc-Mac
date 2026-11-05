@@ -584,6 +584,8 @@ struct MemoryEditor {
 
 				auto line_start_n = line_i * Cols;
 				auto line_end_n = line_start_n + Cols - 1;
+				size_t check_first_col = (size_t)-1, check_last_col = (size_t)-1;
+				float check_x0 = -1.0f, check_x1 = -1.0f;
 
 				if (marked_spans.has_value()) {
 					auto& spans = marked_spans.value();
@@ -601,11 +603,34 @@ struct MemoryEditor {
 						size_t intxn_end = intersection->second;
 						assert(intxn_start >= line_start_n && intxn_end <= line_end_n);
 
-						auto pos_tmp = ImGui::GetCursorScreenPos();
-						auto line_first_hex_pos = ImVec2(pos_tmp.x + s.GlyphWidth * 6, pos_tmp.y - s.LineHeight);
-						auto start_pos = ImVec2(line_first_hex_pos.x + s.HexCellWidth * (float)(intxn_start % Cols), line_first_hex_pos.y);
-						auto end_pos = ImVec2(line_first_hex_pos.x + s.HexCellWidth * (float)(intxn_end % Cols + 1), line_first_hex_pos.y + s.LineHeight);
+						// The address Text was just submitted; use its line rect
+						// as the row origin.  Spans are measured with the same
+						// per-byte advance the hex loop uses, plus the explicit
+						// group gaps, and stop after the digits (no trailing
+						// separator space).
+						const ImVec2 line_min = ImGui::GetItemRectMin();
+						const float hex_origin = line_min.x + s.PosHexStart;
+						const int mid = OptMidColsCount;
+						const float group = (mid > 0) ? s.SpacingBetweenMidCols : 0.0f;
+						const float trailing = s.HexCellWidth - ImGui::CalcTextSize("00").x;
+						auto cell_x = [&](size_t n) {
+							return hex_origin + s.HexCellWidth * static_cast<float>(n) +
+								(mid > 0 ? static_cast<float>(n / static_cast<size_t>(mid)) * group : 0.0f);
+						};
+						const size_t first_col = intxn_start % static_cast<size_t>(Cols);
+						const size_t last_col = intxn_end % static_cast<size_t>(Cols);
+						if (check_first_col == (size_t)-1) {
+							check_first_col = first_col;
+							check_last_col = last_col;
+						}
+						auto start_pos = ImVec2(cell_x(first_col), line_min.y);
+						auto end_pos = ImVec2(cell_x(last_col) + s.HexCellWidth - trailing,
+							line_min.y + s.LineHeight);
 						draw_list->AddRectFilled(start_pos, end_pos, ~span.color);
+						if (std::getenv("CASIOEMU_HEX_SPAN_REPORT")) {
+							std::fprintf(stderr, "[span] cols=%d bytes=%zu x0=%.2f x1=%.2f y=%.2f h=%.2f\n",
+								Cols, last_col - first_col + 1, start_pos.x, end_pos.x, start_pos.y, s.LineHeight);
+						}
 					}
 				}
 
@@ -615,6 +640,10 @@ struct MemoryEditor {
 					if (OptMidColsCount > 0)
 						byte_pos_x += (float)(n / OptMidColsCount) * s.SpacingBetweenMidCols;
 					ImGui::SameLine(byte_pos_x);
+					if (static_cast<size_t>(n) == check_first_col)
+						check_x0 = ImGui::GetCursorScreenPos().x;
+					if (static_cast<size_t>(n) == check_last_col)
+						check_x1 = ImGui::GetCursorScreenPos().x;
 
 					// Draw highlight
 					bool is_highlight_from_user_range = (addr >= HighlightMin && addr < HighlightMax);
@@ -739,6 +768,13 @@ struct MemoryEditor {
 							}
 						}
 					}
+				}
+
+				if (std::getenv("CASIOEMU_HEX_SPAN_REPORT") && check_x0 >= 0.0f && check_x1 >= 0.0f) {
+					std::fprintf(stderr, "[spancheck] cols=%d first=%zu last=%zu x0=%.2f x1=%.2f byte0=%.2f byte1=%.2f digit=%.2f\n",
+						Cols, check_first_col, check_last_col,
+						check_x0, check_x1 + ImGui::CalcTextSize("00").x,
+						check_x0, check_x1, ImGui::CalcTextSize("00").x);
 				}
 
 				if (OptShowAscii) {

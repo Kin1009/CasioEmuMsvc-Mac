@@ -385,7 +385,7 @@ ClickableAddress.CodeJump=跳转到代码（代码查看器）
 ClickableAddress.MemJump=跳转到内存（十六进制编辑器）
 ClickableAddress.CodeJumpTooltip=点击在代码查看器中跳转到 0x%05X
 ClickableAddress.MemJumpTooltip=点击在内存编辑器中跳转到 0x%05X
-ClickableAddress.BothTooltip=0x%05X — 点击跳转
+ClickableAddress.BothTooltip=0x%05X - 点击跳转
 ClickableAddress.RightClickHint=右键查看更多选项
 
 MemBP.ColPC=PC 地址

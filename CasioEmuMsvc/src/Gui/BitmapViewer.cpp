@@ -29,7 +29,7 @@ public:
 	void RenderCore() override {
 		ToolUi::PageScope page("Bitmap Viewer");
 		ToolUi::Section("Bitmap Viewer");
-		ToolUi::Description("Bit-addressable view of memory. Scroll over the grid or use the arrow keys to move.");
+		ToolUi::Description("Bit-level memory view.");
 		ImGui::Spacing();
 		uint32_t addr = static_cast<uint32_t>(std::strtoul(bufaddr, nullptr, 16)) & 0xfffff;
 		{

@@ -91,7 +91,7 @@ void HwController::RenderCore() {
 				(channel(capture_background_color[1]) << 8) |
 				channel(capture_background_color[2]));
 		}
-		ToolUi::Hint("Screenshots and recordings use this scale and background colour.");
+		ToolUi::Hint("Used for screenshots and recordings.");
 	}
 #endif
 
@@ -190,13 +190,13 @@ void HwController::RenderCore() {
 				m_emu->chipset.RaiseMaskable(irq);
 			}
 		}
-		ToolUi::Hint("Raises a maskable CPU interrupt with the given number (5-63).");
+		ToolUi::Hint("Raise a CPU interrupt (5-63).");
 	}
 
 	ToolUi::Section("Advanced");
 	{
 		ToolUi::PanelScope panel("##hw_advanced");
-		ImGui::TextWrapped("%s", "Reload the ROM from disk without restarting the emulator. The CPU is paused while the image is replaced.");
+		ImGui::TextWrapped("%s", "Reload the ROM without restarting.");
 		ImGui::Spacing();
 		if (ToolUi::AccentButton("HwController.HotReload"_lc)) {
 			const bool was_paused = m_emu->GetPaused();

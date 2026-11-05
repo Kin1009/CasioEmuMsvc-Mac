@@ -155,7 +155,7 @@ void SnapshotWindow::RenderToolbar() {
     bool hasSelected = (m_SelectedId != 0 && hasEmu);
 
     ToolUi::Section("Snapshots");
-    ToolUi::Description("Save the full machine state, branch from an existing snapshot, and export or import snapshot files.");
+    ToolUi::Description("Save, branch, export and import machine states.");
     ImGui::Spacing();
 
     {
@@ -201,7 +201,7 @@ void SnapshotWindow::RenderToolbar() {
         if (!hasSelected) ImGui::EndDisabled();
 
         ImGui::Spacing();
-        ToolUi::Hint("Selected snapshots can be exported alone or with their child snapshots.");
+        ToolUi::Hint("Export with or without child snapshots.");
 
         // --- Export / import ---
         if (!hasSelected) ImGui::BeginDisabled();

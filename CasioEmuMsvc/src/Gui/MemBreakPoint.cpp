@@ -45,7 +45,7 @@ Breakpoints* membp_cv = 0;
 void Breakpoints::DrawContent() {
 	if (break_point_hash.empty()) {
 		ToolUi::PanelScope panel("##bp_empty");
-		ToolUi::EmptyState("No memory breakpoints set. Enter an address in hex and click Add below to monitor memory access.");
+		ToolUi::EmptyState("No memory breakpoints yet.");
 		return;
 	}
 	static int selected = -1;
@@ -276,7 +276,7 @@ void Breakpoints::RenderCore() {
 	if (ImGui::BeginTabBar("Breakpoints")) {
 		if (ImGui::BeginTabItem("Memory")) {
 			ToolUi::Section("Memory Breakpoints");
-			ToolUi::Description("Break on a read or write to a memory address, or record the program counter of every hit.");
+			ToolUi::Description("Break or record on memory reads and writes.");
 			ImGui::Spacing();
 			{
 				ToolUi::PanelScope panel("##bp_add_panel");
@@ -320,7 +320,7 @@ void Breakpoints::RenderCore() {
 		}
 		if (!m_emu->chipset.t4x && ImGui::BeginTabItem("Register")) {
 			ToolUi::Section("Register Breakpoint");
-			ToolUi::Description("Stop when the stack pointer matches the comparison you choose.");
+			ToolUi::Description("Break when the stack pointer matches.");
 			ImGui::Spacing();
 			ToolUi::PanelScope panel("##bp_register_panel");
 			const bool eps6800 = m_emu && m_emu->chipset.epscpu;

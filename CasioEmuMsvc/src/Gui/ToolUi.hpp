@@ -90,6 +90,16 @@ struct PageScope {
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+		// One rounding scale for every tool-page element: 8 px panels and
+		// popups, 6 px controls, 6 px scrollbars in a 10 px track.
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 10.0f);
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
 		if (inset_) {
@@ -126,7 +136,7 @@ struct PageScope {
 		if (inset_)
 			ImGui::Unindent(8.0f);
 		ImGui::PopStyleColor();
-		ImGui::PopStyleVar(3);
+		ImGui::PopStyleVar(11);
 	}
 	PageScope(const PageScope&) = delete;
 	PageScope& operator=(const PageScope&) = delete;
@@ -252,7 +262,7 @@ inline void Status(const char* text, const ImVec4& color) {
 // and empty states so they read as cards rather than flat ImGui regions.
 struct PanelScope {
 	PanelScope(const char* id, float height = 0.0f, bool border = true) {
-		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, border ? 1.0f : 0.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
@@ -363,6 +373,9 @@ public:
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 6.0f);
 		ImGui::PushStyleColor(ImGuiCol_PopupBg, Palette().surface);
 		ImGui::PushStyleColor(ImGuiCol_Border, Palette().borderStrong);
 		open_ = ImGui::BeginPopupModal(popup_id, nullptr,
@@ -376,7 +389,7 @@ public:
 		if (open_)
 			ImGui::EndPopup();
 		ImGui::PopStyleColor(2);
-		ImGui::PopStyleVar(4);
+		ImGui::PopStyleVar(7);
 	}
 	explicit operator bool() const { return open_; }
 	// True when the user pressed the header X or Escape this frame; the caller
@@ -413,16 +426,18 @@ private:
 inline void PushPopupChrome() {
 	const ThemePalette& palette = Palette();
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
-	ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 5.0f));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 6.0f);
 	ImGui::PushStyleColor(ImGuiCol_PopupBg, palette.surface);
 	ImGui::PushStyleColor(ImGuiCol_Border, palette.borderStrong);
 }
 
 inline void PopPopupChrome() {
 	ImGui::PopStyleColor(2);
-	ImGui::PopStyleVar(4);
+	ImGui::PopStyleVar(6);
 }
 
 class PopupScope {

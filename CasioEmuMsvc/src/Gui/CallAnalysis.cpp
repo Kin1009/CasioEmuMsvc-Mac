@@ -166,7 +166,7 @@ struct CallAnalysis : public UIWindow {
 		}
 		if (recording.load(std::memory_order_relaxed)) {
 			ToolUi::Section("Recording");
-			ToolUi::Description("Every function call is being captured. Stop the recording to inspect the results.");
+			ToolUi::Description("Capturing function calls.");
 			ImGui::Spacing();
 			if (ToolUi::AccentButton("CallAnalysis.Stop"_lc))
 				recording.store(false);
@@ -175,7 +175,7 @@ struct CallAnalysis : public UIWindow {
 				funcs.clear();
 			if (funcs.empty()) {
 				ImGui::Spacing();
-				ToolUi::EmptyState("Recording... Waiting for function calls to be triggered.");
+				ToolUi::EmptyState("Waiting for calls.");
 			}
 			else {
 				ToolUi::Section("Recorded Functions");
@@ -255,7 +255,7 @@ struct CallAnalysis : public UIWindow {
 				return;
 			}
 			ToolUi::Section("Call Analysis");
-			ToolUi::Description("Record every function call, optionally filtered by caller or callee address, then inspect per-function counts.");
+			ToolUi::Description("Record calls, optionally filtered by caller or callee.");
 			ImGui::Spacing();
 			if (ToolUi::AccentButton("CallAnalysis.StartRec"_lc)) {
 				recording.store(true);
@@ -284,7 +284,7 @@ struct CallAnalysis : public UIWindow {
 
 			ToolUi::Section("Recorded Functions");
 			if (funcs.empty()) {
-				ToolUi::EmptyState("Click Start Recording above to begin capturing function calls.");
+				ToolUi::EmptyState("Click Start Recording.");
 			}
 			else if (ToolUi::TableScope table{"##records", 2}) {
 				ImGui::TableSetupColumn("CallAnalysis.Function"_lc, ImGuiTableColumnFlags_WidthStretch, 80);

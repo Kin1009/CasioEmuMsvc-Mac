@@ -77,7 +77,7 @@ void VariableWindow::RenderCore() {
 	bool s_im = showimg_f ? 1 : (showimg_auto ? is_in_im : 0);
 
 	ToolUi::Section("Variables");
-	ToolUi::Description("Decoded BCD values for the active model. Click an address to jump to it in the memory editor.");
+	ToolUi::Description("Decoded BCD values for the active model.");
 
 	int cols = 2;
 	if (s_im) cols++;

@@ -32,7 +32,7 @@ void PluginLogWindow::RenderInstalled() {
 	auto& entries = registry.Entries();
 
 	ToolUi::Section("Plugins");
-	ToolUi::Description("Declarative themes, injectors, tools and native plugins. Native plugins run in-process, so review their permissions before approval.");
+	ToolUi::Description("Themes, injectors, tools and native plugins.");
 	ImGui::Spacing();
 	{
 		ToolUi::PanelScope panel("##plugin_actions");
@@ -44,12 +44,12 @@ void PluginLogWindow::RenderInstalled() {
 		ImGui::SameLine();
 		if (ImGui::Button("Reload Declarative"))
 			registry.ReloadDeclarative();
-		ToolUi::Hint("Or copy a .plugin into the plugins folder and restart.");
+		ToolUi::Hint("Or copy a .plugin into the plugins folder.");
 	}
 
 	ToolUi::Section("Installed Plugins");
 	if (entries.empty()) {
-		ToolUi::EmptyState("No plugins installed. Use Install Plugin..., drop a .plugin into the plugins folder, then restart or reload.");
+		ToolUi::EmptyState("No plugins installed.");
 		return;
 	}
 
@@ -207,7 +207,7 @@ void PluginLogWindow::RenderDeveloper() {
 		ImGui::PopStyleColor();
 	}
 	if (g_PluginLoadLog.empty())
-		ToolUi::Hint("The plugin host has not logged anything yet.");
+		ToolUi::Hint("No log entries yet.");
 	ImGui::EndChild();
 }
 
