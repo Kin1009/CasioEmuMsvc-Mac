@@ -10,6 +10,7 @@
 #include "TextEditor.h"
 #include "Ui.hpp"
 #include "hex.hpp"
+#include "ToolUi.hpp"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -59,6 +60,7 @@ public:
 	}
 
 	void RenderCore() override {
+		ToolUi::PageScope page("Rop Compiler");
 #ifdef CASIOEMU_CORE_WEB
 		checkWebDatabaseImportResult();
 #endif

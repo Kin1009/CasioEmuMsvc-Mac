@@ -340,9 +340,7 @@ public:
 		RenderToolbar();
 		ImGui::Separator();
 
-		const float diagnostics_height = 145.0f;
-		const float main_height = std::max(
-			160.0f, ImGui::GetContentRegionAvail().y - diagnostics_height - ImGui::GetStyle().ItemSpacing.y);
+		const float main_height = std::max(160.0f, ImGui::GetContentRegionAvail().y);
 
 		if (ImGui::BeginTable("##wiz_layout", 2,
 				ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV |
@@ -361,7 +359,6 @@ public:
 			ImGui::EndTable();
 		}
 
-		RenderDiagnosticsPanel(diagnostics_height);
 		HandleShortcuts();
 	}
 

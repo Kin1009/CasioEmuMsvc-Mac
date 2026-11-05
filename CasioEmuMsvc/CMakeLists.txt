@@ -663,6 +663,18 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
                         "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/MacOS/models"
                     COMMENT "Copying the models into the bundle")
             endif()
+            set(WIZ_DOCS_SOURCE "/Users/kin/Desktop/Wiz/docs")
+            if(NOT IS_DIRECTORY "${WIZ_DOCS_SOURCE}")
+                set(WIZ_DOCS_SOURCE "${CMAKE_SOURCE_DIR}/../Wiz/docs")
+            endif()
+            add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND}
+                    -DDEST=$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/docs
+                    -DEMU_DOCS=${CMAKE_SOURCE_DIR}/docs
+                    -DEMU_ROOT=${CMAKE_SOURCE_DIR}
+                    -DWIZ_DOCS=${WIZ_DOCS_SOURCE}
+                    -P ${CMAKE_SOURCE_DIR}/tools/copy_bundle_docs.cmake
+                COMMENT "Copying documentation into the bundle")
         endif()
     else()
         message(STATUS "Wiz toolchain sources are missing; building without them")
