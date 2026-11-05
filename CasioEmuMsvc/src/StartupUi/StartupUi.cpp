@@ -2280,6 +2280,14 @@ namespace casioemu {
 
 		void RenderLegacy() {
 			const plugin::ThemePalette& palette = ThemeManager::Instance().Colors();
+			ImGuiStyle& startup_style = ImGui::GetStyle();
+			startup_style.WindowRounding = 8.0f;
+			startup_style.ChildRounding = 8.0f;
+			startup_style.PopupRounding = 9.0f;
+			startup_style.FrameRounding = 6.0f;
+			startup_style.TabRounding = 6.0f;
+			startup_style.ScrollbarRounding = 10.0f;
+			startup_style.GrabRounding = 6.0f;
 			const std::string active_theme = ThemeManager::Instance().CurrentThemeName();
 			if (active_theme != "anh-sang-cua-dang")
 				RememberPreviousTheme(active_theme);

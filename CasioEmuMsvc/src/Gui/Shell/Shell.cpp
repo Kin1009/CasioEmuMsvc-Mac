@@ -790,7 +790,7 @@ void DrawFlatPanel(const char* name, ImVec2 pos, ImVec2 size, ImVec4 background,
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
 	ImGui::PushStyleColor(ImGuiCol_WindowBg, background);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 	ImGui::Begin(name, nullptr,
@@ -1430,7 +1430,7 @@ void RenderTabStrip(const ThemePalette& palette) {
 					open_settings = true;
 			}
 			const ImVec4 fill = item.active ? palette.tabActive : (hovered ? palette.hover : palette.tabInactive);
-			draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fill), 5.0f, ImDrawFlags_RoundCornersTop);
+			draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(fill), 6.0f, ImDrawFlags_RoundCornersTop);
 			draw->AddLine(ImVec2(max.x - 1.0f, min.y + 5.0f), ImVec2(max.x - 1.0f, max.y - 4.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
 			if (item.active)
@@ -2145,7 +2145,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 
 	ImGui::SetCursorPos(ImVec2(8.0f, toolbar_height));
-	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
 	doc.editor.SetPalette(ThemeManager::Instance().IsDarkMode()
 		? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
 	doc.editor.Render("##file_editor_body", ImVec2(size.x - 24.0f, size.y - toolbar_height - 20.0f), true);
@@ -2269,7 +2269,7 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		const ImVec2 max = ImGui::GetItemRectMax();
 		const bool selected = index == g.toolIndex;
 		draw->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(selected ? palette.tabActive :
-			(hovered ? palette.hover : palette.tabInactive)), 4.0f, ImDrawFlags_RoundCornersTop);
+			(hovered ? palette.hover : palette.tabInactive)), 6.0f, ImDrawFlags_RoundCornersTop);
 		draw->AddLine(ImVec2(max.x - 1.0f, min.y + 4.0f), ImVec2(max.x - 1.0f, max.y - 4.0f),
 			ImGui::ColorConvertFloat4ToU32(palette.border), 1.0f);
 		if (selected)
