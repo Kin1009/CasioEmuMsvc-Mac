@@ -1432,8 +1432,7 @@ private:
 			const std::string category_path = relative.generic_string();
 			if (category_path.rfind("wiz/", 0) == 0)
 				entry.category = "Wiz";
-			else if (category_path == "README.md" || category_path == "SNAPSHOT.md" ||
-				category_path == "BUILD-MACOS.md" || category_path == "PRIVACY.md")
+			else if (category_path == "PRIVACY.md")
 				entry.category = "Project";
 			else
 				entry.category = "Emulator";
@@ -1450,7 +1449,6 @@ private:
 		docs.clear();
 		const auto exe = casioemu::settings::SettingsStore::ExecutableDir();
 		std::error_code ec;
-		const auto cwd = std::filesystem::current_path(ec);
 		const auto bundle_docs = exe / ".." / "Resources" / "docs";
 		bool manifest_found = std::filesystem::is_regular_file(bundle_docs / "manifest.tsv", ec);
 		if (manifest_found)
@@ -1461,21 +1459,7 @@ private:
 					std::pair{ bundle_docs / "project", "Project" },
 					std::pair{ bundle_docs / "wiz", "Wiz" } })
 				AddDocTree(root, category, true);
-			for (const char* name : { "README.md", "SNAPSHOT.md", "BUILD-MACOS.md", "PRIVACY.md" })
-				AddDoc(bundle_docs / "project" / name, "Project");
-			AddDocTree(cwd / "docs", "Emulator", true);
-			for (const char* name : { "README.md", "SNAPSHOT.md", "BUILD-MACOS.md", "PRIVACY.md" })
-				AddDoc(cwd / name, "Project");
-			if (std::filesystem::is_directory(cwd, ec)) {
-				for (const auto& entry : std::filesystem::directory_iterator(cwd,
-						std::filesystem::directory_options::skip_permission_denied, ec)) {
-					if (ec)
-						break;
-					if (entry.is_regular_file(ec) && entry.path().extension() == ".md")
-						AddDoc(entry.path(), "Project");
-				}
-			}
-			AddDocTree(cwd.parent_path() / "Wiz" / "docs", "Wiz", true);
+			AddDoc(bundle_docs / "project" / "PRIVACY.md", "Project");
 		}
 		std::sort(docs.begin(), docs.end(), [](const DocEntry& lhs, const DocEntry& rhs) {
 			if (lhs.category != rhs.category)

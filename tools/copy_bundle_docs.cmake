@@ -1,19 +1,95 @@
-# Copy project documentation into the app bundle and write a manifest.
-# Invoked from CMake POST_BUILD with -DDEST, -DEMU_DOCS, -DEMU_ROOT, -DWIZ_DOCS.
+# Copy only generic app/toolchain documentation into the app bundle and write
+# a manifest.  Invoked from CMake POST_BUILD with -DDEST, -DEMU_DOCS,
+# -DEMU_ROOT, -DWIZ_DOCS.
+#
+# This bundle is user-facing: it must never contain environment notes, local
+# checkout paths, build scratch paths or internal planning records.  Keep the
+# allowlist explicit so new local notes are not picked up automatically.
 
 if(NOT DEFINED DEST OR DEST STREQUAL "")
     return()
 endif()
 
+# Relative paths (inside Resources/docs) that are safe to ship.
+set(ALLOWED_DOCS
+    API.md
+    ARCHITECTURE.md
+    C-CONFORMANCE.md
+    DIRECTIVES.md
+    EDITOR.md
+    GUIDE.md
+    PLUGIN-GUIDE.md
+    PLUGIN_SPEC.md
+    PRIVACY.md
+    ROP.md
+    STATUS_ICONS.md
+    WIZ-COMPILER.md
+    WIZ-UPSTREAM.md
+    plugins/EXAMPLES.md
+    plugins/STATUS.md
+    plugins/TROUBLESHOOTING.md)
+
+# Remove the previous bundle first: excluded documents must not linger after a
+# rebuild when their source disappears from the repository.
+file(REMOVE_RECURSE "${DEST}")
 file(MAKE_DIRECTORY "${DEST}")
-file(REMOVE "${DEST}/manifest.tsv")
 
 set(manifest_lines "path\ttitle\tsize\tmtime\n")
+
+function(doc_is_allowed relative out_var)
+    set(allowed FALSE)
+    foreach(entry IN LISTS ALLOWED_DOCS)
+        if(relative STREQUAL entry)
+            set(allowed TRUE)
+            break()
+        endif()
+    endforeach()
+    set(${out_var} "${allowed}" PARENT_SCOPE)
+endfunction()
+
+function(doc_has_local_environment text out_var)
+    set(found FALSE)
+    # Absolute home/system paths, local checkout names, ROM folders and local
+    # scratch paths are environment-specific by definition.
+    foreach(pattern
+            "/Users/kin"
+            "/Applications/"
+            "/private/"
+            "/Volumes/"
+            "Wiz/preview"
+            "CasioEmuMsvc-Mac"
+            "models/"
+            "Wiz/temp"
+            "./temp/"
+            "../temp/")
+        string(FIND "${text}" "${pattern}" position)
+        if(NOT position EQUAL -1)
+            set(found TRUE)
+            break()
+        endif()
+    endforeach()
+    set(${out_var} "${found}" PARENT_SCOPE)
+endfunction()
 
 function(copy_one source relative target_root)
     if(NOT EXISTS "${source}")
         return()
     endif()
+    set(check_relative "${relative}")
+    if(check_relative MATCHES "^wiz/")
+        string(REGEX REPLACE "^wiz/" "" check_relative "${check_relative}")
+    endif()
+    doc_is_allowed("${check_relative}" allowed)
+    if(NOT allowed)
+        return()
+    endif()
+    file(READ "${source}" content)
+    doc_has_local_environment("${content}" local_env)
+    if(local_env)
+        message(STATUS "Skipping environment-specific doc: ${relative}")
+        return()
+    endif()
+
     get_filename_component(name "${source}" NAME)
     set(destination "${target_root}/${relative}")
     get_filename_component(destination_dir "${destination}" DIRECTORY)
@@ -44,11 +120,7 @@ if(DEFINED EMU_DOCS AND EXISTS "${EMU_DOCS}")
 endif()
 
 if(DEFINED EMU_ROOT AND EXISTS "${EMU_ROOT}")
-    foreach(name README.md SNAPSHOT.md BUILD-MACOS.md PRIVACY.md)
-        if(EXISTS "${EMU_ROOT}/${name}")
-            copy_one("${EMU_ROOT}/${name}" "${name}" "${DEST}")
-        endif()
-    endforeach()
+    copy_one("${EMU_ROOT}/PRIVACY.md" "PRIVACY.md" "${DEST}")
 endif()
 
 if(DEFINED WIZ_DOCS AND EXISTS "${WIZ_DOCS}")
