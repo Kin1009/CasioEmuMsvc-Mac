@@ -7,20 +7,14 @@
 // old external window showed. The LCD-only path is kept as a fallback for
 // builds or models without a model face.
 #include "WizToolchain.h"
-#include "Settings/Settings.h"
-#include "Shell/SessionHost.h"
-#include "ToolUi.hpp"
 
 #include "Chipset/Chipset.hpp"
-#include "Peripheral/Keyboard.hpp"
 #include "Peripheral/Screen.hpp"
 
 #include <SDL.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -31,7 +25,6 @@ constexpr const char* kScreenWindowName = "Calculator";
 
 struct Placement {
 	float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
-	float scale = 1.0f;
 	bool hovered = false;
 };
 
@@ -47,38 +40,19 @@ Placement DrawCentred(ImTextureID image, int width, int height, float footer, bo
 	if (area_w < 1.0f || area_h < 1.0f)
 		return place;
 
-	// Leave room for the 6 px card frame on each side.
-	const float framed_w = std::max(1.0f, area_w - 12.0f);
-	const float framed_h = std::max(1.0f, area_h - 12.0f);
-	float raw = std::min(framed_w / static_cast<float>(width), framed_h / static_cast<float>(height));
+	float raw = std::min(area_w / static_cast<float>(width), area_h / static_cast<float>(height));
 	float scale = fit ? raw : zoom;
 	if (scale <= 0.0f)
 		scale = 1.0f;
-	place.scale = scale;
 	place.w = width * scale;
 	place.h = height * scale;
 
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 	place.x = origin.x + (area_w - place.w) * 0.5f;
 	place.y = origin.y + (area_h - place.h) * 0.5f;
-	// Rounded frame behind the face so the calculator reads as a card, not a
-	// raw texture pasted onto the panel.
-	ImGui::GetWindowDrawList()->AddRectFilled(
-		ImVec2(place.x - 6.0f, place.y - 6.0f),
-		ImVec2(place.x + place.w + 6.0f, place.y + place.h + 6.0f),
-		ImGui::ColorConvertFloat4ToU32(ToolUi::WithAlpha(ToolUi::Palette().surfaceAlt, 0.55f)), 8.0f);
-	ImGui::GetWindowDrawList()->AddRect(
-		ImVec2(place.x - 6.0f, place.y - 6.0f),
-		ImVec2(place.x + place.w + 6.0f, place.y + place.h + 6.0f),
-		ImGui::ColorConvertFloat4ToU32(ToolUi::Palette().border), 8.0f);
-	// Clip to the picture area: at 400 % the image is larger than the panel and
-	// must never paint over (or steal hit-testing from) the zoom/status rows.
-	ImGui::PushClipRect(ImVec2(origin.x, origin.y),
-		ImVec2(origin.x + area_w, origin.y + area_h), true);
 	ImGui::SetCursorScreenPos(ImVec2(place.x, place.y));
 	ImGui::Image(image, ImVec2(place.w, place.h));
 	place.hovered = ImGui::IsItemHovered();
-	ImGui::PopClipRect();
 	// Leave the cursor below the picture so the controls line up at the bottom.
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + area_h));
 	return place;
@@ -103,28 +77,21 @@ public:
 			ImGui::TextDisabled("The calculator is not running.");
 			return;
 		}
-		ToolUi::PageScope page("Calculator", false, false);
 
-		// Two control rows plus a safety inset: the calculator host clips a few
-		// pixels above the page child's nominal bottom, so the status line must
-		// not sit on the last row.
-		const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f +
-			ImGui::GetStyle().ItemSpacing.y + 20.0f;
+		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 
 #ifdef SINGLE_WINDOW
 		// The whole calculator, as the external window used to render it.
-		int active_w = 0, active_h = 0;
-		SDL_Texture* active_texture = casioemu::session::ActiveTexture(&active_w, &active_h);
-		if (active_texture) {
-			int image_w = active_w;
-			int image_h = active_h;
+		if (SDL_Texture* composite = m_emu->GetCompositeTexture()) {
+			int image_w = m_emu->GetCompositeTextureWidth();
+			int image_h = m_emu->GetCompositeTextureHeight();
 			if (image_w <= 0 || image_h <= 0)
-				SDL_QueryTexture(active_texture, nullptr, nullptr, &image_w, &image_h);
+				SDL_QueryTexture(composite, nullptr, nullptr, &image_w, &image_h);
 			if (image_w > 0 && image_h > 0) {
-				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(active_texture), image_w,
+				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(composite), image_w,
 											  image_h, footer, fit_, zoom_);
 				ForwardClicks(place, image_w, image_h);
-				DrawControls(place.scale);
+				DrawControls(image_w, image_h);
 				return;
 			}
 		}
@@ -157,7 +124,7 @@ public:
 		Placement place = DrawCentred(reinterpret_cast<ImTextureID>(texture_), width, height,
 									  footer, fit_, zoom_);
 		ForwardClicks(place, width, height);
-		DrawControls(place.scale);
+		DrawControls(width, height);
 	}
 
 private:
@@ -178,137 +145,39 @@ private:
 			m_emu->ModelMouseEvent(mx, my, false);
 	}
 
-	// Verification hook: drive a real slider drag through ImGui IO events so the
-	// headless check exercises hit-testing, not just the stored value.
-	void RunScriptedZoomDrag(const ImVec2& min, const ImVec2& max) {
-		const char* spec = std::getenv("CASIOEMU_CALC_ZOOM_DRAG");
-		if (!spec)
-			return;
-		static int from = -1, to = -1, frame = 0;
-		static bool pressed = false;
-		if (from < 0) {
-			from = 100;
-			to = 250;
-			std::sscanf(spec, "%d,%d", &from, &to);
-			if (from < 25 || from > 400) from = 100;
-			if (to < 25 || to > 400) to = 250;
-		}
-		const int start = 8;
-		const int steps = 24;
-		ImGuiIO& io = ImGui::GetIO();
-		if (frame == start - 1) {
-			fit_ = false;
-			zoom_ = from / 100.0f;
-			SaveZoom();
-		}
-		if (frame >= start && frame <= start + steps) {
-			const float t = static_cast<float>(frame - start) / static_cast<float>(steps);
-			const float pct = from + (to - from) * t;
-			const float x = min.x + 3.0f +
-				(max.x - min.x - 6.0f) * ((pct - 25.0f) / (400.0f - 25.0f));
-			io.AddMousePosEvent(x, (min.y + max.y) * 0.5f);
-			if (!pressed) {
-				io.AddMouseButtonEvent(0, true);
-				pressed = true;
-			}
-			if (frame == start + steps) {
-				io.AddMouseButtonEvent(0, false);
-				pressed = false;
-			}
-		}
-		++frame;
-	}
-
-	void DrawControls(float effective_scale) {
-		if (!m_emu)
-			return;
-		// Zoom row.  Fit is the dynamic default; moving the slider stores an
-		// explicit scale.  The texture is nearest-neighbour sampled, so every
-		// zoom level stays crisp.
-		LoadZoomOnce();
-		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
-		float percent = fit_ ? effective_scale * 100.0f : zoom_ * 100.0f;
-		// Keep Fit and 100 % on the same row as the slider: reserve their real
-		// padded widths so the slider never pushes them into a wrapped row that
-		// would collide with the status line.
-		const ImGuiStyle& style = ImGui::GetStyle();
-		const float fit_width = ImGui::CalcTextSize("Fit").x + style.FramePadding.x * 2.0f;
-		const float pct_width = ImGui::CalcTextSize("100%").x + style.FramePadding.x * 2.0f;
-		// Inside the fixed-size calculator page child the content region is the
-		// authoritative row width (RemainingWidth can include the child's outer
-		// size, which is wider than the parent's clip).
-		const float row_width = ImGui::GetContentRegionAvail().x;
-		const float slider_width = std::max(70.0f, row_width -
-			fit_width - pct_width - style.ItemSpacing.x * 2.0f - 24.0f);
-		ImGui::SetNextItemWidth(slider_width);
-		// Always interactive.  In Fit mode the slider shows the computed scale;
-		// the first drag switches to an explicit zoom instead of being dead.
-		const bool zoom_changed = ImGui::SliderFloat("##calculator_zoom", &percent, 25.0f, 400.0f, "%.0f%%");
-		const ImVec2 zoom_min = ImGui::GetItemRectMin();
-		const ImVec2 zoom_max = ImGui::GetItemRectMax();
-		if (zoom_changed) {
-			fit_ = false;
-			zoom_ = std::clamp(percent / 100.0f, 0.25f, 4.0f);
-			if (fit_ == false && std::getenv("CASIOEMU_CALC_ZOOM_DRAG"))
-				std::fprintf(stderr, "[zoom] drag=%.0f%%\n", percent);
-		}
-		if (ImGui::IsItemDeactivatedAfterEdit())
-			SaveZoom();
-		if (fit_ && ImGui::IsItemHovered())
-			ImGui::SetTooltip("Fit: drag to zoom, or use 100%% for 1:1 pixels.");
-		RunScriptedZoomDrag(zoom_min, zoom_max);
-		if (ToolUi::SameLineOrWrap(ImGui::CalcTextSize("Fit").x + 20.0f)) {
-			if (ImGui::Button("Fit")) {
-				fit_ = true;
-				SaveZoom();
-			}
-		}
-		const bool pct_same_line = ToolUi::SameLineOrWrap(ImGui::CalcTextSize("100%").x + 20.0f);
-		if (pct_same_line) {
-			if (ImGui::Button("100%")) {
+	void DrawControls(int width, int height) {
+		ImGui::Checkbox("Fit", &fit_);
+		ImGui::SameLine();
+		bool original = !fit_ && std::abs(zoom_ - 1.0f) < 0.001f;
+		if (ImGui::Checkbox("Original size (1:1)", &original)) {
+			if (original) {
 				fit_ = false;
 				zoom_ = 1.0f;
-				SaveZoom();
+			} else {
+				fit_ = true;
 			}
 		}
-
-		// Status row: model and run state only.
-		ImGui::NewLine();
-		ToolUi::Status(m_emu->ModelDefinition.model_name.c_str(), ToolUi::Palette().foreground);
-		ImGui::SameLine();
-		if (m_emu->GetPaused())
-			ToolUi::Status("paused", ToolUi::Palette().warning);
-		else
-			ToolUi::Status("running", ToolUi::Palette().success);
-		ImGui::PopStyleVar();
-	}
-
-	void ApplyStoredZoom(float stored) {
-		fit_ = stored <= 0.0f;
-		if (!fit_)
-			zoom_ = std::clamp(stored, 0.25f, 4.0f);
-		persisted_zoom_ = stored;
-	}
-
-	void LoadZoomOnce() {
-		const float stored = casioemu::settings::SettingsStore::Instance().Data().calculator.zoom;
-		if (!zoom_loaded_) {
-			zoom_loaded_ = true;
-			ApplyStoredZoom(stored);
-			return;
+		if (!fit_) {
+			// The slider moves in whole pixels of its own track, so some exact
+			// values (2.00x) can be skipped.  Keep two decimals and let the
+			// buttons step precisely.
+			ImGui::SameLine();
+			if (ImGui::SmallButton("-##zoom"))
+				zoom_ = std::max(0.25f, std::round((zoom_ - 0.01f) * 100.0f) / 100.0f);
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(110.0f);
+			if (ImGui::SliderFloat("##zoom", &zoom_, 0.25f, 8.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp))
+				zoom_ = std::round(zoom_ * 100.0f) / 100.0f;
+			ImGui::SameLine();
+			if (ImGui::SmallButton("+##zoom"))
+				zoom_ = std::min(8.0f, std::round((zoom_ + 0.01f) * 100.0f) / 100.0f);
 		}
-		// Settings and "Reset all settings" can change the stored zoom; follow it.
-		if (stored != persisted_zoom_)
-			ApplyStoredZoom(stored);
-	}
-
-	void SaveZoom() {
-		auto& calculator = casioemu::settings::SettingsStore::Instance().Data().calculator;
-		calculator.zoom = fit_ ? 0.0f : zoom_;
-		persisted_zoom_ = calculator.zoom;
-		// Persist immediately so the zoom survives a restart.
-		std::string error;
-		casioemu::settings::SettingsStore::Instance().Save(&error);
+		ImGui::SameLine();
+		ImGui::TextDisabled("%dx%d", width, height);
+		if (m_emu && m_emu->GetPaused()) {
+			ImGui::SameLine();
+			ImGui::TextDisabled("(paused)");
+		}
 	}
 
 	void RecreateTexture(int width, int height) {
@@ -322,9 +191,6 @@ private:
 		if (!texture_)
 			return;
 		SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_BLEND);
-		// Nearest-neighbour sampling keeps the LCD pixels and key glyphs crisp at
-		// every zoom level and panel scale.
-		SDL_SetTextureScaleMode(texture_, SDL_ScaleModeNearest);
 		tex_width_ = width;
 		tex_height_ = height;
 	}
@@ -334,8 +200,6 @@ private:
 	int tex_height_ = 0;
 	bool fit_ = true;
 	float zoom_ = 2.0f;
-	bool zoom_loaded_ = false;
-	float persisted_zoom_ = 0.0f;
 	std::vector<uint8_t> frame_;
 };
 
