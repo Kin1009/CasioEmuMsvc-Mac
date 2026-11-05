@@ -6,6 +6,10 @@
 - Build outputs in `build*/.../CasioEmuMsvc.app` are staging only: delete them after tests, never launch them for the user, and never leave stale copies behind.
 - Boot/UI tests must launch the canonical bundle or a private copy under `Wiz/temp/<area>/app/`.
 
+## Stable branch
+
+- Never merge, fast-forward, or push `stable` unless the user explicitly asks for it in that turn.
+
 ## Git (agents)
 
 - You may create branches/worktrees and push your own work. Push **only your own commits/branch**, never the whole working tree.
