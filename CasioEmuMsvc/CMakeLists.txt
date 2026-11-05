@@ -401,11 +401,17 @@ endif()
 target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_INCLUDE_DIRS})
 target_include_directories(${TARGET_NAME} BEFORE PRIVATE "${ONLINE_GENERATED_DIR}")
 
-# Visible build stamp (commit + configure time) for stale-binary detection.
-string(TIMESTAMP CASIOEMU_BUILD_TIME "%m-%d %H:%M" UTC)
-target_compile_definitions(${TARGET_NAME} PRIVATE
-    CASIOEMU_BUILD_COMMIT="${CASIOEMU_GIT_COMMIT}"
-    CASIOEMU_BUILD_TIME="${CASIOEMU_BUILD_TIME}")
+# Visible build stamp refreshed on every build (commit + local time).
+set(BUILD_STAMP_CPP "${ONLINE_GENERATED_DIR}/build_stamp.cpp")
+add_custom_target(build_stamp ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${BUILD_STAMP_CPP}
+        -DREPO=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_SOURCE_DIR}/tools/gen_build_stamp.cmake
+    BYPRODUCTS ${BUILD_STAMP_CPP}
+    COMMENT "Refreshing build stamp")
+target_sources(${TARGET_NAME} PRIVATE "${BUILD_STAMP_CPP}")
+add_dependencies(${TARGET_NAME} build_stamp)
 
 # ------------------------------------------------------------------ Theme presets
 # Colour themes are data.  They are copied next to the executable (or into the

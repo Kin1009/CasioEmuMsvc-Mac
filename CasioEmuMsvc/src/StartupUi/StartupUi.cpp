@@ -2111,7 +2111,7 @@ namespace casioemu {
 					status_color, status.c_str());
 			}
 			const std::string right = std::string("Language: ") + g_local.GetCurrentLanguage() +
-				"   |   Settings: JSON   |   Schema 1   |   build " CASIOEMU_BUILD_COMMIT " " CASIOEMU_BUILD_TIME;
+				"   |   Settings: JSON   |   Schema 1   |   build " + std::string(CASIOEMU_BUILD_COMMIT) + " " + CASIOEMU_BUILD_TIME;
 			const float right_width = ImGui::CalcTextSize(right.c_str()).x;
 			draw->AddText(ImVec2(min.x + width - right_width - 12.0f, min.y + 2.0f),
 				ImGui::ColorConvertFloat4ToU32(palette.statusBarForeground), right.c_str());

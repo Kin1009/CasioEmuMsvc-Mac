@@ -83,11 +83,14 @@ public:                       \
 
 #include <git_info.h>
 
+extern const char* g_build_commit;
+extern const char* g_build_time;
+
 #ifndef CASIOEMU_BUILD_COMMIT
-#define CASIOEMU_BUILD_COMMIT GIT_COMMIT_HASH
+#define CASIOEMU_BUILD_COMMIT g_build_commit
 #endif
 #ifndef CASIOEMU_BUILD_TIME
-#define CASIOEMU_BUILD_TIME "dev"
+#define CASIOEMU_BUILD_TIME g_build_time
 #endif
 
 #define EMULATOR_VERSION GIT_COMMIT_HASH

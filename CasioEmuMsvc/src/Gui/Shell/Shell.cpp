@@ -2692,7 +2692,7 @@ void RenderStatusBar(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		draw->AddText(ImVec2(pos.x + size.x * 0.45f - counts_w * 0.5f, pos.y + 8.0f), fg, counts);
 	}
 	std::string right = SettingsStore::Instance().Data().language + "  |  " +
-		ThemeManager::Instance().CurrentThemeName() + "  |  build " CASIOEMU_BUILD_COMMIT " " CASIOEMU_BUILD_TIME;
+		ThemeManager::Instance().CurrentThemeName() + "  |  build " + CASIOEMU_BUILD_COMMIT + " " + CASIOEMU_BUILD_TIME;
 	const float right_width = TextWidth(right.c_str());
 	draw->AddText(ImVec2(pos.x + size.x - right_width - 12.0f, pos.y + 8.0f), fg, right.c_str());
 	if (small)
