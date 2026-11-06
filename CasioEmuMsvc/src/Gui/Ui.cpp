@@ -291,8 +291,8 @@ static bool HasOpenCalculatorPanel() {
 }
 
 void gui_loop() {
-	if (!m_emu->Running())
-		return;
+	// The shell still renders when every calculator tab is closed (Welcome),
+	// so do not require a running emulator here.
 
 	// Do not reset the focus flag at the top of every frame: the SDL event
 	// loop runs after gui_loop() and must use the value computed by the most

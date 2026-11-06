@@ -10,6 +10,7 @@
 
 #include "Chipset/Chipset.hpp"
 #include "Peripheral/Screen.hpp"
+#include "Shell/SessionHost.h"
 
 #include <SDL.h>
 
@@ -81,12 +82,12 @@ public:
 		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 
 #ifdef SINGLE_WINDOW
-		// The whole calculator, as the external window used to render it.
-		if (SDL_Texture* composite = m_emu->GetCompositeTexture()) {
-			int image_w = m_emu->GetCompositeTextureWidth();
-			int image_h = m_emu->GetCompositeTextureHeight();
-			if (image_w <= 0 || image_h <= 0)
-				SDL_QueryTexture(composite, nullptr, nullptr, &image_w, &image_h);
+		// The whole calculator, as the external window used to render it.  Use
+		// the session mirror: a secondary emulator's texture belongs to its own
+		// hidden SDL renderer and cannot be drawn by the main renderer.
+		int image_w = 0;
+		int image_h = 0;
+		if (SDL_Texture* composite = casioemu::session::ActiveTexture(&image_w, &image_h)) {
 			if (image_w > 0 && image_h > 0) {
 				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(composite), image_w,
 											  image_h, footer, fit_, zoom_);

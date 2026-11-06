@@ -411,14 +411,11 @@ for (;;) {
 #if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 	LoadPlugins();
 #endif
-	while (!quitting && (emulator.Running() || casioemu::session::Count() > 0)) {
+	while (!quitting) {
 		if (casioemu::shell::ConsumeQuitRequest()) {
 			request_quit();
 			break;
 		}
-		Emulator* active_emulator = casioemu::session::Active();
-		if (!active_emulator)
-			active_emulator = &emulator;
 		SDL_Event event{};
 		DiscordRPC::Update();
 		Uint32 frame_wait_ms = 16;
@@ -548,14 +545,12 @@ for (;;) {
 	hld:
 		// The shell can close a session during gui_loop.  Never carry a pointer
 		// from before that frame into event routing.
-		active_emulator = casioemu::session::Active();
-		if (!active_emulator)
-			active_emulator = &emulator;
+		Emulator* active_emulator = casioemu::session::Active();
 		int wid, hei;
 		SDL_GetWindowSize(window, &wid, &hei);
 		const Uint32 eventWindowId = GetEventWindowId(event);
 		if (IsScreenMirrorWindowEvent(event)) {
-			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+			if (active_emulator && (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)) {
 				event.key.windowID = SDL_GetWindowID(emulator.window);
 				active_emulator->UIEvent(event);
 			}
@@ -610,7 +605,7 @@ for (;;) {
 				if (calc_window || calculator_panel_focused) {
 					// SDL emits text input separately from keydown. Suppress both for
 					// the calculator target so editors cannot receive printable keys.
-					if (event.type != SDL_TEXTINPUT)
+					if (active_emulator && event.type != SDL_TEXTINPUT)
 						active_emulator->UIEvent(event);
 					break;
 				}
@@ -626,11 +621,12 @@ for (;;) {
 					ProcessImGuiEvent(event);
 			}
 #endif
-			if (event.type != SDL_KEYDOWN && event.type != SDL_KEYUP)
+			if (active_emulator && event.type != SDL_KEYDOWN && event.type != SDL_KEYUP)
 				active_emulator->UIEvent(event);
 			break;
 		default:
-			active_emulator->UIEvent(event);
+			if (active_emulator)
+				active_emulator->UIEvent(event);
 			break;
 		}
 	}

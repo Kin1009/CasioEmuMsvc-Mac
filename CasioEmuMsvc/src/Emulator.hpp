@@ -88,6 +88,7 @@ namespace casioemu {
 #endif
 
 		std::thread* tick_thread = nullptr;
+		std::vector<SDL_TimerID> sdl_timers;
 
 		// Composite-presentation cache (single-window builds): skip the full
 		// face/keys/LCD redraw when no LCD frame was published and no input or
@@ -161,7 +162,7 @@ namespace casioemu {
 		// loop through the normal teardown path. Idempotent.
 		void RequestQuit();
 		void HandleMemoryError();
-		void Shutdown();
+		void Shutdown(bool notify_main_loop = true);
 		// Stop the worker thread and join it without destroying the emulator.
 		// Used by the shell before tearing down multi-session state.
 		void StopAndJoin();

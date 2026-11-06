@@ -445,24 +445,26 @@ namespace casioemu {
 					}
 				}
 				});
-			SDL_AddTimer(
+			if (SDL_TimerID timer = SDL_AddTimer(
 				25,
 				[](Uint32 interval, void* param) -> Uint32 {
 					auto emu = ((Emulator*)param);
 					emu->chipset.EmulatorTick();
 					return interval;
 				},
-				this);
+				this))
+				sdl_timers.push_back(timer);
 		}
 		if (!ModelDefinition.real_hardware && limit_spd) {
-			SDL_AddTimer(
+			if (SDL_TimerID timer = SDL_AddTimer(
 				25,
 				[](Uint32 interval, void* param) -> Uint32 {
 					auto emu = ((Emulator*)param);
 					emu->chipset.EmulatorTick();
 					return interval;
 				},
-				this);
+				this))
+				sdl_timers.push_back(timer);
 		}
 		#endif
 
@@ -603,24 +605,26 @@ namespace casioemu {
 						}
 					}
 					});
-				SDL_AddTimer(
+				if (SDL_TimerID timer = SDL_AddTimer(
 					25,
 					[](Uint32 interval, void* param) -> Uint32 {
 						auto emu = ((Emulator*)param);
 						emu->chipset.EmulatorTick();
 						return interval;
 					},
-					this);
+					this))
+					sdl_timers.push_back(timer);
 			}
 			if (!ModelDefinition.real_hardware && limit_spd) {
-				SDL_AddTimer(
+				if (SDL_TimerID timer = SDL_AddTimer(
 					25,
 					[](Uint32 interval, void* param) -> Uint32 {
 						auto emu = ((Emulator*)param);
 						emu->chipset.EmulatorTick();
 						return interval;
 					},
-					this);
+					this))
+					sdl_timers.push_back(timer);
 			}
 		#endif
 
@@ -1070,6 +1074,11 @@ namespace casioemu {
 	}
 
 	void Emulator::StopAndJoin() {
+		// SDL timers hold a raw `this` and call chipset.EmulatorTick() on the
+		// SDL timer thread. Remove them before the session/chipset goes away.
+		for (SDL_TimerID timer : sdl_timers)
+			SDL_RemoveTimer(timer);
+		sdl_timers.clear();
 		running = false;
 		if (tick_thread && tick_thread->joinable())
 			tick_thread->join();
@@ -1081,21 +1090,23 @@ namespace casioemu {
 		chipset.StopWorkerThreads();
 	}
 
-	void Emulator::Shutdown() {
+	void Emulator::Shutdown(bool notify_main_loop) {
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);
 
 		ctl::OnShutdown(*this);
+		for (SDL_TimerID timer : sdl_timers)
+			SDL_RemoveTimer(timer);
+		sdl_timers.clear();
 		running = false;
 		// Stop the LCD/screen worker here rather than only in ~Screen: shutdown
 		// is the point where the owning session is going away, and it must be
 		// deterministic even if the Emulator itself is never destroyed.
 		chipset.StopWorkerThreads();
 #if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
-		// SDL_QUIT / the red close button only call Shutdown() on the emulator;
-		// the shell loop additionally waits for session::Count() == 0. Dispatch
-		// the session teardown through the main-loop event so the loop can exit
-		// instead of spinning on a stopped renderer (black frozen window).
-		if (IsPrimarySession(*this))
+		// SDL_QUIT / the red close button request a whole-process teardown via
+		// the main-loop event. Closing one tab must not do that: the remaining
+		// sessions (or Welcome) stay alive.
+		if (notify_main_loop && IsPrimarySession(*this))
 			PostShutdownEvent();
 #endif
 	}

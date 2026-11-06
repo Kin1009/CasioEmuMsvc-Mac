@@ -27,8 +27,10 @@ void RegisterPrimary(Emulator* emulator, const std::string& modelPath,
 	const std::string& modelName, const std::string& romPath);
 
 // Creates a second live emulator.  Returns false and fills `error` when the
-// model cannot be opened.
-bool OpenSession(const std::string& modelPath, std::string* error = nullptr);
+// model cannot be opened.  When `force_new` is true an already-open model is
+// still opened in a new tab (two independent emulators of the same model).
+bool OpenSession(const std::string& modelPath, std::string* error = nullptr,
+	bool force_new = false);
 void Activate(int index);
 void CloseSession(int index);
 void ShutdownAll();
@@ -36,6 +38,7 @@ void ShutdownAll();
 Emulator* Active();
 int ActiveIndex();
 int Count();
+bool Running(int index);
 std::vector<SessionView> List();
 
 // Screen for the active session on the main renderer.  For the primary session

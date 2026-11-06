@@ -69,8 +69,13 @@ void ApplyClockRates() {
 }
 
 void PointGlobalsAt(int index) {
-	if (index < 0 || index >= static_cast<int>(g_entries.size()))
+	if (index < 0 || index >= static_cast<int>(g_entries.size())) {
+		// Every session is closed: the shell shows Welcome and no debugger
+		// window may keep a pointer to a stopped/destroyed emulator.
+		m_emu = nullptr;
+		me_mmu = nullptr;
 		return;
+	}
 	Entry& entry = g_entries[static_cast<size_t>(index)];
 	if (!entry.emulator)
 		return;
@@ -107,19 +112,21 @@ void RegisterPrimary(Emulator* emulator, const std::string& modelPath,
 	PointGlobalsAt(0);
 }
 
-bool OpenSession(const std::string& modelPath, std::string* error) {
+bool OpenSession(const std::string& modelPath, std::string* error, bool force_new) {
 	if (modelPath.empty()) {
 		if (error)
 			*error = "model path is empty";
 		return false;
 	}
 	const std::string wanted = CanonicalModelPath(modelPath);
-	for (const auto& entry : g_entries) {
-		if (entry.live && CanonicalModelPath(entry.modelPath) == wanted) {
-			// Already open: just select it.  Canonicalising both sides keeps
-			// "models/X", "./models/X" and an absolute path the same session.
-			Activate(static_cast<int>(&entry - g_entries.data()));
-			return true;
+	if (!force_new) {
+		for (const auto& entry : g_entries) {
+			if (entry.live && CanonicalModelPath(entry.modelPath) == wanted) {
+				// Already open: just select it.  Canonicalising both sides keeps
+				// "models/X", "./models/X" and an absolute path the same session.
+				Activate(static_cast<int>(&entry - g_entries.data()));
+				return true;
+			}
 		}
 	}
 
@@ -166,19 +173,18 @@ void Activate(int index) {
 void CloseSession(int index) {
 	if (index < 0 || index >= static_cast<int>(g_entries.size()))
 		return;
-	// The primary entry is owned by main() and shares the only SDL window; it is
-	// not removable at runtime.  Secondary model tabs are fully closable.
-	if (index <= 0)
-		return;
 	Entry& entry = g_entries[static_cast<size_t>(index)];
 	if (entry.mirror)
 		SDL_DestroyTexture(entry.mirror);
 	entry.mirror = nullptr;
 	if (entry.emulator) {
-		entry.emulator->Shutdown();
+		// Closing one tab must not post the process-wide shutdown event.
+		entry.emulator->Shutdown(false);
 		entry.emulator->StopAndJoin();
 	}
-	// Destructor joins the tick thread before the chipset is destroyed.
+	// Destructor joins the tick thread before the chipset is destroyed.  The
+	// primary emulator is owned by main() (owned == null), so it is stopped and
+	// detached from the session list but not deleted here.
 	if (entry.owned)
 		entry.owned.reset();
 	g_entries.erase(g_entries.begin() + index);
@@ -202,7 +208,7 @@ void ShutdownAll() {
 			entry.mirror = nullptr;
 		}
 		if (entry.emulator) {
-			entry.emulator->Shutdown();
+			entry.emulator->Shutdown(false);
 			entry.emulator->StopAndJoin();
 		}
 	}
@@ -242,6 +248,13 @@ int ActiveIndex() {
 
 int Count() {
 	return static_cast<int>(g_entries.size());
+}
+
+bool Running(int index) {
+	if (index < 0 || index >= static_cast<int>(g_entries.size()))
+		return false;
+	const Entry& entry = g_entries[static_cast<size_t>(index)];
+	return entry.emulator != nullptr && entry.emulator->Running();
 }
 
 std::vector<SessionView> List() {

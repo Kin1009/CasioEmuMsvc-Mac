@@ -30,6 +30,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -168,6 +169,7 @@ struct State {
 	bool showWelcome = true;
 	std::vector<SessionTab> tabs;
 	int activeTab = -1;
+	char welcomeModelQuery[128] = "";
 	bool activeSettings = false;
 	float tabScroll = 0.0f;
 	float docScroll = 0.0f;
@@ -448,6 +450,13 @@ void SyncTabsFromSessions() {
 				g.tabs[i].title += " (" + folder + ")";
 		}
 	}
+	// Two tabs of the same model still need distinct labels.
+	std::map<std::string, int> title_counts;
+	for (auto& tab : g.tabs) {
+		const int occurrence = ++title_counts[tab.title];
+		if (occurrence > 1)
+			tab.title += " (" + std::to_string(occurrence) + ")";
+	}
 	g.activeTab = session::ActiveIndex();
 	if (g.activeTab >= static_cast<int>(g.tabs.size()))
 		g.activeTab = static_cast<int>(g.tabs.size()) - 1;
@@ -522,7 +531,10 @@ void OpenModelAt(const std::string& path) {
 	if (path.empty())
 		return;
 	std::string error;
-	if (!session::OpenSession(path, &error)) {
+	// Every explicit open is a new calculator tab.  Selecting an existing tab
+	// in the tab strip uses session::Activate instead, so opening the same
+	// model twice produces two independent live emulators.
+	if (!session::OpenSession(path, &error, true)) {
 		AppendOutput("[session] failed to open " + path + ": " + error);
 		return;
 	}
@@ -756,13 +768,9 @@ void BuildToolchain(bool run) {
 
 void ExecuteCommand(const std::string& id) {
 	if (id == "session.new") {
-		if (m_emu) {
-			m_emu->ResetToMainMenu();
-			g.showWelcome = false;
-			if (g.activeTab < 0 && !g.tabs.empty())
-				g.activeTab = 0;
-			g.lastBuildStatus = "Calculator reset";
-		}
+		// New Calculator always opens a model in a fresh tab; it must never
+		// reset/reboot the session that is currently running.
+		RequestOpenModel();
 	}
 	else if (id == "model.open") RequestOpenModel();
 	else if (id == "model.import") RequestShellImport();
@@ -1315,7 +1323,7 @@ void RenderTabStrip(const ThemePalette& palette) {
 			item.index = index;
 			item.label = tab.title.empty() ? tab.model : tab.title;
 			item.active = !g.showWelcome && !g.activeSettings && g.activeFile < 0 && index == g.activeTab;
-			item.closable = index > 0;
+			item.closable = true;
 			g.mainTabItems.push_back(std::move(item));
 		}
 		for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
@@ -1508,20 +1516,25 @@ void RenderTabStrip(const ThemePalette& palette) {
 		CloseFileDocument(close_file);
 	else if (close_session >= 0) {
 		SessionTab& tab = g.tabs[static_cast<size_t>(close_session)];
-		if (close_session > 0 && tab.live) {
+		if (tab.live) {
+			// Stop and join the emulator, destroy its mirror/texture and erase
+			// the session entry.  This works for the primary tab too.
 			session::CloseSession(close_session);
 			SyncTabsFromSessions();
-		}
-		else if (tab.live) {
-			g.showWelcome = true;
-			g.activeSettings = false;
-			g.activeTab = -1;
-			if (m_emu) m_emu->ResetToMainMenu();
 		}
 		else {
 			g.tabs.erase(g.tabs.begin() + close_session);
 			if (g.activeTab >= close_session) --g.activeTab;
 			if (g.tabs.empty()) g.activeTab = -1;
+		}
+		if (session::Count() == 0 || g.tabs.empty()) {
+			// Last calculator closed: show the Welcome document.  Never reset or
+			// reboot a calculator in place.
+			g.showWelcome = true;
+			g.activeSettings = false;
+			g.activeFile = -1;
+			g.activeTab = -1;
+			g.lastSessionIndex = -1;
 		}
 		SaveSessions();
 	}
@@ -1798,37 +1811,59 @@ void RenderWelcome(const ThemePalette& palette) {
 	ImGui::PopTextWrapPos();
 
 	ImGui::Dummy(ImVec2(0.0f, 14.0f));
-	const auto& data = SettingsStore::Instance().Data();
+	LoadModelChoices();
+
 	ImGui::SetCursorPosX(pad);
+	const float body_height = std::max(240.0f, ImGui::GetContentRegionAvail().y - 6.0f);
 	if (ImGui::BeginTable("##welcome_columns", 2,
 			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) {
-		ImGui::TableSetupColumn("Recent", ImGuiTableColumnFlags_WidthStretch, 0.44f);
-		ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthStretch, 0.56f);
+		ImGui::TableSetupColumn("Models", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+		ImGui::TableSetupColumn("Start", ImGuiTableColumnFlags_WidthStretch, 0.42f);
 		ImGui::TableNextRow();
+
+		// Left column is the primary navigation: every installed model, not a
+		// short recent list.  Recent sessions are already represented here.
 		ImGui::TableSetColumnIndex(0);
-		ImGui::TextDisabled("%s", L("Shell.RecentModels", "Recent models"));
-		bool any_recent = false;
-		const float recent_width = ImGui::GetContentRegionAvail().x - 4.0f;
-		for (const auto& session : data.sessions) {
-			any_recent = true;
-			const std::string row = std::string("> ") + (session.title.empty() ? session.model : session.title);
-			if (ImGui::Selectable(row.c_str(), false, ImGuiSelectableFlags_None, ImVec2(recent_width, 0.0f))) {
-				if (!session.modelPath.empty())
-					OpenModelAt(session.modelPath);
-				else
-					RequestOpenModel();
+		ImGui::TextDisabled("%s", L("Shell.AllModels", "All models"));
+		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::InputTextWithHint("##welcome_model_search", L("Shell.SearchModels", "Search models"),
+			g.welcomeModelQuery, sizeof(g.welcomeModelQuery));
+		ImGui::Dummy(ImVec2(0.0f, 4.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+		ImGui::BeginChild("##welcome_model_list",
+			ImVec2(0.0f, std::max(160.0f, body_height - 64.0f)), ImGuiChildFlags_Border);
+		int shown = 0;
+		for (const auto& choice : g.modelChoices) {
+			if (!MatchesFilter(choice.name + " " + choice.type, g.welcomeModelQuery))
+				continue;
+			++shown;
+			ImGui::PushID(choice.path.c_str());
+			if (ImGui::Selectable(choice.name.c_str(), false, ImGuiSelectableFlags_None,
+					ImVec2(ImGui::GetContentRegionAvail().x, 0.0f))) {
+				OpenModelAt(choice.path);
+				ImGui::PopID();
+				break;
 			}
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s\n%s", session.model.c_str(), session.rom.c_str());
+				ImGui::SetTooltip("%s\n%s", choice.path.c_str(), choice.type.c_str());
+			ImGui::PopID();
 		}
-		for (const auto& file : data.workspace.recentFiles) {
-			any_recent = true;
-			const std::string row = std::string("> ") + BaseName(file);
-			if (ImGui::Selectable(row.c_str(), false, ImGuiSelectableFlags_None, ImVec2(recent_width, 0)))
-				OpenExternal(file);
+		if (shown == 0)
+			ImGui::TextDisabled("%s", L("Shell.NoModelsFound", "No models found."));
+		ImGui::EndChild();
+		ImGui::PopStyleVar(2);
+		if (!g.modelChoicesError.empty())
+			ImGui::TextColored(palette.error, "%s", g.modelChoicesError.c_str());
+		if (ImGui::Button(L("Shell.ChooseModelsFolder", "Choose Models Folder..."), ImVec2(0.0f, 24.0f))) {
+			SystemDialogs::OpenFolderDialog([](std::filesystem::path folder) {
+				if (folder.empty())
+					return;
+				g.modelsOverride = folder.string();
+				RefreshModelChoices();
+				LoadModelChoices();
+			});
 		}
-		if (!any_recent)
-			ImGui::TextDisabled("%s", L("Shell.NoRecent", "No recent sessions or files"));
 
 		ImGui::TableSetColumnIndex(1);
 		ImGui::Dummy(ImVec2(0.0f, 2.0f));
@@ -1840,11 +1875,14 @@ void RenderWelcome(const ThemePalette& palette) {
 				ExecuteCommand(command);
 			ImGui::PopStyleColor();
 		};
-		link(L("Shell.NewCalculator", "New Calculator"), "session.new");
+		link(L("Shell.NewCalculator", "New Calculator..."), "session.new");
+		link(L("Shell.OpenModel", "Open Model..."), "model.open");
 		link(L("Shell.OpenFolder", "Open Folder..."), "folder.open");
 		ImGui::Dummy(ImVec2(0.0f, 12.0f));
 		ImGui::TextDisabled("%s", L("Shell.Workspace", "Workspace"));
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
 		ImGui::TextWrapped("%s", g.workspace.empty() ? "(none)" : g.workspace.c_str());
+		ImGui::PopTextWrapPos();
 		ImGui::EndTable();
 	}
 }
@@ -3964,20 +4002,39 @@ void Render() {
 		static bool opened_second = false;
 		if (!opened_second) {
 			opened_second = true;
-			std::error_code ec;
-			const std::string primary_path = g.tabs.empty() ? std::string() : g.tabs.front().modelPath;
-			for (const auto& entry : std::filesystem::directory_iterator(ModelsDirectory(), ec)) {
-				if (!entry.is_directory())
-					continue;
-				const std::string name = entry.path().filename().string();
-				if (name.find("Graph Light") != std::string::npos && entry.path().string() != primary_path) {
-					OpenModelAt(entry.path().string());
-					AppendOutput("[selftest] opened second session: " + name);
-					break;
+			if (const char* wanted = std::getenv("CASIOEMU_OPEN_SECOND_MODEL")) {
+				OpenModelAt(wanted);
+			}
+			else {
+				std::error_code ec;
+				const std::string primary_path = g.tabs.empty() ? std::string() : g.tabs.front().modelPath;
+				for (const auto& entry : std::filesystem::directory_iterator(ModelsDirectory(), ec)) {
+					if (!entry.is_directory())
+						continue;
+					const std::string name = entry.path().filename().string();
+					if (name.find("Graph Light") != std::string::npos && entry.path().string() != primary_path) {
+						OpenModelAt(entry.path().string());
+						AppendOutput("[selftest] opened second session: " + name);
+						break;
+					}
 				}
 			}
 		}
 		(void)second;
+	}
+	if (const char* active = std::getenv("CASIOEMU_ACTIVATE_SESSION")) {
+		static bool activated = false;
+		if (!activated) {
+			activated = true;
+			const int index = std::atoi(active);
+			if (index >= 0 && index < session::Count()) {
+				session::Activate(index);
+				g.activeTab = index;
+				g.activeSettings = false;
+				g.activeFile = -1;
+				g.showWelcome = false;
+			}
+		}
 	}
 
 	// Starting a process opens exactly one live session: the model this process
@@ -3988,6 +4045,109 @@ void Render() {
 	if (!g.restoredSessions) {
 		g.restoredSessions = true;
 		SyncTabsFromSessions();
+	}
+
+	// Headless regression probe for session tabs.  It exercises the real
+	// open/close paths and synthesises the same mouse events the tab strip
+	// receives, then writes a report and exits.
+	if (const char* session_test = std::getenv("CASIOEMU_SESSION_TEST")) {
+		static int test_frame = 0;
+		static bool live_ok = false;
+		static bool inactive_ok = false;
+		static bool active_ok = false;
+		static bool last_ok = false;
+		static std::string close_title;
+		static float close_x = 0.0f;
+		static float close_y = 0.0f;
+		++test_frame;
+		auto find_session_x = [](const std::string& label, float* x, float* y) {
+			for (const auto& rect : g.mainTabRects) {
+				if (rect.kind == 1 && rect.label == label) {
+					*x = rect.rect.x + rect.rect.z - 12.0f;
+					*y = rect.rect.y + rect.rect.w * 0.5f;
+					return true;
+				}
+			}
+			return false;
+		};
+		auto push_mouse = [](float x, float y, bool down) {
+			ImGuiIO& io = ImGui::GetIO();
+			io.AddMousePosEvent(x, y);
+			io.AddMouseButtonEvent(0, down);
+		};
+		if (test_frame == 2) {
+			LoadModelChoices();
+			const std::string primary = g.tabs.empty() ? std::string() : g.tabs.front().modelPath;
+			for (const auto& choice : g.modelChoices) {
+				if (!primary.empty() && choice.path == primary)
+					continue;
+				OpenModelAt(choice.path);
+				break;
+			}
+		}
+		if (test_frame == 4) {
+			const std::string primary = g.tabs.empty() ? std::string() : g.tabs.front().modelPath;
+			if (!primary.empty())
+				OpenModelAt(primary);
+			live_ok = session::Count() == 3 && g.tabs.size() == 3;
+			for (int index = 0; index < session::Count(); ++index)
+				live_ok = live_ok && session::Running(index);
+		}
+		if (test_frame == 6) {
+			g.showWelcome = false;
+			g.activeSettings = false;
+			g.activeFile = -1;
+			g.activeTab = 0;
+			session::Activate(0);
+		}
+		if (test_frame == 8 && g.tabs.size() > 1) {
+			close_title = g.tabs[1].title;
+			if (find_session_x(close_title, &close_x, &close_y))
+				push_mouse(close_x, close_y, true);
+		}
+		if (test_frame == 9)
+			push_mouse(close_x, close_y, false);
+		if (test_frame == 11) {
+			inactive_ok = session::Count() == 2 && g.tabs.size() == 2;
+			for (const auto& tab : g.tabs) {
+				if (tab.title == close_title)
+					inactive_ok = false;
+			}
+		}
+		if (test_frame == 13 && !g.tabs.empty()) {
+			const int index = std::clamp(g.activeTab, 0, static_cast<int>(g.tabs.size()) - 1);
+			close_title = g.tabs[static_cast<size_t>(index)].title;
+			if (find_session_x(close_title, &close_x, &close_y))
+				push_mouse(close_x, close_y, true);
+		}
+		if (test_frame == 14)
+			push_mouse(close_x, close_y, false);
+		if (test_frame == 16)
+			active_ok = session::Count() == 1 && g.tabs.size() == 1 && session::Running(0);
+		if (test_frame == 18 && !g.tabs.empty()) {
+			close_title = g.tabs[0].title;
+			if (find_session_x(close_title, &close_x, &close_y))
+				push_mouse(close_x, close_y, true);
+		}
+		if (test_frame == 19)
+			push_mouse(close_x, close_y, false);
+		if (test_frame == 21)
+			last_ok = session::Count() == 0 && g.tabs.empty() && g.showWelcome && m_emu == nullptr;
+		if (test_frame == 22) {
+			if (FILE* report = std::fopen(session_test, "w")) {
+				std::fprintf(report, "new_tab_three_live=%s\n", live_ok ? "PASS" : "FAIL");
+				std::fprintf(report, "inactive_close=%s\n", inactive_ok ? "PASS" : "FAIL");
+				std::fprintf(report, "active_close=%s\n", active_ok ? "PASS" : "FAIL");
+				std::fprintf(report, "last_close_welcome=%s\n", last_ok ? "PASS" : "FAIL");
+				std::fprintf(report, "sessions=%d tabs=%zu\n", session::Count(), g.tabs.size());
+				std::fprintf(report, "m_emu=%s welcome=%d\n", m_emu ? "SET" : "null",
+					g.showWelcome ? 1 : 0);
+				std::fclose(report);
+			}
+			std::fflush(nullptr);
+			if (std::getenv("CASIOEMU_SESSION_TEST_KEEP") == nullptr)
+				std::_Exit(0);
+		}
 	}
 
 	if (const char* settings_env = std::getenv("CASIOEMU_SHOW_SETTINGS")) {
