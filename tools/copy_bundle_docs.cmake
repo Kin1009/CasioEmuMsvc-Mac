@@ -15,6 +15,8 @@ set(ALLOWED_DOCS
     API.md
     ARCHITECTURE.md
     C-CONFORMANCE.md
+    CWAPP.md
+    CWMODE.md
     DIRECTIVES.md
     EDITOR.md
     GUIDE.md
