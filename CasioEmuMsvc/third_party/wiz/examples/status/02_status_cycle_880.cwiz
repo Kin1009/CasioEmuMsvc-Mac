@@ -1,6 +1,6 @@
 // Cycle the fx-880BTG status icons one at a time. Press AC to stop.
 // The 880 has a different icon layout; unsupported 580-only names are omitted.
-rom int icons[18] = {
+[[rom]] int icons[18] = {
     SHIFT, MATH_INP, DEG, RAD, GRA, FIX, SCI, ENG, IMAG,
     ANGL, SIMP, VERIFY, LEFT, DOWN, UP, RIGHT, PAUSE, SUN_CHRG
 };

@@ -1,7 +1,7 @@
-// arrays/01_arrays.cwiz — RAM arrays with rom8 / rom int.
+// arrays/01_arrays.cwiz — RAM arrays plus [[rom]]/[[rom8]] tables.
 const int N = 10;
 int values[N];
-rom int squares[11] = {0,1,4,9,16,25,36,49,64,81,100};
+[[rom, at 0x3000]] int squares[11] = {0,1,4,9,16,25,36,49,64,81,100};
 
 // Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
 void main() {

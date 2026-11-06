@@ -1,6 +1,7 @@
 // cpre.cpp - the CWiz preprocessor (see cpre.hpp).
 #include "cpre.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -1024,8 +1025,12 @@ private:
                 size_t end = p;
                 if (p < s.size() && s[p] == '(' && read_balanced(p, inner, end)) {
                     std::string n = strip(inner);
+                    n.erase(std::remove_if(n.begin(), n.end(), [](char c) {
+                                return c == '[' || c == ']' || c == ' ' || c == '\t';
+                            }), n.end());
                     static const std::set<std::string> known = {
-                        "nodiscard", "maybe_unused", "deprecated", "fallthrough", "noreturn"};
+                        "nodiscard", "maybe_unused", "deprecated", "fallthrough", "noreturn",
+                        "rom", "rom8", "normalized", "at"};
                     res += known.count(n) ? "1" : "0";
                     i = end + 1;
                     continue;

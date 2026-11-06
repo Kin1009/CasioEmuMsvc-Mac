@@ -44,7 +44,7 @@ void minmax(int *p, int n, int *lo, int *hi) {
     }
 }
 
-rom8 char line1[20] = "pointers:";
+[[rom8]] char line1[20] = "pointers:";
 char buf[8] = "abcdefg";
 
 void main() {

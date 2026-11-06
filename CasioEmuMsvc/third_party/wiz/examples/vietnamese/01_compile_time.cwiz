@@ -1,6 +1,6 @@
 // Vietnamese on the CW Display, converted at compile time.
 //
-// `__normalized__` rewrites the string literal into the firmware's F4 key
+// `[[normalized]]` rewrites the string literal into the firmware's F4 key
 // bytes before the program is built, so no runtime scan is needed.  Each
 // Vietnamese letter costs two bytes: 0xF4 followed by its column code.
 // The array is sized larger than the text so the terminator is included.
@@ -12,8 +12,8 @@
 // Build: wizc examples/vietnamese/01_compile_time.cwiz --target 580
 //        wizc examples/vietnamese/01_compile_time.cwiz --target 880
 
-__normalized__ rom8 char line1[20] = "Xin chào Việt Nam";  // 17 chars
-__normalized__ rom8 char line2[11] = "CW Display";
+[[rom8, normalized]] char line1[20] = "Xin chào Việt Nam";  // 17 chars
+[[rom8, normalized]] char line2[11] = "CW Display";
 
 void main() {
     clear();

@@ -2,7 +2,7 @@
 // Each update touches the compact status range only (renderStatus, 23 bytes).
 #for 580
 
-rom int icons[20] = {
+[[rom]] int icons[20] = {
     SHIFT, ALPHA, M, VAR_STO, MATH_INP, DEG, RAD, GRA, FIX, SCI,
     ENG, IMAG, ANGL, SIMP, LEFT, DOWN, UP, RIGHT, PAUSE, SUN_CHRG
 };

@@ -22,4 +22,4 @@
 #define HUD_TAG "?"
 #endif
 
-rom8 char hud_title[20] = "CWiz directives";
+[[rom8]] char hud_title[20] = "CWiz directives";

@@ -20,6 +20,45 @@ namespace wiz {
 
 namespace {  // internal linkage: the CWiz lexer / AST / parser / sema / code generator
 
+static std::vector<uint32_t> normalized_cps(const std::vector<uint32_t>& in) {
+    std::vector<uint32_t> out;
+    for (size_t i = 0; i < in.size();) {
+        uint32_t cp = in[i++];
+        if (cp == 0xF4) {
+            if (i < in.size()) {
+                out.push_back(0xF4);
+                out.push_back(in[i++]);
+            } else {
+                out.push_back('?');
+            }
+            continue;
+        }
+        if (cp >= 0x80) {
+            // The lexer stores UTF-8 bytes; decode one codepoint here.
+            if ((cp & 0xE0) == 0xC0 && i < in.size())
+                cp = ((cp & 0x1F) << 6) | (in[i++] & 0x3F);
+            else if ((cp & 0xF0) == 0xE0 && i + 1 < in.size()) {
+                cp = ((cp & 0x0F) << 12) | ((in[i] & 0x3F) << 6) | (in[i + 1] & 0x3F);
+                i += 2;
+            } else if ((cp & 0xF8) == 0xF0 && i + 2 < in.size()) {
+                cp = ((cp & 0x07) << 18) | ((in[i] & 0x3F) << 12) |
+                     ((in[i + 1] & 0x3F) << 6) | (in[i + 2] & 0x3F);
+                i += 3;
+            }
+            uint32_t code = vn_f4_code(cp);
+            if (code) {
+                out.push_back(0xF4);
+                out.push_back(code);
+            } else {
+                out.push_back('?');
+            }
+        } else {
+            out.push_back(cp);
+        }
+    }
+    return out;
+}
+
 static long long wrap16(long long v) {
     v &= 0xFFFF;
     return (v & 0x8000) ? v - 0x10000 : v;
@@ -352,6 +391,22 @@ struct Node;
 struct Func;
 using NodeP = std::shared_ptr<Node>;
 
+struct Attr {
+    bool rom = false;
+    bool rom8 = false;
+    bool normalized = false;
+    int rom_count = 0;
+    int rom8_count = 0;
+    int normalized_count = 0;
+    bool has_at = false;
+    long long at = 0;
+    int at_count = 0;
+};
+
+static bool has_decl_attrs(const Attr& a) {
+    return a.rom || a.rom8 || a.normalized || a.has_at;
+}
+
 struct Sym {
     std::string kind;
     std::string name;
@@ -365,6 +420,7 @@ struct Sym {
     int addr = 0;
     int decl_line = 0;
     int align = 1;
+    Attr attrs;
     Func* func = nullptr;
     int index = 0;
     // initialiser (globals/arrays): 0 = none, 1 = expression node, 2 = list, 3 = string
@@ -419,6 +475,7 @@ struct Node {
     std::vector<long long> dims;   // resolved dimensions (analyser)
     int stride = 0;                // bytes advanced by an Index at this level
     int align = 1;                 // _Alignas/alignas request
+    Attr attrs;                    // [[...]] declaration attributes
     bool has_size = false;
     long long size = 0;
     bool variadic = false;
@@ -556,6 +613,7 @@ private:
     TypeTable& types_;
     std::vector<NodeP> pending_type_nodes_;  // enum constants produced by a type specifier
     int pending_align_ = 1;                  // _Alignas on the next declaration
+    Attr pending_attrs_;                     // [[...]] on the next declaration
     bool params_variadic_ = false;           // last param_list() ended with ...
 
     const Token& cur() const { return t[p]; }
@@ -639,22 +697,106 @@ private:
         return next();
     }
 
-    // C23 attributes: [[nodiscard]], [[maybe_unused]], ...  They are accepted
-    // and recorded only insofar as they suppress lint findings; codegen is
-    // unchanged on this target.
-    void skip_attributes() {
+    // C23 attributes.  Supported declaration attributes: rom, rom8,
+    // normalized and at; everything else is accepted and ignored.
+    Attr parse_attributes() {
+        Attr a;
         while (at_op1("[[")) {
             Token open = next();
+            std::vector<Token> body;
             int depth = 1;
             while (depth > 0) {
                 if (at_kind("eof"))
                     throw CwizError("unterminated attribute", open.line, open.col,
-                                    "close the attribute with ']]'", "syntax.unterminated-attribute");
-                if (at_op1("[[")) { depth++; next(); continue; }
-                if (at_op1("]]")) { depth--; next(); continue; }
-                next();
+                                    "close the attribute with ']]'",
+                                    "syntax.unterminated-attribute");
+                if (at_op1("[[")) {
+                    depth++;
+                    body.push_back(next());
+                    continue;
+                }
+                if (at_op1("]]")) {
+                    depth--;
+                    if (depth == 0) { next(); break; }
+                    body.push_back(next());
+                    continue;
+                }
+                body.push_back(next());
+            }
+            size_t i = 0;
+            auto skip_group = [&](char open_ch, char close_ch) {
+                if (i >= body.size() || body[i].kind != "op" || body[i].sval[0] != open_ch) return;
+                int d = 0;
+                while (i < body.size()) {
+                    if (body[i].kind == "op" && body[i].sval[0] == open_ch) d++;
+                    else if (body[i].kind == "op" && body[i].sval[0] == close_ch) {
+                        d--;
+                        if (d == 0) { i++; return; }
+                    }
+                    i++;
+                }
+            };
+            while (i < body.size()) {
+                const Token& tk = body[i];
+                if (tk.kind == "op" && tk.sval == ",") { i++; continue; }
+                if (tk.kind == "op" && tk.sval == "[[") {
+                    int d = 1;
+                    i++;
+                    while (i < body.size() && d > 0) {
+                        if (body[i].kind == "op" && body[i].sval == "[[") d++;
+                        else if (body[i].kind == "op" && body[i].sval == "]]") d--;
+                        i++;
+                    }
+                    continue;
+                }
+                if (tk.kind == "ident" || tk.kind == "kw") {
+                    std::string name = tk.sval;
+                    int line = tk.line, col = tk.col;
+                    i++;
+                    if (name == "rom") {
+                        a.rom = true;
+                        a.rom_count++;
+                    } else if (name == "rom8") {
+                        a.rom8 = true;
+                        a.rom8_count++;
+                    } else if (name == "normalized") {
+                        a.normalized = true;
+                        a.normalized_count++;
+                    } else if (name == "at") {
+                        a.has_at = true;
+                        a.at_count++;
+                        if (i < body.size() && body[i].kind == "op" && body[i].sval == "(") i++;
+                        if (i < body.size() && body[i].kind == "op" && body[i].sval == "[") i++;
+                        if (i < body.size() && body[i].kind == "num") {
+                            a.at = body[i].num & 0xFFFF;
+                            i++;
+                        } else {
+                            throw CwizError("attribute 'at' needs a constant address", line, col,
+                                            "write [[at 0xD180]] or [[at(0xD180)]]",
+                                            "sema.attribute-at");
+                        }
+                        if (i < body.size() && body[i].kind == "op" && body[i].sval == "]") i++;
+                        if (i < body.size() && body[i].kind == "op" && body[i].sval == ")") i++;
+                    } else {
+                        // Unknown attribute (including namespaced names): ignore,
+                        // but skip balanced [[...]], (...), [...] arguments.
+                        if (i < body.size() && body[i].kind == "op" && body[i].sval == "(")
+                            skip_group('(', ')');
+                        else if (i < body.size() && body[i].kind == "op" && body[i].sval == "[")
+                            skip_group('[', ']');
+                    }
+                    continue;
+                }
+                i++;
             }
         }
+        if (a.rom_count > 1 || a.rom8_count > 1 || a.normalized_count > 1 || a.at_count > 1)
+            throw CwizError("duplicate declaration attribute", cur().line, cur().col,
+                            "each attribute may appear once", "sema.attribute-duplicate");
+        if (a.rom && a.rom8)
+            throw CwizError("[[rom]] and [[rom8]] cannot be combined", cur().line, cur().col,
+                            "choose one storage class", "sema.attribute-conflict");
+        return a;
     }
 
     int parse_alignas_arg() {
@@ -1029,7 +1171,10 @@ private:
 
     NodeP decl_one(bool global_scope) {
         Token tk = cur();
-        skip_attributes();
+        Attr parsed = parse_attributes();
+        if (has_decl_attrs(parsed)) pending_attrs_ = parsed;
+        if (!(at_decl_start() || at_kw1("rom") || at_kw1("rom8")))
+            pending_attrs_ = Attr{};
         if (at_kw1("_Static_assert") || at_kw1("static_assert"))
             return static_assert_node();
         if (at_kw1("_Alignas") || at_kw1("alignas")) {
@@ -1040,12 +1185,22 @@ private:
             if (!global_scope)
                 throw CwizError("constexpr is only allowed at file scope", tk.line, tk.col,
                                 "move it before the functions", "sema.constexpr-scope");
+            if (has_decl_attrs(pending_attrs_))
+                throw CwizError("storage/at attributes need a variable with storage", tk.line,
+                                tk.col, "drop the attribute or declare an array with storage",
+                                "sema.attribute-placement");
+            pending_attrs_ = Attr{};
             return const_decl();
         }
         if (at_kw1("typedef")) {
             if (!global_scope)
                 throw CwizError("typedef is only allowed at file scope", tk.line, tk.col,
                                 "move the typedef before the functions", "sema.typedef-scope");
+            if (has_decl_attrs(pending_attrs_))
+                throw CwizError("storage/at attributes cannot be applied to a typedef", tk.line,
+                                tk.col, "apply the attribute to the array declaration",
+                                "sema.attribute-placement");
+            pending_attrs_ = Attr{};
             next();
             std::string base = type_name();
             NodeP empty = mk(NK::DeclGroup, tk.line, tk.col);
@@ -1077,6 +1232,11 @@ private:
         if (at_kw1("const")) {
             if (!global_scope)
                 throw CwizError("const is only allowed at file scope", tk.line, tk.col);
+            if (has_decl_attrs(pending_attrs_))
+                throw CwizError("storage/at attributes need a variable with storage", tk.line,
+                                tk.col, "drop the attribute or declare an array with storage",
+                                "sema.attribute-placement");
+            pending_attrs_ = Attr{};
             return const_decl();
         }
         if (at_kw1("rom") || at_kw1("rom8")) {
@@ -1131,8 +1291,13 @@ private:
     }
 
     NodeP rom_decl() {
+        const Attr attrs = pending_attrs_;
+        pending_attrs_ = Attr{};
         Token kind_tok = next();
         std::string kind = kind_tok.sval;
+        if ((attrs.rom && kind == "rom8") || (attrs.rom8 && kind == "rom"))
+            throw CwizError("[[rom]] and [[rom8]] conflict with this declaration", kind_tok.line,
+                            kind_tok.col, "use one storage class only", "sema.attribute-conflict");
         std::string elem = "int";
         if (at_kw(TYPES)) elem = next().sval;
         else if (cur().kind == "ident" && types_.aliases.count(cur().sval)) elem = type_name();
@@ -1151,6 +1316,7 @@ private:
             n->sval = name.sval;
             n->kind = kind;
             n->type = elem;
+            n->attrs = attrs;
             array_dims(n);
             if (n->dim_exprs.empty())
                 throw CwizError(kind + " requires an array size or initializer", name.line,
@@ -1217,6 +1383,8 @@ private:
 
     NodeP type_decl(bool global_scope) {
         Token start = cur();
+        const Attr attrs = pending_attrs_;
+        pending_attrs_ = Attr{};
         std::string base = base_type_name();
         NodeP group = mk(NK::DeclGroup, start.line, start.col);
         const int decl_align = pending_align_;
@@ -1271,6 +1439,12 @@ private:
                 n->b = body;
                 n->type = ty;
                 n->variadic = is_variadic;
+                n->attrs = attrs;
+                if (attrs.rom || attrs.rom8 || attrs.normalized || attrs.has_at)
+                    throw CwizError("storage/at attributes are not supported on functions",
+                                    start.line, start.col,
+                                    "apply [[at]] to a variable or table instead",
+                                    "sema.attribute-function");
                 return n;
             }
 
@@ -1290,6 +1464,18 @@ private:
                 n->kind = "ram";
                 n->type = ty;
                 n->align = decl_align;
+                n->attrs = attrs;
+                if (attrs.rom || attrs.rom8) {
+                    if (attrs.rom && ty != "int")
+                        throw CwizError("[[rom]] stores 16-bit words; use int elements",
+                                        name.line, name.col, "write '[[rom]] int name[N]'",
+                                        "sema.attribute-rom");
+                    if (attrs.rom8 && ty != "char")
+                        throw CwizError("[[rom8]] stores bytes; use char elements",
+                                        name.line, name.col, "write '[[rom8]] char name[N]'",
+                                        "sema.attribute-rom8");
+                    n->kind = attrs.rom ? "rom" : "rom8";
+                }
                 array_dims(n);
                 if (at_op1("=")) {
                     next();
@@ -1300,9 +1486,24 @@ private:
                         n->list = init_list();
                     }
                 }
+                if (attrs.normalized && (ty != "char" || !n->init_is_str))
+                    throw CwizError("[[normalized]] needs a char array initialized from a string",
+                                    name.line, name.col,
+                                    "write '[[normalized]] char text[N] = \"...\";'",
+                                    "sema.attribute-normalized");
                 group->list.push_back(n);
             } else {
                 NodeP n = mk(NK::VarDecl, name.line, name.col);
+                if (attrs.rom || attrs.rom8)
+                    throw CwizError("[[rom]]/[[rom8]] require an array declaration", name.line,
+                                    name.col, "write '[[rom]] int name[N]'",
+                                    "sema.attribute-rom");
+                if (attrs.normalized)
+                    throw CwizError("[[normalized]] needs a char array initialized from a string",
+                                    name.line, name.col,
+                                    "write '[[normalized]] char text[N] = \"...\";'",
+                                    "sema.attribute-normalized");
+                n->attrs = attrs;
                 n->sval = name.sval;
                 n->type = ty;
                 n->align = decl_align;
@@ -1388,8 +1589,10 @@ private:
 
     NodeP stmt() {
         Token tk = cur();
-        skip_attributes();
+        Attr parsed = parse_attributes();
+        if (has_decl_attrs(parsed)) pending_attrs_ = parsed;
         tk = cur();
+        if (!(at_decl_start() && !at_kw1("void"))) pending_attrs_ = Attr{};
         if (at_kw1("_Static_assert") || at_kw1("static_assert"))
             return static_assert_node();
         if (at_kw1("_Alignas") || at_kw1("alignas")) {
@@ -1469,6 +1672,8 @@ private:
 
     NodeP local_decl() {
         Token start = cur();
+        const Attr attrs = pending_attrs_;
+        pending_attrs_ = Attr{};
         if (at_kw1("const") || at_kw1("constexpr")) return local_const_decl();
         std::string base = base_type_name();
         const int decl_align = pending_align_;
@@ -1516,6 +1721,11 @@ private:
                 n->kind = "ram";
                 n->type = ty;
                 n->align = decl_align;
+                n->attrs = attrs;
+                if (attrs.rom || attrs.rom8)
+                    throw CwizError("[[rom]]/[[rom8]] tables are only allowed at file scope",
+                                    name.line, name.col, "move the table before the functions",
+                                    "sema.attribute-rom-scope");
                 array_dims(n);
                 if (at_op1("=")) {
                     next();
@@ -1526,12 +1736,27 @@ private:
                         n->list = init_list();
                     }
                 }
+                if (attrs.normalized && (ty != "char" || !n->init_is_str))
+                    throw CwizError("[[normalized]] needs a char array initialized from a string",
+                                    name.line, name.col,
+                                    "write '[[normalized]] char text[N] = \"...\";'",
+                                    "sema.attribute-normalized");
                 group->list.push_back(n);
             } else {
                 NodeP vd = mk(NK::VarDecl, name.line, name.col);
                 vd->sval = name.sval;
                 vd->type = ty;
                 vd->align = decl_align;
+                vd->attrs = attrs;
+                if (attrs.rom || attrs.rom8)
+                    throw CwizError("[[rom]]/[[rom8]] require an array declaration", name.line,
+                                    name.col, "write '[[rom]] int name[N]'",
+                                    "sema.attribute-rom");
+                if (attrs.normalized)
+                    throw CwizError("[[normalized]] needs a char array initialized from a string",
+                                    name.line, name.col,
+                                    "write '[[normalized]] char text[N] = \"...\";'",
+                                    "sema.attribute-normalized");
                 if (at_op1("=")) {
                     next();
                     if (is_aggregate_type(ty) && at_op1("{")) {
@@ -2913,6 +3138,7 @@ private:
             Sym* sym = new_sym("var", d->sval);
             sym->vtype = d->type.empty() ? "int" : d->type;
             sym->align = d->align;
+            sym->attrs = d->attrs;
             sym->decl_line = d->line;
             if (!d->list.empty()) {
                 const TypeDef* td = type_def(sym->vtype);
@@ -2935,6 +3161,7 @@ private:
         }
         if (d->k == NK::ArrayDecl) {
             declare_global_name(d->sval, d);
+            if (d->attrs.normalized && d->init_is_str) d->cps = normalized_cps(d->cps);
             int elem_bytes = (d->kind == "rom8") ? 1 : type_bytes(d->type);
             std::vector<long long> dims = resolve_dims(d, elem_bytes);
             long long size = 1;
@@ -2944,10 +3171,11 @@ private:
             sym->elem_bytes = elem_bytes;
             sym->dims = dims;
             sym->align = d->align;
+            sym->attrs = d->attrs;
             sym->decl_line = d->line;
             if (d->init_is_str) {
                 sym->init_kind = 3;
-                sym->init_cps = d->cps;
+                sym->init_cps = d->attrs.normalized ? normalized_cps(d->cps) : d->cps;
             } else if (!d->list.empty()) {
                 for (const NodeP& item : d->list) {
                     if (item->k != NK::Designator || !item->b) continue;
@@ -3093,6 +3321,7 @@ private:
         Sym* sym = new_sym("var", name);
         sym->vtype = node->type.empty() ? "int" : node->type;
         sym->scope = "local";
+        sym->attrs = node->attrs;
         sym->decl_line = node->line;
         sym->qname = fn->name + "." + name;
         sym->func = fn;
@@ -3159,6 +3388,8 @@ private:
             err(fmt("redefinition of '%s'", node->sval.c_str()), node,
                 "this name already exists in the function; choose another name",
                 "sema.redefinition");
+        if (node->attrs.normalized && node->init_is_str)
+            node->cps = normalized_cps(node->cps);
         int elem_bytes = type_bytes(node->type);
         std::vector<long long> dims = resolve_dims(node, elem_bytes);
         long long total = 1;
@@ -3169,6 +3400,7 @@ private:
         sym->elem_bytes = elem_bytes;
         sym->dims = dims;
         sym->align = node->align;
+        sym->attrs = node->attrs;
         sym->decl_line = node->line;
         sym->scope = "local";
         sym->qname = fn->name + "." + node->sval;
@@ -3976,15 +4208,60 @@ private:
     std::vector<std::pair<Sym*, NodeP>> global_inits;
     std::vector<std::pair<std::string, std::string>> loops;  // (continue, break)
     std::vector<std::unique_ptr<Sym>> tmp_syms;
+    std::vector<std::pair<int, int>> pinned;
     int switch_tmp = 0;
+
+    void pin_sym(Sym* sym, int bytes, const std::string& what) {
+        int a = (int)sym->attrs.at;
+        int natural = sym->kind == "array" ? std::min(2, std::max(1, sym->elem_bytes))
+                                           : type_alignment(sym->vtype);
+        int align = std::max(std::max(1, sym->align), natural);
+        if (a < target.var_base || a + bytes - 1 > target.var_limit)
+            throw CwizError("[[at]] address is outside RAM for " + what, 0, 0,
+                            fmt("use an address in 0x%04X..0x%04X", target.var_base,
+                                target.var_limit),
+                            "sema.attribute-at-range");
+        if (a % align)
+            throw CwizError("[[at]] address is misaligned for " + what, 0, 0,
+                            fmt("use an address divisible by %d", align),
+                            "sema.attribute-at-align");
+        for (const auto& r : target.reserved_ram)
+            if (a <= r.second && a + bytes - 1 >= r.first)
+                throw CwizError("[[at]] address is in reserved RAM for " + what, 0, 0,
+                                "choose an address outside the reserved SFR/shadow ranges",
+                                "sema.attribute-at-reserved");
+        for (const auto& r : pinned)
+            if (a <= r.second && a + bytes - 1 >= r.first)
+                throw CwizError("[[at]] address overlaps another pinned symbol for " + what, 0,
+                                0, "pick a different address", "sema.attribute-at-overlap");
+        sym->addr = a;
+        pinned.push_back({a, a + bytes - 1});
+    }
 
     void allocate() {
         next_addr = target.var_base;
-        for (Sym* sym : an.globals)
-            alloc(sym, type_bytes(sym->vtype), "global '" + sym->name + "'");
-        for (Sym* sym : an.arrays) alloc(sym, sym->elem_bytes * sym->size, "array '" + sym->name + "'");
+        for (Sym* sym : an.globals) {
+            const int bytes = type_bytes(sym->vtype);
+            if (sym->attrs.has_at) pin_sym(sym, bytes, "global '" + sym->name + "'");
+        }
+        for (Sym* sym : an.arrays) {
+            const int bytes = sym->elem_bytes * sym->size;
+            if (sym->attrs.has_at) pin_sym(sym, bytes, "array '" + sym->name + "'");
+        }
         for (auto& name : an.func_order)
             for (Sym* sym : an.funcs[name]->locals) {
+                const int bytes = sym->kind == "array" ? sym->elem_bytes * sym->size
+                                                       : type_bytes(sym->vtype);
+                if (sym->attrs.has_at) pin_sym(sym, bytes, "local '" + sym->qname + "'");
+            }
+        for (Sym* sym : an.globals)
+            if (!sym->attrs.has_at) alloc(sym, type_bytes(sym->vtype), "global '" + sym->name + "'");
+        for (Sym* sym : an.arrays)
+            if (!sym->attrs.has_at)
+                alloc(sym, sym->elem_bytes * sym->size, "array '" + sym->name + "'");
+        for (auto& name : an.func_order)
+            for (Sym* sym : an.funcs[name]->locals) {
+                if (sym->attrs.has_at) continue;
                 const int bytes = sym->kind == "array" ? sym->elem_bytes * sym->size
                                                        : type_bytes(sym->vtype);
                 alloc(sym, bytes, "local '" + sym->qname + "'");
@@ -4003,6 +4280,15 @@ private:
                 const int allocation_end = a + size_bytes - 1;
                 if (size_bytes > 0 && a <= reserved_end && allocation_end >= reserved_start) {
                     a = reserved_end + 1;
+                    moved = true;
+                    break;
+                }
+            }
+            if (moved) continue;
+            for (const auto& [pinned_start, pinned_end] : pinned) {
+                const int allocation_end = a + size_bytes - 1;
+                if (size_bytes > 0 && a <= pinned_end && allocation_end >= pinned_start) {
+                    a = pinned_end + 1;
                     moved = true;
                     break;
                 }
@@ -4643,6 +4929,33 @@ private:
     }
 
     void emit_data() {
+        std::vector<Sym*> fixed, normal;
+        for (Sym* sym : an.tables) {
+            if (sym->attrs.has_at) {
+                long long a = sym->attrs.at;
+                long long bytes = (long long)sym->elem_bytes * sym->size;
+                if (a < 0 || a + bytes > target.rom_limit)
+                    throw CwizError("[[at]] address is outside ROM for table '" + sym->name + "'",
+                                    0, 0, fmt("use 0x0000..0x%04X", target.rom_limit - 1),
+                                    "sema.attribute-at-range");
+                fixed.push_back(sym);
+            } else {
+                normal.push_back(sym);
+            }
+        }
+        std::sort(fixed.begin(), fixed.end(),
+                  [](Sym* a, Sym* b) { return a->attrs.at < b->attrs.at; });
+        for (size_t i = 0; i < fixed.size(); i++) {
+            if (i && fixed[i]->attrs.at < fixed[i - 1]->attrs.at +
+                                               fixed[i - 1]->elem_bytes * fixed[i - 1]->size)
+                throw CwizError("[[at]] ROM tables overlap", 0, 0,
+                                "give each pinned table a distinct address",
+                                "sema.attribute-at-overlap");
+            lines.push_back("");
+            emit(fmt("ORG 0x%04llX", (unsigned long long)fixed[i]->attrs.at));
+            emit("; --- table " + fixed[i]->name + " (pinned) ---");
+            emit_table(fixed[i]);
+        }
         if (!str_order.empty()) {
             lines.push_back("");
             emit("; --- strings ---");
@@ -4663,7 +4976,7 @@ private:
                 if ((bs.size() + 1) % 2) emit("DB 0");
             }
         }
-        for (Sym* sym : an.tables) {
+        for (Sym* sym : normal) {
             lines.push_back("");
             emit("; --- table " + sym->name + " ---");
             emit_table(sym);

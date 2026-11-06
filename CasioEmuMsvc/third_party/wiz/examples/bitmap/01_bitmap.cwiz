@@ -1,6 +1,6 @@
 // bitmap/01_bitmap.cwiz — bitmap drawing from a ROM byte table.
 // Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
-rom8 char icon[8] = {0xFF, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xFF};
+[[rom8]] char icon[8] = {0xFF, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xFF};
 
 void main() {
     clear();
