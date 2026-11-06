@@ -35,6 +35,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -108,11 +109,28 @@ struct EditorProblem {
 	std::string hint;
 };
 
+enum class FileKind { Text = 0, Image = 1, Binary = 2 };
+
 struct FileDocument {
 	std::string path;
 	std::string name;
+	FileKind kind = FileKind::Text;
 	TextEditor editor;
 	std::string savedText;
+	SDL_Texture* imageTexture = nullptr;
+	int imageWidth = 0;
+	int imageHeight = 0;
+	unsigned long long imageBytes = 0;
+	std::string imageFormat;
+	std::string imageError;
+	bool imageFit = true;
+	float imageZoom = 1.0f;
+	ImVec2 imagePan{};
+	unsigned long long binaryBytes = 0;
+	~FileDocument() {
+		if (imageTexture)
+			SDL_DestroyTexture(imageTexture);
+	}
 	bool paletteSet = false;
 	bool lintPending = false;
 	double lastEdit = 0.0;
@@ -635,17 +653,322 @@ void OpenExternal(const std::filesystem::path& path) {
 #endif
 }
 
-bool IsTextFilePath(const std::filesystem::path& path) {
+std::string LowerExtension(const std::filesystem::path& path) {
 	std::string ext = path.extension().string();
 	for (char& ch : ext)
 		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-	static const char* extensions[] = { ".wz", ".cwiz", ".c", ".h", ".hpp", ".cpp", ".txt",
-		".md", ".json", ".lua", ".ini", ".cfg", ".asm", ".s", ".py", ".sh", ".toml", ".yaml", ".yml" };
-	for (const char* value : extensions) {
-		if (ext == value)
+	return ext;
+}
+
+bool MatchesExtension(const std::string& ext, const char* const* list, size_t count) {
+	for (size_t index = 0; index < count; ++index) {
+		if (ext == list[index])
 			return true;
 	}
 	return false;
+}
+
+bool IsImageExtension(const std::string& ext) {
+	static const char* const extensions[] = { ".png", ".bmp", ".jpg", ".jpeg", ".gif", ".webp",
+		".tif", ".tiff", ".tga", ".ico", ".cur", ".qoi", ".pnm", ".ppm", ".pgm", ".pbm",
+		".pcx", ".lbm", ".avif", ".jxl", ".xcf" };
+	return MatchesExtension(ext, extensions, sizeof(extensions) / sizeof(extensions[0]));
+}
+
+bool IsKnownTextExtension(const std::string& ext) {
+	// Fast path: source and project formats are accepted without a read.  The
+	// content sniff below handles every other extension, extensionless files
+	// and dotfiles such as .gitignore.
+	static const char* const extensions[] = { ".wz", ".cwiz", ".cwapplink", ".c", ".h", ".hpp",
+		".hh", ".hxx", ".cpp", ".cc", ".cxx", ".m", ".mm", ".txt", ".md", ".markdown", ".json",
+		".jsonc", ".json5", ".lua", ".ini", ".cfg", ".conf", ".asm", ".s", ".inc", ".py",
+		".sh", ".zsh", ".bash", ".bat", ".ps1", ".toml", ".yaml", ".yml", ".xml", ".html",
+		".htm", ".css", ".js", ".jsx", ".ts", ".tsx", ".csv", ".tsv", ".log", ".properties",
+		".cmake", ".mk", ".gradle", ".editorconfig", ".gitignore", ".gitattributes", ".gitmodules",
+		".clang-format", ".env" };
+	return MatchesExtension(ext, extensions, sizeof(extensions) / sizeof(extensions[0]));
+}
+
+bool IsDefiniteBinaryExtension(const std::string& ext) {
+	// Extensions whose contents are binary even when a sample happens to look
+	// like ASCII (for example an all-zero-free ROM or a tiny object file).
+	static const char* const extensions[] = { ".bin", ".rom", ".app", ".dylib", ".so", ".dll",
+		".exe", ".o", ".a", ".obj", ".lib", ".zip", ".gz", ".bz2", ".xz", ".zst", ".7z",
+		".rar", ".tar", ".tgz", ".pdf", ".class", ".pyc", ".pyo", ".woff", ".woff2", ".ttf",
+		".otf", ".ttc", ".icns", ".dmp", ".dat", ".pak", ".iso", ".img", ".elf", ".wasm",
+		".mp3", ".m4a", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mov", ".mkv", ".webm",
+		".sqlite", ".sqlite3", ".db", ".ds_store" };
+	return MatchesExtension(ext, extensions, sizeof(extensions) / sizeof(extensions[0]));
+}
+
+bool IsTextControlByte(unsigned char ch) {
+	return (ch < 0x20 && ch != '\t' && ch != '\n' && ch != '\r' && ch != '\f' && ch != '\v') ||
+		ch == 0x7f;
+}
+
+bool ValidateUtf8Sample(const std::string& sample, size_t& controls) {
+	controls = 0;
+	size_t index = 0;
+	if (sample.size() >= 3 && static_cast<unsigned char>(sample[0]) == 0xef &&
+		static_cast<unsigned char>(sample[1]) == 0xbb &&
+		static_cast<unsigned char>(sample[2]) == 0xbf)
+		index = 3;
+	const size_t size = sample.size();
+	while (index < size) {
+		const unsigned char lead = static_cast<unsigned char>(sample[index]);
+		if (lead < 0x80) {
+			if (IsTextControlByte(lead))
+				++controls;
+			++index;
+			continue;
+		}
+		size_t length = 0;
+		unsigned char low = 0x80;
+		unsigned char high = 0xbf;
+		if (lead >= 0xc2 && lead <= 0xdf) {
+			length = 2;
+		}
+		else if (lead == 0xe0) {
+			length = 3;
+			low = 0xa0;
+		}
+		else if ((lead >= 0xe1 && lead <= 0xec) || (lead >= 0xee && lead <= 0xef)) {
+			length = 3;
+		}
+		else if (lead == 0xed) {
+			length = 3;
+			high = 0x9f;
+		}
+		else if (lead == 0xf0) {
+			length = 4;
+			low = 0x90;
+		}
+		else if (lead >= 0xf1 && lead <= 0xf3) {
+			length = 4;
+		}
+		else if (lead == 0xf4) {
+			length = 4;
+			high = 0x8f;
+		}
+		else {
+			return false;
+		}
+		if (index + length > size)
+			return false;
+		const unsigned char second = static_cast<unsigned char>(sample[index + 1]);
+		if (second < low || second > high)
+			return false;
+		for (size_t offset = 2; offset < length; ++offset) {
+			const unsigned char continuation = static_cast<unsigned char>(sample[index + offset]);
+			if (continuation < 0x80 || continuation > 0xbf)
+				return false;
+		}
+		index += length;
+	}
+	return true;
+}
+
+bool LooksLikeTextFile(const std::filesystem::path& path) {
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+		return false;
+	constexpr size_t kSampleSize = 64 * 1024;
+	std::string sample(kSampleSize, '\0');
+	input.read(&sample[0], static_cast<std::streamsize>(kSampleSize));
+	sample.resize(static_cast<size_t>(input.gcount()));
+	if (sample.empty())
+		return true;
+	if (sample.find('\0') != std::string::npos)
+		return false;
+	size_t controls = 0;
+	if (!ValidateUtf8Sample(sample, controls))
+		return false;
+	// Allow occasional form feeds or escape-like bytes in real prose, but a
+	// sample dominated by control characters is a binary payload.
+	return controls == 0 || controls * 50 <= sample.size();
+}
+
+FileKind ClassifyFile(const std::filesystem::path& path) {
+	const std::string ext = LowerExtension(path);
+	// A known image extension always goes to the image viewer, even when the
+	// bytes are corrupt or happen to look like text.
+	if (IsImageExtension(ext))
+		return FileKind::Image;
+	// Source and project formats are an intentional fast path, so a legacy
+	// encoded .c file still opens as text.
+	if (IsKnownTextExtension(ext))
+		return FileKind::Text;
+	if (IsDefiniteBinaryExtension(ext))
+		return FileKind::Binary;
+	return LooksLikeTextFile(path) ? FileKind::Text : FileKind::Binary;
+}
+
+std::string ImageFormatLabel(const std::string& ext) {
+	if (ext == ".jpg" || ext == ".jpeg")
+		return "JPEG";
+	if (ext == ".tif" || ext == ".tiff")
+		return "TIFF";
+	if (ext == ".bmp")
+		return "BMP";
+	if (ext == ".png")
+		return "PNG";
+	if (ext == ".gif")
+		return "GIF";
+	if (ext == ".webp")
+		return "WebP";
+	if (ext == ".avif")
+		return "AVIF";
+	if (ext == ".jxl")
+		return "JPEG XL";
+	if (ext == ".qoi")
+		return "QOI";
+	if (ext == ".tga")
+		return "TGA";
+	if (ext == ".ico" || ext == ".cur")
+		return ext == ".ico" ? "ICO" : "CUR";
+	if (ext == ".pcx")
+		return "PCX";
+	if (ext == ".lbm")
+		return "LBM";
+	if (ext == ".xcf")
+		return "XCF";
+	if (ext == ".pnm" || ext == ".ppm" || ext == ".pgm" || ext == ".pbm")
+		return "PNM";
+	return ext.empty() ? "Image" : std::string(ext.begin() + 1, ext.end());
+}
+
+std::string FormatByteCount(unsigned long long bytes) {
+	char buffer[64];
+	if (bytes >= 1024ull * 1024ull)
+		std::snprintf(buffer, sizeof(buffer), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+	else if (bytes >= 1024ull)
+		std::snprintf(buffer, sizeof(buffer), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+	else
+		std::snprintf(buffer, sizeof(buffer), "%llu B", bytes);
+	return buffer;
+}
+
+struct ImageDimensions {
+	int width = 0;
+	int height = 0;
+};
+
+ImageDimensions ProbeImageDimensions(const std::filesystem::path& path) {
+	ImageDimensions result;
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+		return result;
+	std::string header(32, '\0');
+	input.read(&header[0], static_cast<std::streamsize>(header.size()));
+	const size_t size = static_cast<size_t>(input.gcount());
+	auto byte = [&](size_t index) -> unsigned int {
+		return index < size ? static_cast<unsigned char>(header[index]) : 0u;
+	};
+	auto read_u16le = [&](size_t index) -> int {
+		return static_cast<int>(byte(index)) | (static_cast<int>(byte(index + 1)) << 8);
+	};
+	auto read_u32le = [&](size_t index) -> unsigned int {
+		return static_cast<unsigned int>(byte(index)) | (static_cast<unsigned int>(byte(index + 1)) << 8) |
+			(static_cast<unsigned int>(byte(index + 2)) << 16) | (static_cast<unsigned int>(byte(index + 3)) << 24);
+	};
+	auto read_u32be = [&](size_t index) -> unsigned int {
+		return (static_cast<unsigned int>(byte(index)) << 24) |
+			(static_cast<unsigned int>(byte(index + 1)) << 16) |
+			(static_cast<unsigned int>(byte(index + 2)) << 8) | static_cast<unsigned int>(byte(index + 3));
+	};
+	if (size >= 24 && byte(0) == 0x89 && byte(1) == 'P' && byte(2) == 'N' && byte(3) == 'G' &&
+		byte(4) == 0x0d && byte(5) == 0x0a && byte(6) == 0x1a && byte(7) == 0x0a &&
+		byte(12) == 'I' && byte(13) == 'H' && byte(14) == 'D' && byte(15) == 'R') {
+		result.width = static_cast<int>(read_u32be(16));
+		result.height = static_cast<int>(read_u32be(20));
+	}
+	else if (size >= 10 && byte(0) == 'G' && byte(1) == 'I' && byte(2) == 'F' && byte(3) == '8') {
+		result.width = read_u16le(6);
+		result.height = read_u16le(8);
+	}
+	else if (size >= 26 && byte(0) == 'B' && byte(1) == 'M') {
+		result.width = static_cast<int>(read_u32le(18));
+		const int raw_height = static_cast<int>(read_u32le(22));
+		result.height = raw_height < 0 ? -raw_height : raw_height;
+	}
+	if (result.width <= 0 || result.height <= 0) {
+		result.width = 0;
+		result.height = 0;
+	}
+	return result;
+}
+
+constexpr int kMaxImagePixels = 64 * 1024 * 1024;
+constexpr unsigned long long kMaxImageBytes = 256ull * 1024ull * 1024ull;
+
+void LoadImageDocument(FileDocument& doc) {
+	doc.kind = FileKind::Image;
+	doc.imageTexture = nullptr;
+	doc.imageWidth = 0;
+	doc.imageHeight = 0;
+	doc.imageBytes = 0;
+	doc.imageError.clear();
+	doc.imageFormat = ImageFormatLabel(LowerExtension(doc.path));
+	doc.imageFit = true;
+	doc.imageZoom = 1.0f;
+	doc.imagePan = ImVec2(0.0f, 0.0f);
+	std::error_code ec;
+	const auto file_bytes = std::filesystem::file_size(doc.path, ec);
+	if (ec) {
+		doc.imageError = "Cannot read image: " + ec.message();
+		return;
+	}
+	doc.imageBytes = static_cast<unsigned long long>(file_bytes);
+	if (doc.imageBytes > kMaxImageBytes) {
+		doc.imageError = "Image is too large to preview (" + FormatByteCount(doc.imageBytes) +
+			"; limit " + FormatByteCount(kMaxImageBytes) + ").";
+		return;
+	}
+	const ImageDimensions probe = ProbeImageDimensions(doc.path);
+	if (probe.width > 0 && probe.height > 0 &&
+		static_cast<unsigned long long>(probe.width) * static_cast<unsigned long long>(probe.height) >
+			static_cast<unsigned long long>(kMaxImagePixels)) {
+		char message[160];
+		std::snprintf(message, sizeof(message),
+			"Image is too large to preview (%d x %d; limit 64 megapixels).", probe.width, probe.height);
+		doc.imageError = message;
+		return;
+	}
+	static bool formats_initialized = false;
+	if (!formats_initialized) {
+		formats_initialized = true;
+		IMG_Init(IMG_INIT_JPG | IMG_INIT_TIF | IMG_INIT_WEBP | IMG_INIT_JXL | IMG_INIT_AVIF);
+	}
+	SDL_Surface* surface = IMG_Load(doc.path.c_str());
+	if (!surface) {
+		doc.imageError = std::string("Cannot decode image: ") + IMG_GetError();
+		return;
+	}
+	const unsigned long long pixels = static_cast<unsigned long long>(surface->w) *
+		static_cast<unsigned long long>(surface->h);
+	if (surface->w <= 0 || surface->h <= 0 || pixels > static_cast<unsigned long long>(kMaxImagePixels)) {
+		char message[160];
+		std::snprintf(message, sizeof(message),
+			"Image is too large to preview (%d x %d; limit 64 megapixels).", surface->w, surface->h);
+		doc.imageError = message;
+		SDL_FreeSurface(surface);
+		return;
+	}
+	if (!renderer) {
+		doc.imageError = "Image preview is unavailable: no SDL renderer.";
+		SDL_FreeSurface(surface);
+		return;
+	}
+	doc.imageTexture = SDL_CreateTextureFromSurface(renderer, surface);
+	doc.imageWidth = surface->w;
+	doc.imageHeight = surface->h;
+	SDL_FreeSurface(surface);
+	if (!doc.imageTexture) {
+		doc.imageError = std::string("Cannot create image texture: ") + SDL_GetError();
+		return;
+	}
+	// Fit mode computes the scale from the actual canvas; 1:1 stores 1.0.
+	doc.imageZoom = 1.0f;
 }
 
 TextEditor::LanguageDefinition MakeToolchainLanguage(bool cwiz) {
@@ -679,10 +1002,6 @@ TextEditor::LanguageDefinition MakeToolchainLanguage(bool cwiz) {
 	return language;
 }
 
-bool WantsEditor(const std::filesystem::path& path) {
-	return IsTextFilePath(path);
-}
-
 std::string TargetNameForIndex(int index) {
 	static const char* targets[] = { "cwii", "cw", "cwapp", "cwrop", "cwiirop" };
 	return targets[std::clamp(index, 0, 4)];
@@ -701,6 +1020,7 @@ std::string LanguageNameForIndex(int index) {
 
 void SaveFileDocument(FileDocument& doc, const std::string& path = std::string());
 void RunLintForDocument(FileDocument& doc);
+void OpenFileInEditor(const std::filesystem::path& path);
 
 bool MatchesFilter(const std::string& text, const std::string& filter) {
 	if (filter.empty())
@@ -773,6 +1093,12 @@ void ExecuteCommand(const std::string& id) {
 		RequestOpenModel();
 	}
 	else if (id == "model.open") RequestOpenModel();
+	else if (id == "file.open") {
+		SystemDialogs::OpenFileDialog([](std::filesystem::path path) {
+			if (!path.empty())
+				OpenFileInEditor(path);
+		});
+	}
 	else if (id == "model.import") RequestShellImport();
 	else if (id == "folder.open") RequestOpenFolder();
 	else if (id == "plugin.install") OpenSettings();
@@ -849,6 +1175,8 @@ void BuildQuickFiles() {
 }
 
 void TransferDocumentToToolchain(FileDocument& doc) {
+	if (doc.kind != FileKind::Text)
+		return;
 	UIWindow* wiz = FindWindow("Wiz Compiler");
 	if (!wiz)
 		return;
@@ -860,6 +1188,14 @@ void TransferDocumentToToolchain(FileDocument& doc) {
 }
 
 void RunLintForDocument(FileDocument& doc) {
+	if (doc.kind != FileKind::Text || !IsWizDocument(doc)) {
+		// The linter understands Wiz and CWiz source.  Running it on JSON,
+		// Markdown or an arbitrary text file reports bogus syntax errors.
+		doc.editor.SetErrorMarkers({});
+		doc.editor.SetDiagnosticMarkers({});
+		doc.problems.clear();
+		return;
+	}
 	doc.editor.SetErrorMarkers({});
 	doc.editor.SetDiagnosticMarkers({});
 	doc.problems.clear();
@@ -933,6 +1269,8 @@ std::string NormalizeDocumentText(std::string text) {
 } // namespace
 
 bool FileDocumentDirty(const FileDocument& doc) {
+	if (doc.kind != FileKind::Text)
+		return false;
 	// TextEditor::GetText() materialises a trailing newline for the virtual
 	// empty last line, so a freshly loaded file would otherwise look dirty.
 	return NormalizeDocumentText(doc.editor.GetText()) != NormalizeDocumentText(doc.savedText);
@@ -966,6 +1304,10 @@ void CloseFileDocument(int index) {
 }
 
 void SaveFileDocument(FileDocument& doc, const std::string& path) {
+	if (doc.kind != FileKind::Text) {
+		AppendOutput("[editor] " + doc.name + " is not a text document");
+		return;
+	}
 	const std::string target_path = path.empty() ? doc.path : path;
 	std::ofstream output(target_path, std::ios::binary | std::ios::trunc);
 	if (!output) {
@@ -1025,9 +1367,24 @@ void ApplyOriginalRom(FileDocument& doc, const std::filesystem::path& path) {
 		wiz->SetEditorOriginalRom(doc.originalRomPath);
 }
 
+void RememberRecentFile(const std::filesystem::path& path) {
+	if (std::getenv("CASIOEMU_SELFTEST") || std::getenv("CASIOEMU_FILEVIEW_SELFTEST") ||
+		std::getenv("CASIOEMU_FILEVIEW_ASSET"))
+		return;
+	auto& data = SettingsStore::Instance().Data();
+	auto& recents = data.workspace.recentFiles;
+	const std::string value = path.string();
+	recents.erase(std::remove(recents.begin(), recents.end(), value), recents.end());
+	recents.insert(recents.begin(), value);
+	if (recents.size() > 10)
+		recents.resize(10);
+}
+
 void OpenFileInEditor(const std::filesystem::path& path) {
-	if (!WantsEditor(path)) {
-		OpenExternal(path);
+	std::error_code exists_ec;
+	if (!std::filesystem::is_regular_file(path, exists_ec)) {
+		g.sidebarError = "cannot open " + path.string();
+		AppendOutput("[editor] " + g.sidebarError);
 		return;
 	}
 	for (int index = 0; index < static_cast<int>(g.files.size()); ++index) {
@@ -1038,54 +1395,70 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 			return;
 		}
 	}
-	std::ifstream input(path, std::ios::binary);
-	if (!input) {
-		g.sidebarError = "cannot open " + path.string();
-		AppendOutput("[editor] " + g.sidebarError);
-		return;
-	}
-	std::ostringstream buffer;
-	buffer << input.rdbuf();
-	std::string ext = path.extension().string();
-	for (char& ch : ext)
-		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-	const bool cwiz_source = ext == ".cwiz";
+	const FileKind kind = ClassifyFile(path);
 	auto doc = std::make_unique<FileDocument>();
 	doc->path = path.string();
 	doc->name = path.filename().string();
-	doc->savedText = buffer.str();
-	doc->editor.SetLanguageDefinition(MakeToolchainLanguage(cwiz_source));
-	doc->editor.SetPalette(ThemeManager::Instance().IsDarkMode()
-		? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
-	doc->paletteSet = true;
-	doc->editor.SetText(doc->savedText);
-	doc->observedText = doc->savedText;
-	// Auto-detection by extension: .wz is Wiz, .cwiz is CWiz.  Auto remains for
-	// untitled/other text documents.
-	doc->languageIndex = ext == ".wz" ? 1 : (ext == ".cwiz" ? 2 : 0);
-	// Pick the target from the live model so a .wz on an fx-880BTG builds for
-	// the 880 chip instead of silently using the 580 default.
-	doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
-	if (doc->languageIndex != 0) {
-		const auto record = OriginalRomRecordPath();
-		std::error_code record_ec;
-		if (!record.empty() && std::filesystem::is_regular_file(record, record_ec)) {
-			std::ifstream in(record);
-			std::string path_record;
-			if (std::getline(in, path_record) && !path_record.empty())
-				ApplyOriginalRom(*doc, path_record);
+	doc->kind = kind;
+	if (kind == FileKind::Image) {
+		LoadImageDocument(*doc);
+	}
+	else if (kind == FileKind::Binary) {
+		std::error_code size_ec;
+		doc->binaryBytes = static_cast<unsigned long long>(std::filesystem::file_size(path, size_ec));
+		if (size_ec) {
+			g.sidebarError = "cannot open " + path.string();
+			AppendOutput("[editor] " + g.sidebarError);
+			return;
 		}
-		if (doc->originalRomPath.empty() && m_emu) {
-			const std::string model_rom = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
-			if (!model_rom.empty())
-				ApplyOriginalRom(*doc, model_rom);
+	}
+	else {
+		std::ifstream input(path, std::ios::binary);
+		if (!input) {
+			g.sidebarError = "cannot open " + path.string();
+			AppendOutput("[editor] " + g.sidebarError);
+			return;
+		}
+		std::ostringstream buffer;
+		buffer << input.rdbuf();
+		const std::string ext = LowerExtension(path);
+		const bool cwiz_source = ext == ".cwiz";
+		doc->savedText = buffer.str();
+		doc->editor.SetLanguageDefinition(MakeToolchainLanguage(cwiz_source));
+		doc->editor.SetPalette(ThemeManager::Instance().IsDarkMode()
+			? TextEditor::GetDarkPalette() : TextEditor::GetLightPalette());
+		doc->paletteSet = true;
+		doc->editor.SetText(doc->savedText);
+		doc->observedText = doc->savedText;
+		// Auto-detection by extension: .wz is Wiz, .cwiz is CWiz.  Auto remains
+		// for untitled/other text documents.
+		doc->languageIndex = ext == ".wz" ? 1 : (ext == ".cwiz" ? 2 : 0);
+		// Pick the target from the live model so a .wz on an fx-880BTG builds for
+		// the 880 chip instead of silently using the 580 default.
+		doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
+		if (doc->languageIndex != 0) {
+			const auto record = OriginalRomRecordPath();
+			std::error_code record_ec;
+			if (!record.empty() && std::filesystem::is_regular_file(record, record_ec)) {
+				std::ifstream in(record);
+				std::string path_record;
+				if (std::getline(in, path_record) && !path_record.empty())
+					ApplyOriginalRom(*doc, path_record);
+			}
+			if (doc->originalRomPath.empty() && m_emu) {
+				const std::string model_rom = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
+				if (!model_rom.empty())
+					ApplyOriginalRom(*doc, model_rom);
+			}
 		}
 	}
 	g.files.push_back(std::move(doc));
 	g.activeFile = static_cast<int>(g.files.size()) - 1;
 	g.showWelcome = false;
 	g.activeSettings = false;
-	RunLintForDocument(*g.files.back());
+	if (kind == FileKind::Text)
+		RunLintForDocument(*g.files.back());
+	RememberRecentFile(path);
 	AppendOutput("[editor] opened " + path.string());
 }
 
@@ -1182,8 +1555,24 @@ void RenderTitleBar(const ThemePalette& palette) {
 		PushMenuStyle(palette);
 		if (ImGui::BeginPopup("##file_menu")) {
 			if (ImGui::MenuItem(L("Shell.OpenModel", "Open Model..."))) RequestOpenModel();
+			if (ImGui::MenuItem(L("Shell.OpenFile", "Open File..."))) {
+				SystemDialogs::OpenFileDialog([](std::filesystem::path path) {
+					if (!path.empty())
+						OpenFileInEditor(path);
+				});
+			}
 			if (ImGui::MenuItem(L("Shell.ImportPackage", "Import Model Package..."))) RequestShellImport();
 			if (ImGui::MenuItem(L("Shell.OpenFolder", "Open Folder..."))) RequestOpenFolder();
+			if (ImGui::BeginMenu(L("Shell.OpenRecent", "Open Recent"))) {
+				const auto& recents = SettingsStore::Instance().Data().workspace.recentFiles;
+				if (recents.empty())
+					ImGui::MenuItem(L("Shell.NoRecentFiles", "No recent files"), nullptr, false, false);
+				for (const auto& file : recents) {
+					if (ImGui::MenuItem(BaseName(file).c_str()))
+						OpenFileInEditor(file);
+				}
+				ImGui::EndMenu();
+			}
 			ImGui::Separator();
 			if (ImGui::MenuItem(L("Shell.SettingsMenu", "Settings"))) OpenSettings();
 			ImGui::Separator();
@@ -2016,6 +2405,163 @@ void FindInDocument(FileDocument& doc) {
 	}
 }
 
+void SetImageViewFit(FileDocument& doc) {
+	doc.imageFit = true;
+	doc.imageZoom = 1.0f;
+	doc.imagePan = ImVec2(0.0f, 0.0f);
+}
+
+void SetImageViewActualSize(FileDocument& doc) {
+	doc.imageFit = false;
+	doc.imageZoom = 1.0f;
+	doc.imagePan = ImVec2(0.0f, 0.0f);
+}
+
+void RenderImageDocument(const ThemePalette& palette, FileDocument& doc, ImVec2 size) {
+	const float pad = 8.0f;
+	const float toolbar_height = 38.0f;
+	const float status_height = 26.0f;
+	if (!doc.imageTexture) {
+		ImGui::SetCursorPos(ImVec2(18.0f, 18.0f));
+		ImGui::TextColored(palette.error, "%s", "Image preview unavailable.");
+		ImGui::Spacing();
+		ImGui::PushTextWrapPos(std::max(120.0f, size.x - 36.0f));
+		ImGui::TextWrapped("%s", doc.imageError.empty() ? "The image could not be decoded."
+			: doc.imageError.c_str());
+		ImGui::TextDisabled("%s", doc.path.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::Spacing();
+		if (ImGui::Button("Open External"))
+			OpenExternal(std::filesystem::path(doc.path));
+		return;
+	}
+
+	const ImVec2 canvas_size(std::max(40.0f, size.x - pad * 2.0f),
+		std::max(80.0f, size.y - toolbar_height - status_height));
+	const ImVec2 canvas_local(pad, toolbar_height);
+
+	ImGui::SetCursorPos(ImVec2(pad, 6.0f));
+	if (doc.imageFit)
+		ImGui::PushStyleColor(ImGuiCol_Button, palette.selection);
+	if (ImGui::Button("Fit", ImVec2(54.0f, 24.0f)))
+		SetImageViewFit(doc);
+	if (doc.imageFit)
+		ImGui::PopStyleColor();
+	ImGui::SameLine();
+	if (!doc.imageFit && doc.imageZoom == 1.0f)
+		ImGui::PushStyleColor(ImGuiCol_Button, palette.selection);
+	if (ImGui::Button("1:1", ImVec2(54.0f, 24.0f)))
+		SetImageViewActualSize(doc);
+	if (!doc.imageFit && doc.imageZoom == 1.0f)
+		ImGui::PopStyleColor();
+	if (size.x > 540.0f) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", "Wheel zooms, drag pans, Esc fits");
+	}
+
+	const float max_zoom = 64.0f;
+	const float min_zoom = 0.02f;
+	const float fit_zoom = std::clamp(std::min(canvas_size.x / static_cast<float>(doc.imageWidth),
+		canvas_size.y / static_cast<float>(doc.imageHeight)), min_zoom, max_zoom);
+	if (doc.imageFit)
+		doc.imageZoom = fit_zoom;
+
+	ImGui::SetCursorPos(canvas_local);
+	const ImVec2 canvas_min = ImGui::GetCursorScreenPos();
+	const ImVec2 canvas_max(canvas_min.x + canvas_size.x, canvas_min.y + canvas_size.y);
+	const ImVec2 canvas_center((canvas_min.x + canvas_max.x) * 0.5f, (canvas_min.y + canvas_max.y) * 0.5f);
+	ImGui::InvisibleButton("##image_canvas", canvas_size, ImGuiButtonFlags_MouseButtonLeft);
+	const bool hovered = ImGui::IsItemHovered();
+	ImGuiIO& io = ImGui::GetIO();
+
+	if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+		SetImageViewFit(doc);
+
+	if (hovered && io.MouseWheel != 0.0f) {
+		const float old_zoom = doc.imageZoom;
+		const ImVec2 image_size(static_cast<float>(doc.imageWidth) * old_zoom,
+			static_cast<float>(doc.imageHeight) * old_zoom);
+		const ImVec2 old_origin(canvas_center.x - image_size.x * 0.5f + doc.imagePan.x,
+			canvas_center.y - image_size.y * 0.5f + doc.imagePan.y);
+		const ImVec2 image_point((io.MousePos.x - old_origin.x) / old_zoom,
+			(io.MousePos.y - old_origin.y) / old_zoom);
+		const float new_zoom = std::clamp(old_zoom * std::pow(1.15f, io.MouseWheel),
+			min_zoom, max_zoom);
+		const ImVec2 new_size(static_cast<float>(doc.imageWidth) * new_zoom,
+			static_cast<float>(doc.imageHeight) * new_zoom);
+		const ImVec2 new_origin(io.MousePos.x - image_point.x * new_zoom,
+			io.MousePos.y - image_point.y * new_zoom);
+		doc.imagePan = ImVec2(new_origin.x - (canvas_center.x - new_size.x * 0.5f),
+			new_origin.y - (canvas_center.y - new_size.y * 0.5f));
+		doc.imageZoom = new_zoom;
+		doc.imageFit = false;
+	}
+	if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+		doc.imagePan.x += io.MouseDelta.x;
+		doc.imagePan.y += io.MouseDelta.y;
+		doc.imageFit = false;
+	}
+
+	const ImVec2 draw_size(static_cast<float>(doc.imageWidth) * doc.imageZoom,
+		static_cast<float>(doc.imageHeight) * doc.imageZoom);
+	const ImVec2 draw_min(canvas_center.x - draw_size.x * 0.5f + doc.imagePan.x,
+		canvas_center.y - draw_size.y * 0.5f + doc.imagePan.y);
+	const ImVec2 draw_max(draw_min.x + draw_size.x, draw_min.y + draw_size.y);
+
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	const bool dark = ThemeManager::Instance().IsDarkMode();
+	const ImU32 checker_a = dark ? IM_COL32(42, 42, 46, 255) : IM_COL32(238, 238, 238, 255);
+	const ImU32 checker_b = dark ? IM_COL32(58, 58, 63, 255) : IM_COL32(214, 214, 214, 255);
+	constexpr float kChecker = 12.0f;
+	draw->AddRectFilled(canvas_min, canvas_max,
+		ImGui::ColorConvertFloat4ToU32(palette.background), 4.0f);
+	// The checkerboard sits behind the image only: opaque pixels cover it and
+	// transparent pixels reveal it.
+	const ImVec2 checker_min(std::max(canvas_min.x, draw_min.x), std::max(canvas_min.y, draw_min.y));
+	const ImVec2 checker_max(std::min(canvas_max.x, draw_max.x), std::min(canvas_max.y, draw_max.y));
+	if (checker_max.x > checker_min.x && checker_max.y > checker_min.y) {
+		draw->AddRectFilled(checker_min, checker_max, checker_a);
+		for (float y = checker_min.y; y < checker_max.y; y += kChecker) {
+			for (float x = checker_min.x; x < checker_max.x; x += kChecker) {
+				const int cell_x = static_cast<int>((x - checker_min.x) / kChecker);
+				const int cell_y = static_cast<int>((y - checker_min.y) / kChecker);
+				if (((cell_x + cell_y) & 1) == 0)
+					continue;
+				draw->AddRectFilled(ImVec2(x, y),
+					ImVec2(std::min(x + kChecker, checker_max.x), std::min(y + kChecker, checker_max.y)),
+					checker_b);
+			}
+		}
+	}
+	SDL_SetTextureScaleMode(doc.imageTexture,
+		doc.imageZoom >= 1.0f ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+	draw->PushClipRect(canvas_min, canvas_max, true);
+	draw->AddImage(reinterpret_cast<ImTextureID>(doc.imageTexture), draw_min, draw_max);
+	draw->PopClipRect();
+	draw->AddRect(canvas_min, canvas_max, ImGui::ColorConvertFloat4ToU32(palette.border), 4.0f);
+
+	ImGui::SetCursorPos(ImVec2(pad, size.y - status_height + 4.0f));
+	ImGui::TextDisabled("%d x %d  |  %s  |  %s  |  %d%%", doc.imageWidth, doc.imageHeight,
+		doc.imageFormat.c_str(), FormatByteCount(doc.imageBytes).c_str(),
+		static_cast<int>(std::lround(doc.imageZoom * 100.0f)));
+}
+
+void RenderBinaryDocument(const ThemePalette& palette, FileDocument& doc, ImVec2 size) {
+	ImGui::SetCursorPos(ImVec2(18.0f, 20.0f));
+	ImGui::TextDisabled("%s", "Binary file");
+	ImGui::Spacing();
+	ImGui::TextUnformatted(doc.name.c_str());
+	ImGui::Spacing();
+	ImGui::Text("Binary file, %llu bytes.", doc.binaryBytes);
+	ImGui::PushTextWrapPos(std::max(120.0f, size.x - 36.0f));
+	ImGui::TextDisabled("%s", "This file is not text and is not a supported image.");
+	ImGui::PopTextWrapPos();
+	ImGui::Spacing();
+	if (ImGui::Button("Open External", ImVec2(120.0f, 26.0f)))
+		OpenExternal(std::filesystem::path(doc.path));
+	(void)palette;
+}
+
 void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	DrawFlatPanel("##ShellFileEditor", pos, size, palette.background);
 	if (g.activeFile < 0 || g.activeFile >= static_cast<int>(g.files.size())) {
@@ -2023,6 +2569,16 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		return;
 	}
 	FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
+	if (doc.kind == FileKind::Image) {
+		RenderImageDocument(palette, doc, size);
+		EndFlatPanel();
+		return;
+	}
+	if (doc.kind == FileKind::Binary) {
+		RenderBinaryDocument(palette, doc, size);
+		EndFlatPanel();
+		return;
+	}
 	// Editor settings: only tab size is exposed by the embedded TextEditor.
 	// Line numbers, word wrap and font size have no editor API in this tree.
 	doc.editor.SetTabSize(std::clamp(SettingsStore::Instance().Data().editor.tabSize, 1, 16));
@@ -2813,6 +3369,7 @@ const std::vector<PaletteCommand>& Commands() {
 	static const std::vector<PaletteCommand> commands = {
 		{ "session.new", "Session: New Calculator", "" },
 		{ "model.open", "File: Open Model...", "" },
+		{ "file.open", "File: Open File...", "" },
 		{ "model.import", "File: Import Model Package...", "" },
 		{ "folder.open", "File: Open Folder...", "" },
 		{ "plugin.install", "Plugins: Open Settings > Plugins", "" },
@@ -3248,7 +3805,7 @@ void RenderOverlays(const ThemePalette& palette) {
 				if (++shown > 14)
 					break;
 				if (ImGui::Selectable(relative.c_str(), false, ImGuiSelectableFlags_None)) {
-					OpenExternal(file);
+					OpenFileInEditor(file);
 					open = false;
 					g.paletteQuery[0] = '\0';
 				}
@@ -3257,7 +3814,7 @@ void RenderOverlays(const ThemePalette& palette) {
 				for (const auto& file : g.quickFiles) {
 					const std::string relative = std::filesystem::relative(file, g.workspace).string();
 					if (MatchesFilter(relative, g.paletteQuery)) {
-						OpenExternal(file);
+						OpenFileInEditor(file);
 						open = false;
 						g.paletteQuery[0] = '\0';
 						break;
@@ -3315,9 +3872,9 @@ void RenderShortcuts() {
 	}
 	if (g.activeFile >= 0 && g.activeFile < static_cast<int>(g.files.size())) {
 		FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
-		if (ImGui::IsKeyPressed(ImGuiKey_S, false))
+		if (doc.kind == FileKind::Text && ImGui::IsKeyPressed(ImGuiKey_S, false))
 			SaveFileDocument(doc);
-		if (ImGui::IsKeyPressed(ImGuiKey_F, false))
+		if (doc.kind == FileKind::Text && ImGui::IsKeyPressed(ImGuiKey_F, false))
 			doc.findOpen = !doc.findOpen;
 		if (ImGui::IsKeyPressed(ImGuiKey_W, false))
 			CloseFileDocument(g.activeFile);
@@ -3486,6 +4043,14 @@ void Shutdown() {
 	SaveLayout();
 	SaveSessions();
 	g.terminal.Stop();
+	// Release editor-owned textures while the renderer is still valid.
+	for (auto& file : g.files) {
+		if (file && file->imageTexture) {
+			SDL_DestroyTexture(file->imageTexture);
+			file->imageTexture = nullptr;
+		}
+	}
+	g.files.clear();
 }
 
 void SetLiveSession(const std::string& modelPath, const std::string& modelName, const std::string& romPath) {
@@ -4184,6 +4749,96 @@ void Render() {
 		while (std::getline(stream, line)) {
 			if (!line.empty())
 				AppendOutput("[plugins] " + line);
+		}
+	}
+
+	if (const char* asset = std::getenv("CASIOEMU_FILEVIEW_ASSET")) {
+		static int asset_frame = 0;
+		++asset_frame;
+		if (asset_frame == 4) {
+			OpenFileInEditor(std::filesystem::path(asset));
+			if (g.activeFile >= 0 && g.activeFile < static_cast<int>(g.files.size())) {
+				FileDocument& doc = *g.files[static_cast<size_t>(g.activeFile)];
+				const char* mode = std::getenv("CASIOEMU_FILEVIEW_MODE");
+				if (mode && std::strcmp(mode, "actual") == 0 && doc.kind == FileKind::Image)
+					SetImageViewActualSize(doc);
+				else if (mode && std::strcmp(mode, "fit") == 0 && doc.kind == FileKind::Image)
+					SetImageViewFit(doc);
+			}
+		}
+	}
+	if (const char* fileview_report = std::getenv("CASIOEMU_FILEVIEW_SELFTEST")) {
+		static int fileview_frame = 0;
+		++fileview_frame;
+		if (fileview_frame == 6) {
+			const char* assets_env = std::getenv("CASIOEMU_FILEVIEW_ASSETS");
+			const std::filesystem::path directory = assets_env && *assets_env
+				? std::filesystem::path(assets_env)
+				: std::filesystem::path(".");
+			std::stringstream report;
+			bool ok = true;
+			auto check = [&](const char* name, bool value) {
+				report << name << "=" << (value ? "PASS" : "FAIL") << "\n";
+				ok = ok && value;
+			};
+			auto find_document = [&](const std::filesystem::path& path) -> FileDocument* {
+				for (auto& file : g.files) {
+					if (file->path == path.string())
+						return file.get();
+				}
+				return nullptr;
+			};
+			auto read_file = [](const std::filesystem::path& path) {
+				std::ifstream input(path, std::ios::binary);
+				return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+			};
+			auto compare_text = [&](const char* name, const std::filesystem::path& path) {
+				OpenFileInEditor(path);
+				FileDocument* doc = find_document(path);
+				const std::string expected = read_file(path);
+				check((std::string(name) + "_text_tab").c_str(),
+					doc && doc->kind == FileKind::Text && doc->editor.GetText().size() > 0);
+				check((std::string(name) + "_exact_text").c_str(),
+					doc && NormalizeDocumentText(doc->editor.GetText()) == NormalizeDocumentText(expected));
+			};
+			compare_text("cwapplink", directory / "sample.cwapplink");
+			compare_text("extensionless", directory / "notes");
+			compare_text("c_source", directory / "probe.c");
+			compare_text("editorconfig", directory / "settings.editorconfig");
+			compare_text("arbitrary_text", directory / "novel.weird");
+			const auto png = directory / "alpha.png";
+			OpenFileInEditor(png);
+			FileDocument* png_doc = find_document(png);
+			const ImageDimensions png_size = ProbeImageDimensions(png);
+			check("png_image_tab", png_doc && png_doc->kind == FileKind::Image &&
+				png_doc->imageTexture != nullptr && png_doc->imageError.empty());
+			check("png_dimensions", png_doc && png_doc->imageWidth == png_size.width &&
+				png_doc->imageHeight == png_size.height && png_doc->imageWidth > 0);
+			const auto bmp = directory / "photo.bmp";
+			OpenFileInEditor(bmp);
+			FileDocument* bmp_doc = find_document(bmp);
+			const ImageDimensions bmp_size = ProbeImageDimensions(bmp);
+			check("bmp_image_tab", bmp_doc && bmp_doc->kind == FileKind::Image &&
+				bmp_doc->imageTexture != nullptr && bmp_doc->imageError.empty());
+			check("bmp_dimensions", bmp_doc && bmp_doc->imageWidth == bmp_size.width &&
+				bmp_doc->imageHeight == bmp_size.height && bmp_doc->imageWidth > 0);
+			const auto corrupt = directory / "corrupt.png";
+			OpenFileInEditor(corrupt);
+			FileDocument* corrupt_doc = find_document(corrupt);
+			check("corrupt_png_error", corrupt_doc && corrupt_doc->kind == FileKind::Image &&
+				corrupt_doc->imageTexture == nullptr && !corrupt_doc->imageError.empty());
+			const auto binary = directory / "plain.bin";
+			OpenFileInEditor(binary);
+			FileDocument* binary_doc = find_document(binary);
+			std::error_code binary_ec;
+			const auto binary_size = std::filesystem::file_size(binary, binary_ec);
+			check("bin_binary_placeholder", binary_doc && binary_doc->kind == FileKind::Binary &&
+				!binary_ec && binary_doc->binaryBytes == static_cast<unsigned long long>(binary_size) &&
+				NormalizeDocumentText(binary_doc->editor.GetText()).empty());
+			report << (ok ? "RESULT PASS\n" : "RESULT FAIL\n");
+			std::ofstream output(fileview_report, std::ios::trunc);
+			output << report.str();
+			AppendOutput(std::string("[fileview-selftest] ") + (ok ? "PASS" : "FAIL"));
 		}
 	}
 
