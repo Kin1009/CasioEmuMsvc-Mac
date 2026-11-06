@@ -794,6 +794,17 @@ private:
 			stream.write(data.data(), static_cast<std::streamsize>(data.size()));
 	}
 
+	// Bring the separate "Add Modes" panel to the front.  The panel is
+	// registered next to this window and uses the cwmode library.
+	void OpenAddModesWindow() {
+		for (UIWindow* window : windows) {
+			if (window && window->name && std::strcmp(window->name, "Add Modes") == 0) {
+				window->BringToFront();
+				return;
+			}
+		}
+	}
+
 	// Patch the stock ROM in memory, write the result as a session image and
 	// reboot the model on it.  The stock file is never modified: the emulator
 	// runs a duplicate, and "Stock ROM" switches back.
@@ -1269,6 +1280,11 @@ private:
 				SystemDialogs::OpenFileDialog([this](std::filesystem::path f) {
 					PatchCurrentROM(false, f.string());
 				});
+			ImGui::Separator();
+			const bool is880 =
+				m_emu && m_emu->ModelDefinition.model_name.find("880") != std::string::npos;
+			if (ImGui::MenuItem("Add Modes...", nullptr, false, Is580() || is880))
+				OpenAddModesWindow();
 			if (ImGui::MenuItem("Stock ROM", nullptr, false, !StockRomPath().empty()))
 				RestoreStockRom();
 			ImGui::EndMenu();

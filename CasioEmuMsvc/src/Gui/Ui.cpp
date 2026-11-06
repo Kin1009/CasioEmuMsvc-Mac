@@ -21,6 +21,7 @@
 #include "WatchWindow.hpp"
 #ifndef CASIOEMU_CORE_WEB
 #include "WizToolchain.h"
+#include "CwModeWindow.h"
 #endif
 #ifndef CASIOEMU_CORE_WEB
 #include "QrCodeWindow.h"
@@ -386,6 +387,8 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 		const std::string& model = m_emu->ModelDefinition.model_name;
 		if (model.find("580") != std::string::npos || model.find("880") != std::string::npos)
 			windows.push_back(CreateToolchainWindow());
+		if (model.find("580") != std::string::npos || model.find("880") != std::string::npos)
+			windows.push_back(CreateCwModeWindow());
 	}
 	windows.push_back(CreateCalcScreenWindow());
 #endif
