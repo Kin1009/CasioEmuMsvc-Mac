@@ -191,11 +191,10 @@ void PixelScreenTexture::Reset() {
 	texture = nullptr;
 	width = height = 0;
 	pixels.clear();
-	uploaded_version = 0;
-	has_upload = false;
+	uploaded_pixels.clear();
 }
 void PixelScreenTexture::Render(SDL_Renderer* renderer, const SDL_Rect& dest, int requested_width, int requested_height,
-	const ColourInfo& ink_colour, const float* alpha, uint64_t version) {
+	const ColourInfo& ink_colour, const float* alpha) {
 	if (!texture || width != requested_width || height != requested_height) {
 		Reset();
 		texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, requested_width, requested_height);
@@ -209,33 +208,27 @@ void PixelScreenTexture::Render(SDL_Renderer* renderer, const SDL_Rect& dest, in
 #endif
 		width = requested_width;
 		height = requested_height;
-		// Sized once; steady-state frames never reallocate.
 		pixels.resize(static_cast<size_t>(width) * height * 4);
-		has_upload = false;
+		uploaded_pixels.clear();
 	}
-	// The worker bumps `version` only when the published alpha changed, so a
-	// static LCD skips the 12k-pixel conversion and the texture upload (which
-	// costs a Metal staging-texture allocation) and only re-issues the copy.
-	if (!has_upload || uploaded_version != version) {
-		// The shared alpha buffer reserves its first 192-column row for status.
-		const int rows = std::min(height, 65);
-		const int columns = std::min(width, 192);
-		for (int y = 0; y < rows; ++y)
-			for (int x = 0; x < columns; ++x) {
-				const auto colour = ScreenPixelColour(ink_colour, alpha[x + (y + 1) * 192]);
-				const size_t offset = (static_cast<size_t>(y) * width + x) * 4;
-				pixels[offset] = colour.r;
-				pixels[offset + 1] = colour.g;
-				pixels[offset + 2] = colour.b;
-				pixels[offset + 3] = colour.a;
-			}
-		// Exactly one full-frame upload per changed frame.
+	// The shared alpha buffer reserves its first 192-column row for status.
+	for (int y = 0; y < height; ++y)
+		for (int x = 0; x < width; ++x) {
+			const auto colour = ScreenPixelColour(ink_colour, alpha[x + (y + 1) * 192]);
+			const size_t offset = (static_cast<size_t>(y) * width + x) * 4;
+			pixels[offset] = colour.r;
+			pixels[offset + 1] = colour.g;
+			pixels[offset + 2] = colour.b;
+			pixels[offset + 3] = colour.a;
+		}
+	// LCD pixels are often unchanged across many emulator frames. Avoid sending
+	// a redundant full-frame texture upload to SDL/Metal in that case.
+	if (pixels != uploaded_pixels) {
 		if (SDL_UpdateTexture(texture, nullptr, pixels.data(), width * 4) != 0) {
 			SDL_Log("[Screen][Warn] SDL_UpdateTexture failed for pixel screen: %s", SDL_GetError());
 			return;
 		}
-		uploaded_version = version;
-		has_upload = true;
+		uploaded_pixels = pixels;
 	}
 	if (SDL_RenderCopy(renderer, texture, nullptr, &dest) != 0)
 		SDL_Log("[Screen][Warn] SDL_RenderCopy failed for pixel screen: %s", SDL_GetError());

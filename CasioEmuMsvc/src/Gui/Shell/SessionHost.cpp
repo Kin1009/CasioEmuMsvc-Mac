@@ -30,8 +30,6 @@ struct Entry {
 	SDL_Texture* mirror = nullptr;
 	int mirrorWidth = 0;
 	int mirrorHeight = 0;
-	int mirrorAge = 0;
-	uint64_t lastMirrorVersion = ~static_cast<uint64_t>(0);
 	uint64_t mirrorCopies = 0;
 	uint64_t mirrorSkips = 0;
 	double mirrorCopyMs = 0.0;
@@ -309,22 +307,6 @@ void PrepareActiveFrame() {
 #ifdef SINGLE_WINDOW
 	if (entry.primary || !g_mainRenderer)
 		return;
-	// The LCD publishes a monotonic frame version.  Secondary sessions used to
-	// read back and upload their whole composite every displayed frame; skip
-	// that work while the frame is unchanged, with a periodic safety refresh
-	// for non-LCD state (key highlights/status sprites).
-	uint64_t frame_version = ~static_cast<uint64_t>(0);
-	if (auto* provider = entry.emulator->chipset.QueryInterface<casioemu::IScreenFrameProvider>())
-		frame_version = provider->FrameVersion();
-	++entry.mirrorAge;
-	static const bool always_copy = std::getenv("CASIOEMU_PERF_MIRROR_ALWAYS") != nullptr;
-	if (!always_copy && entry.mirror && frame_version != ~static_cast<uint64_t>(0) &&
-		frame_version == entry.lastMirrorVersion && entry.mirrorAge < 20) {
-		++entry.mirrorSkips;
-		return;
-	}
-	entry.mirrorAge = 0;
-	entry.lastMirrorVersion = frame_version;
 	SDL_Texture* composite = entry.emulator->GetCompositeTexture();
 	if (!composite)
 		return;

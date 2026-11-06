@@ -45,13 +45,12 @@ public:
 	~PixelScreenTexture();
 	void Reset();
 	void Render(SDL_Renderer* renderer, const SDL_Rect& dest, int width, int height,
-		const ColourInfo& ink_colour, const float* alpha, uint64_t version);
+		const ColourInfo& ink_colour, const float* alpha);
 private:
 	SDL_Texture* texture = nullptr;
 	int width = 0, height = 0;
 	std::vector<uint8_t> pixels;
-	uint64_t uploaded_version = 0;
-	bool has_upload = false;
+	std::vector<uint8_t> uploaded_pixels;
 };
 #endif
 } // namespace casioemu

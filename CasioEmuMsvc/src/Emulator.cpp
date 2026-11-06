@@ -6,7 +6,6 @@
 #include "ModelConfig.h"
 #include "ModelInfo.h"
 #include "RendererBackend.h"
-#include "Peripheral/Screen.hpp"
 #if !defined(CASIOEMU_CORE_WEB) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(TEST_BUILD)
 #include "Gui/Shell/SessionHost.h"
 #endif
@@ -878,18 +877,6 @@ namespace casioemu {
 		}
 		if (!renderer || !interface_texture || tex_w <= 0 || tex_h <= 0)
 			return;
-		uint64_t frame_version = ~static_cast<uint64_t>(0);
-		if (auto* provider = chipset.QueryInterface<IScreenFrameProvider>())
-			frame_version = provider->FrameVersion();
-		// A newly published LCD frame always forces a composite refresh; input
-		// and window events mark composite_dirty as well.
-		if (frame_version != last_composite_version)
-			composite_dirty.store(true, std::memory_order_release);
-		const bool dirty = composite_dirty.exchange(false, std::memory_order_acq_rel);
-		if (!dirty && frame_version != ~static_cast<uint64_t>(0) &&
-			frame_version == last_composite_version &&
-			composite_texture && composite_texture_w == tex_w && composite_texture_h == tex_h)
-			return; // only the LCD/inputs can change the composite; nothing did
 		if (!composite_texture || composite_texture_w != tex_w || composite_texture_h != tex_h) {
 			if (composite_texture)
 				SDL_DestroyTexture(composite_texture);
@@ -934,7 +921,6 @@ namespace casioemu {
 		SDL_RenderSetViewport(renderer, nullptr);
 		SDL_RenderSetClipRect(renderer, nullptr);
 		SDL_RenderSetScale(renderer, 1.0f, 1.0f);
-		last_composite_version = frame_version;
 		return;
 #else
 		// std::lock_guard<decltype(access_mx)> access_lock(access_mx);

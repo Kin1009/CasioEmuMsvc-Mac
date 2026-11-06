@@ -35,7 +35,6 @@ namespace casioemu {
 		std::array<float, 192 * (Height + 1)> target{};
 		mutable std::mutex response_mutex;
 		uint64_t last_ns = 0, generation = 0;
-		uint64_t texture_version = 0;
 		std::vector<SpriteInfo> sprites{StatusCount + 1};
 		std::vector<uint8_t> present = std::vector<uint8_t>(StatusCount + 1);
 		ScreenOutput output;
@@ -214,7 +213,7 @@ namespace casioemu {
 					RenderModelSprite(frame.renderer, frame.interface_texture, &status_textures[i], sprites[i + 1], *frame.ink_colour, opacity);
 			}
 #ifndef CASIOEMU_CORE_WEB
-			pixel_texture.Render(frame.renderer, frame.lcd_dest, Width, Height, *frame.ink_colour, alpha.data(), ++texture_version);
+			pixel_texture.Render(frame.renderer, frame.lcd_dest, Width, Height, *frame.ink_colour, alpha.data());
 #endif
 			output.Render(frame);
 		}
