@@ -1,7 +1,0 @@
-// 08_target.cwiz - target-independent demo.
-
-void main() {
-    clear();
-    print(8, 8, "580 / 880");
-    text(8, 24, "target-independent");
-}

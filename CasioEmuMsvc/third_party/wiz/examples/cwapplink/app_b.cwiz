@@ -1,0 +1,13 @@
+// Extra app B: slot 14 is the E shortcut key.
+#for 580
+#cwapp 14 "Hello B" icon_b.png icon_b_selected.png
+void main() {
+    clear();
+    print(4, 8, "Hello app B");
+    print(4, 20, "press AC to leave");
+    render();
+    while (1) {
+        if (key_down(K_AC)) exit();
+        delay(3);
+    }
+}

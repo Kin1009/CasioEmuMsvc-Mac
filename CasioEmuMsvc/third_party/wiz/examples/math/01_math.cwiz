@@ -1,5 +1,3 @@
-// math/01_math.cwiz — arithmetic demo with clamp.
-// Shadow mechanism: draw to SB2, call render() to flush SB2 -> SB1 (F800)
 void main() {
     int a = 7;
     int b = 3;
@@ -10,3 +8,4 @@ void main() {
     render();
     wait_key();
 }
+

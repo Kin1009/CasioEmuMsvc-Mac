@@ -1,0 +1,4 @@
+# Two cwapp sources built into one fx-580VN X ROM.
+# Paths are relative to this file.
+app_a.cwiz
+app_b.cwiz

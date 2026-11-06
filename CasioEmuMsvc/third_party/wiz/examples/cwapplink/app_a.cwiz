@@ -1,0 +1,13 @@
+// Extra app A: slot 13 is the D shortcut key.
+#for 580
+#cwapp 13 "Hello A" icon_a.png icon_a_selected.png
+void main() {
+    clear();
+    print(4, 8, "Hello app A");
+    print(4, 20, "press AC to leave");
+    render();
+    while (1) {
+        if (key_down(K_AC)) exit();
+        delay(3);
+    }
+}

@@ -1,7 +1,0 @@
-# 08_target_wz - works for 580 (192x63, 1 bp) or 880 (192x64, 2 bp).
-# Line spacing kept at 8 px so both screens can display without clipping.
-
-def main():
-    clear()
-    print(8, 8, "580 / 880")
-    text(8, 24, "target-independent")
