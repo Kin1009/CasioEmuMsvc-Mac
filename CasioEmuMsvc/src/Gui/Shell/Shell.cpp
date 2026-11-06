@@ -21,6 +21,7 @@
 #include "build.hpp"
 #include "common.hpp"
 #include "cpre.hpp"
+#include "cwlink.hpp"
 #include "lint.hpp"
 #include "targets.hpp"
 
@@ -127,6 +128,9 @@ struct FileDocument {
 	float imageZoom = 1.0f;
 	ImVec2 imagePan{};
 	unsigned long long binaryBytes = 0;
+	int projectApps = 0;
+	bool projectError = false;
+	std::string projectStatus;
 	~FileDocument() {
 		if (imageTexture)
 			SDL_DestroyTexture(imageTexture);
@@ -660,6 +664,10 @@ std::string LowerExtension(const std::filesystem::path& path) {
 	return ext;
 }
 
+bool IsCwappLinkPath(const std::filesystem::path& path) {
+	return wiz::is_cwapplink_path(path.string());
+}
+
 bool MatchesExtension(const std::string& ext, const char* const* list, size_t count) {
 	for (size_t index = 0; index < count; ++index) {
 		if (ext == list[index])
@@ -1181,16 +1189,27 @@ void TransferDocumentToToolchain(FileDocument& doc) {
 	if (!wiz)
 		return;
 	wiz->OpenEditorDocument(doc.path, doc.editor.GetText());
-	wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
-	wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
+	// OpenEditorDocument sets the project defaults, but the document fields
+	// must not overwrite them with a plain 580/880 source target.  A link file
+	// is a manifest: it always builds with the cwapp target and is not CWiz
+	// source, so the language picker stays on Auto.
+	if (IsCwappLinkPath(doc.path)) {
+		wiz->SetEditorTarget("cwapp");
+		wiz->SetEditorLanguage("auto");
+	}
+	else {
+		wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
+		wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
+	}
 	wiz->SetEditorRopPadding(doc.ropPadding);
 	wiz->SetEditorOriginalRom(doc.originalRomPath);
 }
 
 void RunLintForDocument(FileDocument& doc) {
-	if (doc.kind != FileKind::Text || !IsWizDocument(doc)) {
-		// The linter understands Wiz and CWiz source.  Running it on JSON,
-		// Markdown or an arbitrary text file reports bogus syntax errors.
+	if (doc.kind != FileKind::Text || !IsWizDocument(doc) || IsCwappLinkPath(doc.path)) {
+		// The linter understands Wiz and CWiz source.  Running it on a project
+		// manifest, JSON, Markdown or any other text file reports bogus syntax
+		// errors.  Manifest paths are validated when the project is opened.
 		doc.editor.SetErrorMarkers({});
 		doc.editor.SetDiagnosticMarkers({});
 		doc.problems.clear();
@@ -1367,6 +1386,40 @@ void ApplyOriginalRom(FileDocument& doc, const std::filesystem::path& path) {
 		wiz->SetEditorOriginalRom(doc.originalRomPath);
 }
 
+bool IsGeneratedSessionRom(const std::string& path) {
+	return path.rfind("wiz/", 0) == 0 || path.find("/wiz/") != std::string::npos;
+}
+
+std::string StockRomCandidate() {
+	if (!m_emu)
+		return {};
+	const std::string current = m_emu->ModelDefinition.rom_path;
+	// Build & Run points the model at a generated wiz/ session image.  The
+	// Load Original ROM action must recover the shipped dump, not that image.
+	if (current.empty() || IsGeneratedSessionRom(current)) {
+		const std::string stock = m_emu->GetModelFilePath("rom.bin");
+		if (!stock.empty())
+			return stock;
+	}
+	std::string candidate = m_emu->GetModelFilePath(current);
+	if (candidate.empty())
+		candidate = m_emu->GetModelFilePath("rom.bin");
+	return candidate;
+}
+
+void LoadOriginalRomForDocument(FileDocument& doc) {
+	const std::string candidate = StockRomCandidate();
+	std::error_code ec;
+	if (!candidate.empty() && std::filesystem::is_regular_file(candidate, ec)) {
+		ApplyOriginalRom(doc, candidate);
+		return;
+	}
+	SystemDialogs::OpenFileDialog([&doc](std::filesystem::path path) {
+		if (!path.empty())
+			ApplyOriginalRom(doc, path);
+	});
+}
+
 void RememberRecentFile(const std::filesystem::path& path) {
 	if (std::getenv("CASIOEMU_SELFTEST") || std::getenv("CASIOEMU_FILEVIEW_SELFTEST") ||
 		std::getenv("CASIOEMU_FILEVIEW_ASSET"))
@@ -1436,19 +1489,44 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 		// Pick the target from the live model so a .wz on an fx-880BTG builds for
 		// the 880 chip instead of silently using the 580 default.
 		doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
-		if (doc->languageIndex != 0) {
+		if (doc->languageIndex != 0 || IsCwappLinkPath(path)) {
 			const auto record = OriginalRomRecordPath();
 			std::error_code record_ec;
 			if (!record.empty() && std::filesystem::is_regular_file(record, record_ec)) {
 				std::ifstream in(record);
 				std::string path_record;
-				if (std::getline(in, path_record) && !path_record.empty())
+				if (std::getline(in, path_record) && !path_record.empty() &&
+					!IsGeneratedSessionRom(path_record))
 					ApplyOriginalRom(*doc, path_record);
 			}
 			if (doc->originalRomPath.empty() && m_emu) {
-				const std::string model_rom = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
+				const std::string model_rom = StockRomCandidate();
 				if (!model_rom.empty())
 					ApplyOriginalRom(*doc, model_rom);
+			}
+		}
+		if (IsCwappLinkPath(path)) {
+			// A link file is a project manifest, not CWiz source.  Its build
+			// target is fixed to the fx-580VN X app target and the language
+			// picker stays on Auto.
+			doc->targetIndex = 2;
+			doc->languageIndex = 0;
+			std::vector<wiz::CwappLinkEntry> entries;
+			std::string project_error;
+			int project_line = 0;
+			if (wiz::parse_cwapplink_manifest(path.string(), entries, project_error, project_line)) {
+				doc->projectApps = static_cast<int>(entries.size());
+				doc->projectStatus = "CWapp project: " + std::to_string(entries.size()) +
+					(entries.size() == 1 ? " app" : " apps");
+				AppendOutput("[wiz] " + doc->projectStatus +
+					"; Build compiles every app, Build & Run patches a session ROM");
+			}
+			else {
+				doc->projectError = true;
+				doc->projectStatus = "CWapp project error" +
+					(project_line > 0 ? " at line " + std::to_string(project_line) : std::string()) +
+					": " + project_error;
+				AppendOutput("[wiz] " + doc->projectStatus);
 			}
 		}
 	}
@@ -2384,10 +2462,8 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 }
 
 bool IsWizDocument(const FileDocument& doc) {
-	std::string ext = std::filesystem::path(doc.path).extension().string();
-	for (char& ch : ext)
-		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-	return ext == ".wz" || ext == ".cwiz";
+	return IsCwappLinkPath(doc.path) || LowerExtension(doc.path) == ".wz" ||
+		LowerExtension(doc.path) == ".cwiz";
 }
 
 void FindInDocument(FileDocument& doc) {
@@ -2583,6 +2659,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	// Line numbers, word wrap and font size have no editor API in this tree.
 	doc.editor.SetTabSize(std::clamp(SettingsStore::Instance().Data().editor.tabSize, 1, 16));
 	const bool wiz_file = IsWizDocument(doc);
+	const bool project = IsCwappLinkPath(doc.path);
 	const float toolbar_height = (wiz_file ? 226.0f : 62.0f) + (doc.findOpen ? 28.0f : 0.0f);
 
 	// Row 1: file actions.
@@ -2608,9 +2685,15 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	if (ImGui::Button(L("Shell.Redo", "Redo")))
 		doc.editor.Redo();
 	ImGui::SameLine();
-	ImGui::TextDisabled("Ln %d, Col %d", cursor.mLine + 1, cursor.mColumn + 1);
-	ImGui::SameLine();
-	ImGui::TextDisabled("| File: %s", doc.name.c_str());
+	if (project) {
+		ImGui::TextColored(doc.projectError ? palette.error : palette.link, "%s",
+			doc.projectStatus.c_str());
+	}
+	else {
+		ImGui::TextDisabled("Ln %d, Col %d", cursor.mLine + 1, cursor.mColumn + 1);
+		ImGui::SameLine();
+		ImGui::TextDisabled("| File: %s", doc.name.c_str());
+	}
 	if (FileDocumentDirty(doc)) {
 		ImGui::SameLine();
 		ImGui::TextColored(palette.warning, "modified");
@@ -2626,6 +2709,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			target_width = std::max(target_width, ImGui::CalcTextSize(TargetLabelForIndex(index).c_str()).x);
 		target_width += ImGui::GetFrameHeight() + 18.0f;
 		ImGui::SetNextItemWidth(target_width);
+		ImGui::BeginDisabled(project);
 		if (ImGui::BeginCombo("##editor_target", TargetLabelForIndex(doc.targetIndex).c_str())) {
 			for (int index = 0; index < 5; ++index) {
 				if (ImGui::Selectable(TargetLabelForIndex(index).c_str(), index == doc.targetIndex))
@@ -2633,10 +2717,12 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			}
 			ImGui::EndCombo();
 		}
+		ImGui::EndDisabled();
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", L("Shell.Language", "Language"));
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(86.0f);
+		ImGui::BeginDisabled(project);
 		if (ImGui::BeginCombo("##editor_language", LanguageNameForIndex(doc.languageIndex).c_str())) {
 			for (int index = 0; index < 3; ++index) {
 				if (ImGui::Selectable(LanguageNameForIndex(index).c_str(), index == doc.languageIndex))
@@ -2644,10 +2730,13 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			}
 			ImGui::EndCombo();
 		}
+		ImGui::EndDisabled();
 		// Row 4: lint and build actions.
 		ImGui::SetCursorPos(ImVec2(8.0f, 90.0f));
+		ImGui::BeginDisabled(project);
 		if (ImGui::Button(L("Shell.Lint", "Lint")))
 			RunLintForDocument(doc);
+		ImGui::EndDisabled();
 		ImGui::SameLine();
 		if (ImGui::Button(L("Shell.Build", "Build"))) {
 			if (FileDocumentDirty(doc))
@@ -2669,6 +2758,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			g.panelTab = 0;
 		}
 		ImGui::SameLine();
+		ImGui::BeginDisabled(project);
 		if (ImGui::Button(L("Shell.Preprocess", "Preprocess"))) {
 			TransferDocumentToToolchain(doc);
 			if (UIWindow* wiz = FindWindow("Wiz Compiler"))
@@ -2676,6 +2766,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 			g.panelVisible = true;
 			g.panelTab = 0;
 		}
+		ImGui::EndDisabled();
 		// Row 5: ROP padding and source/launcher actions.
 		ImGui::SetCursorPos(ImVec2(8.0f, 118.0f));
 		ImGui::TextDisabled("%s", L("Shell.RopPad", "ROP pad"));
@@ -2701,22 +2792,8 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 
 		// Row 6: original ROM for cwapp patching / ROM-referenced builds.
 		ImGui::SetCursorPos(ImVec2(8.0f, 146.0f));
-		if (ImGui::Button(L("Shell.LoadOriginalRom", "Load Original ROM"))) {
-			std::string candidate;
-			if (m_emu) {
-				candidate = m_emu->GetModelFilePath(m_emu->ModelDefinition.rom_path);
-				if (candidate.empty())
-					candidate = m_emu->GetModelFilePath("rom.bin");
-			}
-			std::error_code candidate_ec;
-			if (!candidate.empty() && std::filesystem::is_regular_file(candidate, candidate_ec))
-				ApplyOriginalRom(doc, candidate);
-			else
-				SystemDialogs::OpenFileDialog([&doc](std::filesystem::path path) {
-					if (!path.empty())
-						ApplyOriginalRom(doc, path);
-				});
-		}
+		if (ImGui::Button(L("Shell.LoadOriginalRom", "Load Original ROM")))
+			LoadOriginalRomForDocument(doc);
 		if (!doc.originalRomStatus.empty()) {
 			ImGui::SetCursorPos(ImVec2(8.0f, 176.0f));
 			ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 4.0f);
@@ -4839,6 +4916,126 @@ void Render() {
 			std::ofstream output(fileview_report, std::ios::trunc);
 			output << report.str();
 			AppendOutput(std::string("[fileview-selftest] ") + (ok ? "PASS" : "FAIL"));
+		}
+	}
+
+	if (const char* cwapplink_report = std::getenv("CASIOEMU_CWAPPLINK_TEST")) {
+		static int cw_frame = 0;
+		static std::string stock_path;
+		static std::string stock_before;
+		++cw_frame;
+		const char* demo_env = std::getenv("CASIOEMU_CWAPPLINK_DEMO");
+		const std::filesystem::path demo = demo_env && *demo_env
+			? std::filesystem::path(demo_env)
+			: std::filesystem::path(".");
+		auto find_document = [&](const std::filesystem::path& path) -> FileDocument* {
+			for (auto& file : g.files) {
+				if (file->path == path.string())
+					return file.get();
+			}
+			return nullptr;
+		};
+		auto read_file = [](const std::filesystem::path& path) {
+			std::ifstream input(path, std::ios::binary);
+			return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+		};
+		auto fingerprint = [&](const std::filesystem::path& path) {
+			const std::string bytes = read_file(path);
+			return std::to_string(bytes.size()) + ":" + std::to_string(std::hash<std::string>{}(bytes));
+		};
+		auto log_contains = [&](const std::string& needle) {
+			for (const auto& line : g.output) {
+				if (line.text.find(needle) != std::string::npos)
+					return true;
+			}
+			return false;
+		};
+		if (cw_frame == 4) {
+			OpenFileInEditor(demo);
+		}
+		else if (cw_frame == 6) {
+			std::stringstream report;
+			bool ok = true;
+			auto check = [&](const char* name, bool value) {
+				report << name << "=" << (value ? "PASS" : "FAIL") << "\n";
+				ok = ok && value;
+			};
+			FileDocument* doc = find_document(demo);
+			check("project_document", doc && doc->kind == FileKind::Text && IsWizDocument(*doc));
+			check("project_target_cwapp", doc && doc->targetIndex == 2 && doc->languageIndex == 0);
+			check("project_manifest_valid", doc && doc->projectApps == 2 && !doc->projectError);
+			check("project_original_rom", doc && !doc->originalRomPath.empty() && !doc->originalRomError);
+			check("project_no_lint_errors", doc && doc->problems.empty());
+			check("project_hint_logged", log_contains("CWapp project: 2 apps"));
+			report << (ok ? "PANEL PASS\n" : "PANEL FAIL\n");
+			// Keep the intermediate PANEL result and extend the same report at
+			// the end; the file is tiny.
+			std::ofstream output(cwapplink_report, std::ios::trunc);
+			output << report.str();
+		}
+		else if (cw_frame == 8) {
+			BuildToolchain(false);
+		}
+		else if (cw_frame == 10) {
+			std::stringstream report;
+			bool ok = true;
+			auto check = [&](const char* name, bool value) {
+				report << name << "=" << (value ? "PASS" : "FAIL") << "\n";
+				ok = ok && value;
+			};
+			check("build_status", g.lastBuildStatus == "Build succeeded");
+			check("build_two_apps", log_contains("cwapplink: 2 app(s)"));
+			check("build_slot_13", log_contains("slot 13") && log_contains("key D"));
+			check("build_slot_14", log_contains("slot 14") && log_contains("key E"));
+			report << (ok ? "BUILD PASS\n" : "BUILD FAIL\n");
+			std::ofstream output(cwapplink_report, std::ios::app);
+			output << report.str();
+		}
+		else if (cw_frame == 12) {
+			stock_path = StockRomCandidate();
+			stock_before = fingerprint(stock_path);
+			BuildToolchain(true);
+		}
+		else if (cw_frame == 14) {
+			std::stringstream report;
+			bool ok = true;
+			auto check = [&](const char* name, bool value) {
+				report << name << "=" << (value ? "PASS" : "FAIL") << "\n";
+				ok = ok && value;
+			};
+			check("run_session_rom", m_emu && m_emu->ModelDefinition.rom_path.find("rom-cwapplink") !=
+				std::string::npos);
+			check("run_stock_unchanged", fingerprint(stock_path) == stock_before);
+			report << (ok ? "RUN PASS\n" : "RUN FAIL\n");
+			std::ofstream output(cwapplink_report, std::ios::app);
+			output << report.str();
+		}
+		else if (cw_frame == 16) {
+			FileDocument* doc = find_document(demo);
+			if (doc)
+				LoadOriginalRomForDocument(*doc);
+			std::stringstream report;
+			bool ok = true;
+			auto check = [&](const char* name, bool value) {
+				report << name << "=" << (value ? "PASS" : "FAIL") << "\n";
+				ok = ok && value;
+			};
+			const auto record = OriginalRomRecordPath();
+			std::string recorded;
+			if (!record.empty()) {
+				std::ifstream input(record);
+				std::getline(input, recorded);
+				while (!recorded.empty() && (recorded.back() == '\r' || recorded.back() == '\n'))
+					recorded.pop_back();
+			}
+			check("original_rom_record", doc && doc->originalRomPath == stock_path &&
+				!doc->originalRomError);
+			check("original_rom_file", recorded == stock_path);
+			report << (ok ? "ORIGINAL PASS\n" : "ORIGINAL FAIL\n");
+			report << (ok ? "RESULT PASS\n" : "RESULT FAIL\n");
+			std::ofstream output(cwapplink_report, std::ios::app);
+			output << report.str();
+			AppendOutput(std::string("[cwapplink-test] ") + (ok ? "PASS" : "FAIL"));
 		}
 	}
 
