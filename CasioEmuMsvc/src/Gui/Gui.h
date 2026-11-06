@@ -182,6 +182,54 @@ inline std::string GetCJKFontPath(int* font_no = nullptr) {
 	return FindBestFont(candidates);
 }
 
+// The memory views decode calculator glyph codes into their Unicode
+// equivalents.  Those strings contain Greek letters, maths operators and
+// arrows that neither the text face nor the CJK face necessarily carries in
+// the atlas.  STIX Two Math covers the full set (and is the reference maths
+// face on macOS); the other entries are fallbacks for other systems.
+inline std::string GetMathFontPath() {
+#ifdef _WIN32
+	return FindBestFont({
+		"C:\\Windows\\Fonts\\STIXTwoMath-Regular.otf",
+		"C:\\Windows\\Fonts\\cambria.ttc",
+		"C:\\Windows\\Fonts\\seguisym.ttf"});
+#elif defined(__ANDROID__)
+	return FindBestFont({
+		"/system/fonts/NotoSansSymbols-Regular.ttf",
+		"/system/fonts/NotoSansMath-Regular.ttf"});
+#elif defined(__APPLE__)
+	return FindBestFont({
+		"/System/Library/Fonts/Supplemental/STIXTwoMath.otf",
+		"/System/Library/Fonts/Supplemental/STIXGeneral.otf",
+		"/System/Library/Fonts/Apple Symbols.ttf"});
+#else
+	return FindBestFont({
+		"/usr/share/fonts/truetype/stix2/STIXTwoMath-Regular.otf",
+		"/usr/share/fonts/opentype/stix/STIXTwoMath-Regular.otf",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"});
+#endif
+}
+
+inline const ImWchar* GetMemoryGlyphRanges() {
+	static const ImWchar ranges[] = {
+		0x0100, 0x024F, // Latin Extended-A/B (ħ, Ă, ...)
+		0x0370, 0x03FF, // Greek
+		0x2000, 0x206F, // general punctuation
+		0x2070, 0x209F, // super/subscripts
+		0x2100, 0x214F, // letterlike symbols
+		0x2190, 0x21FF, // arrows
+		0x2200, 0x22FF, // mathematical operators
+		0x2300, 0x23FF, // technical symbols
+		0x2500, 0x257F, // box drawing
+		0x25A0, 0x25FF, // geometric shapes
+		0x27F0, 0x27FF, // supplemental arrows
+		// Mathematical alphanumerics are U+1D400..U+1D7FF and do not fit
+		// ImWchar (16 bit); the decoded table folds them to plain letters.
+		0,
+	};
+	return ranges;
+}
+
 // Korean needs a separate face on macOS: the Chinese-first fallbacks (Heiti,
 // Hiragino) do not contain Hangul.  Returns the face that covers Hangul.
 inline std::string GetKoreanFontPath(int* font_no = nullptr) {
@@ -562,12 +610,23 @@ inline void RebuildFont(float scale = 0.0f) {
 				&fallback_config, replacement_range);
 		}
 
+		const std::string math_font_path = GetMathFontPath();
+		if (!math_font_path.empty()) {
+			ImFontConfig math_config = config;
+			math_config.MergeMode = true;
+			math_config.OversampleH = 1;
+			math_config.OversampleV = 1;
+			io.Fonts->AddFontFromFileTTF(math_font_path.c_str(), 15 * scale,
+				&math_config, GetMemoryGlyphRanges());
+		}
+
 		fprintf(stderr,
-			"[Font] locale=%s enable_cjk=%d cjk=%s korean=%s fallback=%s ranges=%d codepoints=%d\n",
+			"[Font] locale=%s enable_cjk=%d cjk=%s korean=%s fallback=%s math=%s ranges=%d codepoints=%d\n",
 			language.c_str(), locale_needs_cjk ? 1 : 0,
 			cjk_font_path.empty() ? "(none)" : cjk_font_path.c_str(),
 			korean_font_path.empty() ? "(none)" : korean_font_path.c_str(),
 			fallback_font_path.empty() ? "(none)" : fallback_font_path.c_str(),
+			math_font_path.empty() ? "(none)" : math_font_path.c_str(),
 			cjk_ranges.Size, codepoint_count);
 	}
 	io.Fonts->Build();

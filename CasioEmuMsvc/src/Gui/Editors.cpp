@@ -34,8 +34,12 @@ static void DrawColumnSelector(MemoryEditor& editor) {
 		2, 64);
 	if (const char* forced = std::getenv("CASIOEMU_HEX_COLS"))
 		editor.Cols = std::clamp(std::atoi(forced), 1, 64);
-	if (const char* target = std::getenv("CASIOEMU_HEX_GOTO"))
-		editor.GotoAddr = static_cast<size_t>(std::strtoul(target, nullptr, 16));
+	if (const char* target = std::getenv("CASIOEMU_HEX_GOTO")) {
+		if (!editor.GotoEnvApplied) {
+			editor.GotoEnvApplied = true;
+			editor.GotoAddr = static_cast<size_t>(std::strtoul(target, nullptr, 16));
+		}
+	}
 	else if (editor.Cols > max_columns)
 		editor.Cols = max_columns;
 	ToolUi::Field("Columns");
@@ -276,21 +280,33 @@ std::vector<UIWindow*> GetEditors() {
 		windows.push_back(EPS_VRAM_Hex(new HexEditor{"VRAM", nullptr, m_emu->chipset.epscpu->LcdRawSize(), 0}));
 	}
 	else {
-		windows.push_back(new HexEditor{"ROM", m_emu->chipset.rom_data.data(), m_emu->chipset.rom_data.size(), 0});
-		windows.push_back(
-			Highlight_Default(
-				MMU_Hex(
-					new SpansHexEditor{
-						"RAM",
-						(void*)casioemu::GetRamBaseAddr(m_emu->hardware_id),
-						casioemu::GetRamEditorSize(m_emu->hardware_id),
-						casioemu::GetRamBaseAddr(m_emu->hardware_id),
-						GetCommonMemLabels(m_emu->hardware_id)})));
+		auto* rom_editor = new HexEditor{"ROM", m_emu->chipset.rom_data.data(), m_emu->chipset.rom_data.size(), 0};
+		rom_editor->SelSpansEnabled = false;
+		windows.push_back(rom_editor);
+		auto* ram_editor = Highlight_Default(
+			MMU_Hex(
+				new SpansHexEditor{
+					"RAM",
+					(void*)casioemu::GetRamBaseAddr(m_emu->hardware_id),
+					casioemu::GetRamEditorSize(m_emu->hardware_id),
+					casioemu::GetRamBaseAddr(m_emu->hardware_id),
+					GetCommonMemLabels(m_emu->hardware_id)}));
+		ram_editor->SelSpansEnabled = true;
+		windows.push_back(ram_editor);
 		if (m_emu->hardware_id == casioemu::HW_FX_5800P) {
-			windows.push_back(MMU_Hex(new SpansHexEditor{"PRAM", (void*)0x40000, 0x8000, 0x40000, GetCommonMemLabels(m_emu->hardware_id)}));
+			auto* pram_editor = MMU_Hex(new SpansHexEditor{"PRAM", (void*)0x40000, 0x8000, 0x40000, GetCommonMemLabels(m_emu->hardware_id)});
+			pram_editor->SelSpansEnabled = true;
+			windows.push_back(pram_editor);
 			windows.push_back(new HexEditor{"Flash", m_emu->chipset.flash_data.data(), m_emu->chipset.flash_data.size(), 0});
 		}
-		windows.push_back(MMU_Hex(new HexEditor{"All", 0, 0xfffff, 0}));
+		auto* all_editor = MMU_Hex(new SpansHexEditor{"All", 0, 0xfffff, 0, GetCommonMemLabels(m_emu->hardware_id)});
+		all_editor->SelSpansEnabled = true;
+		const auto hardware = m_emu->hardware_id;
+		all_editor->SelSpansAllowed = [hardware](size_t address) {
+			const size_t base = casioemu::GetRamBaseAddr(hardware);
+			return address >= base && address < base + casioemu::GetRamEditorSize(hardware);
+		};
+		windows.push_back(all_editor);
 	}
 	return windows;
 }

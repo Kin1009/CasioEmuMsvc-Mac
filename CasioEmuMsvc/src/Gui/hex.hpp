@@ -49,11 +49,16 @@
 #pragma once
 
 #include "imgui/imgui.h"
+#include <algorithm>
+#include <cstdlib>
+#include <functional>
 #include <optional>
 #include <stdint.h> // uint8_t, etc.
 #include <stdio.h>	// sprintf, scanf
 #include <string>
 #include <vector>
+
+#include "MemoryTextMap.hpp"
 
 #include "Config.hpp"
 #include "Localization.h"
@@ -160,6 +165,188 @@ struct MemoryEditor {
 		HighlightMin = addr_min;
 		HighlightMax = addr_max;
 	}
+	// Range selection and text decoding.
+	size_t SelStart = (size_t)-1;
+	size_t SelEnd = (size_t)-1;
+	bool SelDragging = false;
+	bool SelectionMenuRequested = false;
+	bool ShowTextPanel = false;
+	bool ShowSpansPanel = false;
+	bool SelSpansEnabled = false;
+	std::function<bool(size_t)> SelSpansAllowed;
+	ImVec2 SelPopupPos{};
+	char SelPopupId[48]{};
+	char CopyNotice[64]{};
+	int CopyNoticeFrame = -1000;
+	int SelTestStage = 0;
+	bool SelTestParsed = false;
+	bool GotoEnvApplied = false;
+	bool SelTestActive = false;
+	size_t SelTestStartAddr = 0;
+	size_t SelTestEndAddr = 0;
+
+	const char* GetSelectionPopupId() {
+		if (SelPopupId[0] == '\0')
+			std::snprintf(SelPopupId, sizeof(SelPopupId), "##mem_sel_%p", (void*)this);
+		return SelPopupId;
+	}
+
+	bool HasSelection() const {
+		return SelStart != (size_t)-1 && SelEnd != (size_t)-1;
+	}
+
+	void ClearSelection() {
+		SelStart = SelEnd = (size_t)-1;
+		SelDragging = false;
+		SelectionMenuRequested = false;
+		ShowTextPanel = false;
+		ShowSpansPanel = false;
+	}
+
+	void NormalizeSelection(size_t& first, size_t& last) const {
+		first = SelStart < SelEnd ? SelStart : SelEnd;
+		last = SelStart < SelEnd ? SelEnd : SelStart;
+	}
+
+	void SelectByte(size_t addr, bool extend) {
+		// Clicking a byte leaves the single-byte editor so Cmd+C always
+		// targets the range instead of a focused hex input.
+		DataEditingAddr = DataPreviewAddr = (size_t)-1;
+		DataEditingTakeFocus = false;
+		if (extend && HasSelection())
+			SelEnd = addr;
+		else
+			SelStart = SelEnd = addr;
+		SelDragging = true;
+		ShowTextPanel = false;
+		ShowSpansPanel = false;
+	}
+
+	void ExtendSelection(size_t addr) {
+		SelEnd = addr;
+	}
+
+	void ExtendSelectionBy(long delta, size_t mem_size) {
+		if (!HasSelection() || delta == 0)
+			return;
+		const long value = static_cast<long>(SelEnd) + delta;
+		if (value < 0)
+			SelEnd = 0;
+		else if (static_cast<size_t>(value) >= mem_size)
+			SelEnd = mem_size > 0 ? mem_size - 1 : 0;
+		else
+			SelEnd = static_cast<size_t>(value);
+	}
+
+	static const char* LookupGlyph(uint8_t page, uint8_t code) {
+		int low = 0;
+		int high = MEMORY_GLYPH_COUNT - 1;
+		while (low <= high) {
+			const int middle = (low + high) / 2;
+			const auto& glyph = MEMORY_GLYPHS[middle];
+			if (glyph.page == page && glyph.code == code)
+				return glyph.utf8;
+			if (glyph.page < page || (glyph.page == page && glyph.code < code))
+				low = middle + 1;
+			else
+				high = middle - 1;
+		}
+		return nullptr;
+	}
+
+	ImU8 ReadByte(const ImU8* data, size_t addr, size_t mem_size) const {
+		if (addr >= mem_size)
+			return 0;
+		return ReadFn ? ReadFn(data, addr) : data[addr];
+	}
+
+	std::string SelectionHex(const ImU8* data, size_t mem_size) const {
+		if (!HasSelection())
+			return {};
+		size_t first = 0, last = 0;
+		NormalizeSelection(first, last);
+		std::string text;
+		text.reserve((last - first + 1) * 3);
+		char byte[4];
+		for (size_t addr = first; addr <= last && addr < mem_size; ++addr) {
+			std::snprintf(byte, sizeof(byte), "%02X", ReadByte(data, addr, mem_size));
+			if (!text.empty())
+				text += ' ';
+			text += byte;
+		}
+		return text;
+	}
+
+	std::string SelectionText(const ImU8* data, size_t mem_size) const {
+		if (!HasSelection())
+			return {};
+		size_t first = 0, last = 0;
+		NormalizeSelection(first, last);
+		std::string text;
+		char escape[8];
+		for (size_t addr = first; addr <= last; ++addr) {
+			const uint8_t byte = ReadByte(data, addr, mem_size);
+			if (byte == 0) {
+				text += ' ';
+				continue;
+			}
+			if (byte >= 0x20 && byte < 0x7F) {
+				text += static_cast<char>(byte);
+				continue;
+			}
+			if (byte >= 0xF0 && addr + 1 <= last) {
+				if (const char* glyph = LookupGlyph(byte, ReadByte(data, addr + 1, mem_size))) {
+					text += glyph;
+					++addr;
+					continue;
+				}
+			}
+			if (byte >= 0xF0) {
+				std::snprintf(escape, sizeof(escape), "\\x%02X", byte);
+				text += escape;
+				continue;
+			}
+			if (const char* glyph = LookupGlyph(0, byte)) {
+				text += glyph;
+				continue;
+			}
+			std::snprintf(escape, sizeof(escape), "\\x%02X", byte);
+			text += escape;
+		}
+		return text;
+	}
+
+	void DrawCopyNotice(ImDrawList* draw_list) const {
+		if (CopyNotice[0] == '\0' || ImGui::GetFrameCount() - CopyNoticeFrame >= 120)
+			return;
+		const ImVec2 text_size = ImGui::CalcTextSize(CopyNotice);
+		const ImVec2 window_pos = ImGui::GetWindowPos();
+		const ImVec2 window_size = ImGui::GetWindowSize();
+		const ImVec2 pos(window_pos.x + window_size.x - text_size.x - 16.0f,
+			window_pos.y + window_size.y - text_size.y - 12.0f);
+		const ImVec2 padding(8.0f, 5.0f);
+		draw_list->AddRectFilled(ImVec2(pos.x - padding.x, pos.y - padding.y),
+			ImVec2(pos.x + text_size.x + padding.x, pos.y + text_size.y + padding.y),
+			ImGui::GetColorU32(ImGuiCol_PopupBg, 0.95f), 6.0f);
+		draw_list->AddRect(ImVec2(pos.x - padding.x, pos.y - padding.y),
+			ImVec2(pos.x + text_size.x + padding.x, pos.y + text_size.y + padding.y),
+			ImGui::GetColorU32(ImGuiCol_Border), 6.0f);
+		draw_list->AddText(pos, ImGui::GetColorU32(ImGuiCol_Text), CopyNotice);
+	}
+
+	void CopySelection(bool as_text, const ImU8* data, size_t mem_size) {
+		const std::string text = as_text ? SelectionText(data, mem_size) : SelectionHex(data, mem_size);
+		if (text.empty())
+			return;
+		ImGui::SetClipboardText(text.c_str());
+		size_t first = 0, last = 0;
+		NormalizeSelection(first, last);
+		if (as_text)
+			std::snprintf(CopyNotice, sizeof(CopyNotice), "Copied text");
+		else
+			std::snprintf(CopyNotice, sizeof(CopyNotice), "Copied %d bytes", static_cast<int>(last - first + 1));
+		CopyNoticeFrame = ImGui::GetFrameCount();
+	}
 
 	struct Sizes {
 		int AddrDigitsCount;
@@ -197,6 +384,28 @@ struct MemoryEditor {
 		}
 		s.WindowWidth = s.PosAsciiEnd + style.ScrollbarSize + style.WindowPadding.x * 2 + s.GlyphWidth;
 	}
+	void DrawSelection(ImDrawList* draw_list, const Sizes& s, const ImVec2& line_min,
+		size_t line_start, size_t line_end) const {
+		if (!HasSelection())
+			return;
+		size_t first = 0, last = 0;
+		NormalizeSelection(first, last);
+		if (last < line_start || first > line_end)
+			return;
+		const size_t first_col = std::max(first, line_start) % static_cast<size_t>(Cols);
+		const size_t last_col = std::min(last, line_end) % static_cast<size_t>(Cols);
+		const int mid = OptMidColsCount;
+		const float group = (mid > 0) ? s.SpacingBetweenMidCols : 0.0f;
+		const float trailing = s.HexCellWidth - ImGui::CalcTextSize("00").x;
+		auto cell_x = [&](size_t n) {
+			return line_min.x + s.PosHexStart + s.HexCellWidth * static_cast<float>(n) +
+				(mid > 0 ? static_cast<float>(n / static_cast<size_t>(mid)) * group : 0.0f);
+		};
+		const ImU32 color = ImGui::GetColorU32(ImGuiCol_TextSelectedBg, 0.5f);
+		draw_list->AddRectFilled(ImVec2(cell_x(first_col), line_min.y + 1.0f),
+			ImVec2(cell_x(last_col) + s.HexCellWidth - trailing, line_min.y + s.LineHeight - 1.0f),
+			color, 3.0f);
+	}
 	void DrawContents(void* mem_data_void, size_t mem_size, size_t base_display_addr = 0x0000) {
 		if (Cols < 1)
 			Cols = 1;
@@ -205,6 +414,22 @@ struct MemoryEditor {
 		Sizes s;
 		CalcSizes(s, mem_size, base_display_addr);
 		ImGuiStyle& style = ImGui::GetStyle();
+		if (!SelTestParsed) {
+			SelTestParsed = true;
+			if (const char* spec = std::getenv("CASIOEMU_HEX_SEL_TEST")) {
+				unsigned start = 0, end = 0;
+				if (std::sscanf(spec, "%x,%x", &start, &end) == 2) {
+					SelTestActive = true;
+					SelTestStartAddr = start;
+					SelTestEndAddr = end;
+				}
+			}
+			if (SelTestActive) {
+				std::fprintf(stderr, "[sel] glyph F110=%s F410=%s\n",
+					LookupGlyph(0xF1, 0x10) ? LookupGlyph(0xF1, 0x10) : "?",
+					LookupGlyph(0xF4, 0x10) ? LookupGlyph(0xF4, 0x10) : "?");
+			}
+		}
 
 		// We begin into our scrolling region with the 'ImGuiWindowFlags_NoMove' in order to prevent click from moving the window.
 		// This is used as a facility since our main click detection code doesn't assign an ActiveId so the click would normally be caught as a window-move.
@@ -264,11 +489,20 @@ struct MemoryEditor {
 		const char* format_byte = OptUpperCaseHex ? "%02X" : "%02x";
 		const char* format_byte_space = OptUpperCaseHex ? "%02X " : "%02x ";
 
+		bool hovered_any_byte = false;
 		while (clipper.Step())
 			for (int line_i = clipper.DisplayStart; line_i < clipper.DisplayEnd; line_i++) // display only visible lines
 			{
 				size_t addr = (size_t)(line_i * Cols);
 				ImGui::Text(format_address, s.AddrDigitsCount, base_display_addr + addr);
+
+				{
+					const ImVec2 sel_line_min = ImGui::GetItemRectMin();
+					const size_t line_start_sel = static_cast<size_t>(line_i * Cols);
+					const size_t line_end_sel = std::min(line_start_sel + Cols - 1,
+						mem_size > 0 ? mem_size - 1 : 0);
+					DrawSelection(draw_list, s, sel_line_min, line_start_sel, line_end_sel);
+				}
 
 				// Draw Hexadecimal
 				for (int n = 0; n < Cols && addr < mem_size; n++, addr++) {
@@ -366,9 +600,16 @@ struct MemoryEditor {
 								ImGui::Text(format_byte_space, b);
 						}
 						if (ImGui::IsItemHovered()) {
-							if (ImGui::IsMouseClicked(0)) {
+							hovered_any_byte = true;
+							const ImGuiIO& io = ImGui::GetIO();
+							if (ImGui::IsMouseClicked(0))
+								SelectByte(addr, io.KeyShift);
+							if (ImGui::IsMouseDoubleClicked(0)) {
 								DataEditingTakeFocus = !ReadOnly;
 								data_editing_addr_next = addr;
+							}
+							else if (io.MouseDown[0] && SelDragging) {
+								ExtendSelection(addr);
 							}
 							if (ImGui::IsItemClicked(1)) {
 								if (ContextMenuFn)
@@ -401,8 +642,48 @@ struct MemoryEditor {
 					}
 				}
 			}
+		{
+			const ImGuiIO& io = ImGui::GetIO();
+			if (SelDragging && ImGui::IsMouseReleased(0)) {
+				SelDragging = false;
+				if (HasSelection()) {
+					SelectionMenuRequested = true;
+					SelPopupPos = ImVec2(io.MousePos.x + 8.0f, io.MousePos.y + 8.0f);
+				}
+			}
+			if (HasSelection() && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !hovered_any_byte)
+				ClearSelection();
+			if (HasSelection() && !SelDragging && ImGui::IsMouseClicked(0) &&
+				!ImGui::IsPopupOpen(GetSelectionPopupId())) {
+				const ImVec2 child_min = ImGui::GetWindowPos();
+				const ImVec2 child_size = ImGui::GetWindowSize();
+				const ImVec2 child_max(child_min.x + child_size.x, child_min.y + child_size.y);
+				if (!ImGui::IsMouseHoveringRect(child_min, child_max))
+					ClearSelection();
+			}
+			if (HasSelection() && !SelDragging && DataEditingAddr == (size_t)-1 &&
+				(io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+				CopySelection(false, mem_data, mem_size);
+			}
+			if (HasSelection() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+				!io.WantTextInput && io.KeyShift) {
+				long delta = 0;
+				if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+					delta = -1;
+				else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+					delta = 1;
+				else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+					delta = -static_cast<long>(Cols);
+				else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+					delta = static_cast<long>(Cols);
+				ExtendSelectionBy(delta, mem_size);
+			}
+		}
+		DrawCopyNotice(draw_list);
 		ImGui::PopStyleVar(2);
 		ImGui::EndChild();
+		RunSelectionTest(mem_data, mem_size, base_display_addr);
 
 		// Notify the main window of our ideal child content size (FIXME: we are missing an API to get the contents size from the child)
 		ImGui::SetCursorPosX(s.WindowWidth);
@@ -424,6 +705,7 @@ struct MemoryEditor {
 			ImGui::Spacing();
 			DrawOptionsLine(s, mem_data, mem_size, base_display_addr);
 		}
+		RenderSelectionPopup(mem_data, mem_size, base_display_addr, nullptr);
 
 		if (lock_show_data_preview) {
 			ImGui::Separator();
@@ -440,6 +722,143 @@ struct MemoryEditor {
 		}
 	};
 	using OptionalMarkedSpans = std::optional<std::vector<MarkedSpan>>;
+
+	void RunSelectionTest(const ImU8* mem_data, size_t mem_size, size_t base_display_addr) {
+		if (!SelTestActive || SelTestStage >= 6)
+			return;
+		if (SelTestStartAddr < base_display_addr || SelTestEndAddr < base_display_addr)
+			return;
+		const size_t start_offset = SelTestStartAddr - base_display_addr;
+		const size_t end_offset = SelTestEndAddr - base_display_addr;
+		if (start_offset >= mem_size || end_offset >= mem_size)
+			return;
+		ImGuiIO& io = ImGui::GetIO();
+
+		if (SelTestStage == 0) {
+			// Same entry points as the mouse handlers: click, then drag.
+			SelectByte(start_offset, false);
+			ExtendSelection(end_offset);
+			SelDragging = false;
+			size_t first = 0, last = 0;
+			NormalizeSelection(first, last);
+			std::fprintf(stderr, "[sel] drag range=%zX..%zX hex=%s %s\n",
+				first + base_display_addr, last + base_display_addr,
+				SelectionHex(mem_data, mem_size).c_str(),
+				last == end_offset ? "PASS" : "FAIL");
+			SelTestStage = 1;
+		}
+		else if (SelTestStage == 1) {
+			const size_t extended = std::min(end_offset + 2, mem_size - 1);
+			SelectByte(extended, true);
+			SelDragging = false;
+			size_t first = 0, last = 0;
+			NormalizeSelection(first, last);
+			std::fprintf(stderr, "[sel] shift extend=%zX..%zX %s\n",
+				first + base_display_addr, last + base_display_addr,
+				last == extended ? "PASS" : "FAIL");
+			SelTestStage = 2;
+		}
+		else if (SelTestStage == 2) {
+			// Drive the real shortcut path: focus the editor, queue Cmd+C and
+			// let the normal key handler run on the next frame.
+			ImGui::SetWindowFocus();
+			io.AddKeyEvent(ImGuiMod_Super, true);
+			io.AddKeyEvent(ImGuiKey_C, true);
+			SelTestStage = 3;
+		}
+		else if (SelTestStage == 3) {
+			io.AddKeyEvent(ImGuiKey_C, false);
+			io.AddKeyEvent(ImGuiMod_Super, false);
+			std::fprintf(stderr, "[sel] cmd+c bytes=%s notice=%s %s\n",
+				SelectionHex(mem_data, mem_size).c_str(), CopyNotice,
+				CopyNotice[0] ? "PASS" : "FAIL");
+			SelTestStage = 4;
+		}
+		else if (SelTestStage == 4) {
+			ShowTextPanel = true;
+			SelectionMenuRequested = true;
+			SelPopupPos = ImVec2(ImGui::GetIO().DisplaySize.x - 300.0f, 250.0f);
+			std::fprintf(stderr, "[sel] text=%s glyphs F110=%s F410=%s\n",
+				SelectionText(mem_data, mem_size).c_str(),
+				LookupGlyph(0xF1, 0x10) ? LookupGlyph(0xF1, 0x10) : "?",
+				LookupGlyph(0xF4, 0x10) ? LookupGlyph(0xF4, 0x10) : "?");
+			SelTestStage = 5;
+		}
+		else if (SelTestStage == 5) {
+			CopySelection(true, mem_data, mem_size);
+			std::fprintf(stderr, "[sel] copy decoded=%s %s\n",
+				SelectionText(mem_data, mem_size).c_str(),
+				CopyNoticeFrame >= 0 ? "PASS" : "FAIL");
+			SelTestStage = 6;
+		}
+	}
+
+	void RenderSelectionPopup(const ImU8* mem_data, size_t mem_size, size_t base_display_addr,
+		const std::vector<MarkedSpan>* spans) {
+		const char* popup_id = GetSelectionPopupId();
+		bool opened_now = false;
+		if (SelectionMenuRequested) {
+			SelectionMenuRequested = false;
+			opened_now = true;
+			ImGui::SetNextWindowPos(SelPopupPos, ImGuiCond_Always);
+			ImGui::OpenPopup(popup_id);
+		}
+		if (!HasSelection())
+			return;
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 8.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 5.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+		if (ImGui::BeginPopup(popup_id)) {
+			size_t first = 0, last = 0;
+			NormalizeSelection(first, last);
+			const size_t absolute_first = first + base_display_addr;
+			const size_t absolute_last = last + base_display_addr;
+			const bool spans_allowed = SelSpansEnabled &&
+				(!SelSpansAllowed || SelSpansAllowed(absolute_first));
+			if (opened_now && SelTestActive)
+				std::fprintf(stderr, "[sel] menu=%sText\n", spans_allowed ? "Spans," : "");
+			if (spans_allowed && spans) {
+				if (ImGui::Selectable("Spans", false, ImGuiSelectableFlags_DontClosePopups))
+					ShowSpansPanel = !ShowSpansPanel;
+				if (ShowSpansPanel) {
+					bool any = false;
+					for (const auto& span : *spans) {
+						const size_t span_last = span.start + (span.length > 0 ? span.length - 1 : 0);
+						if (span.start <= absolute_last && span_last >= absolute_first) {
+							ImGui::BulletText("%s", span.desc ? span.desc : "(unnamed span)");
+							any = true;
+						}
+					}
+					if (!any)
+						ImGui::TextDisabled("No spans");
+				}
+			}
+			if (ImGui::Selectable("Text", false, ImGuiSelectableFlags_DontClosePopups))
+				ShowTextPanel = !ShowTextPanel;
+			if (ShowTextPanel) {
+				const std::string decoded = SelectionText(mem_data, mem_size);
+				const bool blank = decoded.find_first_not_of(" \t\r\n") == std::string::npos;
+				ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+				ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+				ImGui::BeginChild("##decoded_text", ImVec2(240.0f, 64.0f),
+					ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding);
+				ImGui::PushTextWrapPos(0.0f);
+				ImGui::TextUnformatted(blank ? "(blank)" : decoded.c_str());
+				ImGui::PopTextWrapPos();
+				ImGui::EndChild();
+				ImGui::PopStyleColor();
+				ImGui::PopStyleVar(2);
+				if (ImGui::Button("Copy"))
+					CopySelection(true, mem_data, mem_size);
+				ImGui::SameLine();
+				ImGui::TextDisabled("%d bytes", static_cast<int>(last - first + 1));
+			}
+			ImGui::EndPopup();
+		}
+		ImGui::PopStyleVar(4);
+	}
 	std::optional<std::string> SpanDescription;
 
 	void UpdateSpanDescriptions(const OptionalMarkedSpans& marked_spans, size_t base_display_addr) {
@@ -504,6 +923,22 @@ struct MemoryEditor {
 		Sizes s;
 		CalcSizes(s, mem_size, base_display_addr);
 		ImGuiStyle& style = ImGui::GetStyle();
+		if (!SelTestParsed) {
+			SelTestParsed = true;
+			if (const char* spec = std::getenv("CASIOEMU_HEX_SEL_TEST")) {
+				unsigned start = 0, end = 0;
+				if (std::sscanf(spec, "%x,%x", &start, &end) == 2) {
+					SelTestActive = true;
+					SelTestStartAddr = start;
+					SelTestEndAddr = end;
+				}
+			}
+			if (SelTestActive) {
+				std::fprintf(stderr, "[sel] glyph F110=%s F410=%s\n",
+					LookupGlyph(0xF1, 0x10) ? LookupGlyph(0xF1, 0x10) : "?",
+					LookupGlyph(0xF4, 0x10) ? LookupGlyph(0xF4, 0x10) : "?");
+			}
+		}
 
 		UpdateSpanDescriptions(marked_spans, base_display_addr);
 
@@ -567,6 +1002,7 @@ struct MemoryEditor {
 		const char* format_byte = OptUpperCaseHex ? "%02X" : "%02x";
 		const char* format_byte_space = OptUpperCaseHex ? "%02X " : "%02x ";
 
+		bool hovered_any_byte = false;
 		while (clipper.Step())
 			for (int line_i = clipper.DisplayStart; line_i < clipper.DisplayEnd; line_i++) // display only visible lines
 			{
@@ -589,49 +1025,72 @@ struct MemoryEditor {
 
 				if (marked_spans.has_value()) {
 					auto& spans = marked_spans.value();
+					struct LineSpan {
+						size_t first = 0;
+						size_t last = 0;
+						ImU32 color = 0;
+					};
+					std::vector<LineSpan> ranges;
 					for (auto& span : spans) {
 						auto intersection = intersect_range(
 							span.start - base_display_addr,
 							span.start - base_display_addr + span.length - 1,
 							line_start_n, line_end_n);
-						if (!intersection.has_value()) {
-							// no intersection; this line has no marked span to draw
+						if (!intersection.has_value())
 							continue;
+						LineSpan range;
+						range.first = intersection->first % static_cast<size_t>(Cols);
+						range.last = intersection->second % static_cast<size_t>(Cols);
+						range.color = ~span.color;
+						ranges.push_back(range);
+					}
+					std::sort(ranges.begin(), ranges.end(), [](const LineSpan& lhs, const LineSpan& rhs) {
+						return lhs.first < rhs.first;
+					});
+					// Coalesce touching or overlapping runs, including across the
+					// group separator, so highlighted bytes form one rectangle.
+					std::vector<LineSpan> merged;
+					for (const auto& range : ranges) {
+						if (!merged.empty() && range.first <= merged.back().last + 1) {
+							merged.back().last = std::max(merged.back().last, range.last);
 						}
-
-						size_t intxn_start = intersection->first;
-						size_t intxn_end = intersection->second;
-						assert(intxn_start >= line_start_n && intxn_end <= line_end_n);
-
-						// The address Text was just submitted; use its line rect
-						// as the row origin.  Spans are measured with the same
-						// per-byte advance the hex loop uses, plus the explicit
-						// group gaps, and stop after the digits (no trailing
-						// separator space).
-						const ImVec2 line_min = ImGui::GetItemRectMin();
-						const float hex_origin = line_min.x + s.PosHexStart;
-						const int mid = OptMidColsCount;
-						const float group = (mid > 0) ? s.SpacingBetweenMidCols : 0.0f;
-						const float trailing = s.HexCellWidth - ImGui::CalcTextSize("00").x;
-						auto cell_x = [&](size_t n) {
-							return hex_origin + s.HexCellWidth * static_cast<float>(n) +
-								(mid > 0 ? static_cast<float>(n / static_cast<size_t>(mid)) * group : 0.0f);
-						};
-						const size_t first_col = intxn_start % static_cast<size_t>(Cols);
-						const size_t last_col = intxn_end % static_cast<size_t>(Cols);
-						if (check_first_col == (size_t)-1) {
-							check_first_col = first_col;
-							check_last_col = last_col;
-						}
-						auto start_pos = ImVec2(cell_x(first_col), line_min.y);
-						auto end_pos = ImVec2(cell_x(last_col) + s.HexCellWidth - trailing,
-							line_min.y + s.LineHeight);
-						draw_list->AddRectFilled(start_pos, end_pos, ~span.color);
-						if (std::getenv("CASIOEMU_HEX_SPAN_REPORT")) {
-							std::fprintf(stderr, "[span] cols=%d bytes=%zu x0=%.2f x1=%.2f y=%.2f h=%.2f\n",
-								Cols, last_col - first_col + 1, start_pos.x, end_pos.x, start_pos.y, s.LineHeight);
+						else {
+							merged.push_back(range);
 						}
 					}
+
+					const int mid = OptMidColsCount;
+					const float group = (mid > 0) ? s.SpacingBetweenMidCols : 0.0f;
+					const float trailing = s.HexCellWidth - ImGui::CalcTextSize("00").x;
+					const ImVec2 line_min = ImGui::GetItemRectMin();
+					const float hex_origin = line_min.x + s.PosHexStart;
+					auto cell_x = [&](size_t n) {
+						return hex_origin + s.HexCellWidth * static_cast<float>(n) +
+							(mid > 0 ? static_cast<float>(n / static_cast<size_t>(mid)) * group : 0.0f);
+					};
+					for (const auto& range : merged) {
+						auto start_pos = ImVec2(cell_x(range.first), line_min.y + 1.0f);
+						auto end_pos = ImVec2(cell_x(range.last) + s.HexCellWidth - trailing,
+							line_min.y + s.LineHeight - 1.0f);
+						draw_list->AddRectFilled(start_pos, end_pos, range.color, 3.0f);
+						if (check_first_col == (size_t)-1) {
+							check_first_col = range.first;
+							check_last_col = range.last;
+						}
+						if (std::getenv("CASIOEMU_HEX_SPAN_REPORT")) {
+							std::fprintf(stderr, "[span] cols=%d bytes=%zu x0=%.2f x1=%.2f y=%.2f h=%.2f merged=%zu\n",
+								Cols, range.last - range.first + 1, start_pos.x, end_pos.x, start_pos.y,
+								s.LineHeight, merged.size());
+						}
+					}
+				}
+
+				{
+					const ImVec2 sel_line_min = ImGui::GetItemRectMin();
+					const size_t line_start_sel = static_cast<size_t>(line_i * Cols);
+					const size_t line_end_sel = std::min(line_start_sel + Cols - 1,
+						mem_size > 0 ? mem_size - 1 : 0);
+					DrawSelection(draw_list, s, sel_line_min, line_start_sel, line_end_sel);
 				}
 
 				// Draw Hexadecimal
@@ -758,9 +1217,16 @@ struct MemoryEditor {
 								ImGui::Text(format_byte_space, b);
 						}
 						if (ImGui::IsItemHovered()) {
-							if (ImGui::IsMouseClicked(0)) {
+							hovered_any_byte = true;
+							const ImGuiIO& io = ImGui::GetIO();
+							if (ImGui::IsMouseClicked(0))
+								SelectByte(addr, io.KeyShift);
+							if (ImGui::IsMouseDoubleClicked(0)) {
 								DataEditingTakeFocus = !ReadOnly;
 								data_editing_addr_next = addr;
+							}
+							else if (io.MouseDown[0] && SelDragging) {
+								ExtendSelection(addr);
 							}
 							if (ImGui::IsItemClicked(1)) {
 								if (ContextMenuFn)
@@ -800,8 +1266,48 @@ struct MemoryEditor {
 					}
 				}
 			}
+		{
+			const ImGuiIO& io = ImGui::GetIO();
+			if (SelDragging && ImGui::IsMouseReleased(0)) {
+				SelDragging = false;
+				if (HasSelection()) {
+					SelectionMenuRequested = true;
+					SelPopupPos = ImVec2(io.MousePos.x + 8.0f, io.MousePos.y + 8.0f);
+				}
+			}
+			if (HasSelection() && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !hovered_any_byte)
+				ClearSelection();
+			if (HasSelection() && !SelDragging && ImGui::IsMouseClicked(0) &&
+				!ImGui::IsPopupOpen(GetSelectionPopupId())) {
+				const ImVec2 child_min = ImGui::GetWindowPos();
+				const ImVec2 child_size = ImGui::GetWindowSize();
+				const ImVec2 child_max(child_min.x + child_size.x, child_min.y + child_size.y);
+				if (!ImGui::IsMouseHoveringRect(child_min, child_max))
+					ClearSelection();
+			}
+			if (HasSelection() && !SelDragging && DataEditingAddr == (size_t)-1 &&
+				(io.KeySuper || io.KeyCtrl) && ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+				CopySelection(false, mem_data, mem_size);
+			}
+			if (HasSelection() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+				!io.WantTextInput && io.KeyShift) {
+				long delta = 0;
+				if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+					delta = -1;
+				else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+					delta = 1;
+				else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+					delta = -static_cast<long>(Cols);
+				else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+					delta = static_cast<long>(Cols);
+				ExtendSelectionBy(delta, mem_size);
+			}
+		}
+		DrawCopyNotice(draw_list);
 		ImGui::PopStyleVar(2);
 		ImGui::EndChild();
+		RunSelectionTest(mem_data, mem_size, base_display_addr);
 
 		// Notify the main window of our ideal child content size (FIXME: we are missing an API to get the contents size from the child)
 		ImGui::SetCursorPosX(s.WindowWidth);
@@ -823,6 +1329,8 @@ struct MemoryEditor {
 			ImGui::Spacing();
 			DrawOptionsLine(s, mem_data, mem_size, base_display_addr);
 		}
+		RenderSelectionPopup(mem_data, mem_size, base_display_addr,
+			marked_spans.has_value() ? &marked_spans.value() : nullptr);
 
 		if (lock_show_data_preview) {
 			ImGui::Separator();
