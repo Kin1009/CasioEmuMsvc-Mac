@@ -97,6 +97,8 @@ public:
         ImGui::TextDisabled(
             "Appended modes take the next shortcut labels in order: D, E, F, x, y, z, M, "
             "+, -, *, /, .");
+        ImGui::TextDisabled(
+            "Legends: A (-), B deg, C x^-1, D sin, E cos, F tan, x (, y ), z s<>d, M M+.");
         ImGui::Separator();
 
         int count = count_;
