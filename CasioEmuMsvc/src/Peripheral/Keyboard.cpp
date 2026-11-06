@@ -75,6 +75,19 @@ namespace casioemu {
 		}
 	}
 
+	// A cwapp-patched fx-580VN X ROM ends up owning the CPU after the menu hook.
+	// The stock firmware blocks the BT_POWER reset through FCON in that state,
+	// which leaves ON dead.  Recognise the cwapp hook and let ON reset like stock.
+	bool IsCwappPatchedRom(const Emulator& emulator) {
+		const auto& rom = emulator.chipset.rom_data;
+		if (rom.size() > 0x25E21 && rom[0x25E1E] == 0x00 && rom[0x25E1F] == 0xF3 &&
+			rom[0x25E20] == 0x40 && rom[0x25E21] == 0x0E)
+			return true;
+		// Extra-only .cwapplink projects keep the stock set_mode hook but place
+		// their code at 3:0E40, which is erased in the stock dump.
+		return rom.size() > 0x30E41 && (rom[0x30E40] != 0xFF || rom[0x30E41] != 0xFF);
+	}
+
 	class Keyboard : public Peripheral, public IKeyboardAutomation {
 		MMURegion region_ko_mask, region_ko, region_ki, region_input_mode, region_input_filter;
 		uint16_t keyboard_out, keyboard_out_mask;
@@ -1095,7 +1108,9 @@ void Keyboard::Uninitialise() {
 
 		if (button.type == Button::BT_POWER && button.pressed && !old_pressed_state &&
 			!IsEpsFamily(emulator.hardware_id)) {
-			if (!(emulator.hardware_id == HW_CLASSWIZ && (emulator.chipset.data_FCON & 0x03) == 0x03)) {
+			const bool cwapp_patched = IsCwappPatchedRom(emulator);
+			if (cwapp_patched ||
+				!(emulator.hardware_id == HW_CLASSWIZ && (emulator.chipset.data_FCON & 0x03) == 0x03)) {
 				emulator.chipset.Reset();
 			}
 			else {

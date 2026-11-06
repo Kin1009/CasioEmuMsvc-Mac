@@ -52,7 +52,7 @@ const std::string& data_dir();
 std::string make_boot(const Target& target, uint32_t org = 0);
 
 // runtime.asm with the lines tagged for the other LCD type removed.
-std::string runtime_for(const Target& target);
+std::string runtime_for(const Target& target, bool extra_app = false);
 
 BuildResult build_source(const std::string& src, const std::string& target,
                          const std::string& path = "", uint32_t org = 0);

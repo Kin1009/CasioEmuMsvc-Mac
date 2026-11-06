@@ -284,8 +284,39 @@ __rt_init:
     ST R0, 0E821H
     RT
 
+; cwapp only: check MENU (scan index 24) without a call, so LR stays intact.
+; The check is inlined at each key entry point below.
 ; key_down(k=ER0) -> ER0 = 1 while scan index k is held, else 0
 __key_down:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok1     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok1:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok1      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok1      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok1:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
+__key_down_raw:
     AND R0, #3FH
     MOV R2, R0
     SRL R2, #3
@@ -307,9 +338,37 @@ __key_down_n:
 ; key_hit(k=ER0) -> ER0 = 1 only on the call where k went from released to held
 ; (call it every loop iteration for every key you care about)
 __key_hit:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok2     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok2:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok2      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok2      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok2:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
     PUSH LR
     PUSH ER0
-    BL __key_down
+    BL __key_down_raw
     POP ER2
     AND R2, #3FH
     MOV R4, R2
@@ -342,6 +401,34 @@ __key_hit_no:
 
 ; key() -> ER0 = scan index 0..63 (8*KO bit + KI bit, MSB first) or -1
 __key:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok3     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok3:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok3      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok3      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok3:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
     MOV R0, #0
     MOV R1, #0
     MOV R2, #80H
@@ -362,6 +449,32 @@ __key_y:
     MOV ER0, #-1
 __key_f:
     RT
+
+; cwapp only: Shift+AC (OFF) mirrors the stock power-off path: turn the LCD
+; off, clear FCON, mask every interrupt, program STOPACP, and enter STOP.
+; ON then repowers the calculator and the firmware relaunches the app.
+__cwapp_off:                   ;@cwapp
+    MOV R0, #0                 ;@cwapp
+    ST R0, 0F03DH              ;@cwapp
+    ST R0, 0F00AH              ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    MOV R3, #0F0H              ;@cwapp
+    MOV R4, #8                 ;@cwapp
+__cwapp_off_m:                 ;@cwapp
+    ST R0, [ER2]               ;@cwapp
+    ADD ER2, #1                ;@cwapp
+    ADD R4, #-1                ;@cwapp
+    BNE __cwapp_off_m          ;@cwapp
+    MOV R0, #50H               ;@cwapp
+    ST R0, 0F008H              ;@cwapp
+    MOV R0, #0A0H              ;@cwapp
+    ST R0, 0F008H              ;@cwapp
+    MOV R0, #2                 ;@cwapp
+    ST R0, 0F009H              ;@cwapp
+    NOP                        ;@cwapp
+    NOP                        ;@cwapp
+__cwapp_off_w:                 ;@cwapp
+    B __cwapp_off_w            ;@cwapp
 
 ; delay(n): n * ~ (busy loop) -- UNCALIBRATED, units arbitrary until measured on hardware
 __delay:
@@ -1053,6 +1166,8 @@ _ROMSEG EQU 3
     ORG 30E40h
 
 _TRAMP:
+    mov r0, #0
+    st r0, 0E7F4H
     cmp r8, #0E0h
     bne _t_old
     b _APP
@@ -1063,23 +1178,79 @@ _t_old:
 _t_back:
     b 25E22h
 
+; Boot dispatcher entry (2:9448 / 0:29448): a power-on/reboot reaches the
+; mode dispatcher without calling set_mode.  Only the app's mode id restarts
+; the app; every other id (including the 0x0D menu id) uses the stock menu
+; function, so MENU still returns to the menu.
+_BOOT_DISPATCH:
+    cmp r0, #0E0h
+    beq _BOOT_APP
+    b 2E234h
+_BOOT_APP:
+    mov r0, #1
+    st r0, 0E7F4H
+    b _APP
+
 _APP:
+    ; Save the caller's stack, registers, PSW and LR so MENU / exit() can
+    ; return through the firmware path instead of resetting the calculator.
+    ; The copy lives at 0xE5D3..0xE7FF (below the runtime heap at 0xE820).
+    push lr
+    push psw
+    push er0
+    push er2
+    push er4
+    push er6
+    push er8
+    push er10
+    push er12
+    push er14
+    mov er0, sp
+    st r0, 0E5D3h
+    st r1, 0E5D4h
+    mov r4, #0E5h
+    mov r5, #0EDh
+    cmp er0, er4
+    blts _save_fail
+    mov r2, #0D5h
+    mov r3, #0E5h
+    mov r4, #0
+    mov r5, #0F0h
+_save_loop:
+    cmp er0, er4
+    beq _save_done
+    l r6, [er0]
+    st r6, [er2]
+    add er0, #1
+    add er2, #1
+    b _save_loop
+_save_fail:
+    mov r0, #0
+    st r0, 0E5D3h
+    st r0, 0E5D4h
+_save_done:
     di
     mov r0, #0
     mov r1, #0F0h
     mov sp, er0
     mov r0, #0
     st r0, 0F041H
-    mov r0, #80h
-    mov r1, #0FFh
-    st er0, 0F044H
     mov er0, #0
-    st r0, 0F042H
-    st er0, 0F046H
+    st er0, 0F044H       ; KOMASK = 0: all key columns enabled
+    st r0, 0F042H        ; KIMASK = 0
+    st er0, 0F046H       ; KO = 0
     b _main
 
-; exit(): leave the program, restart the firmware (reset handler at 0:A1CE) which shows its menu again
+; exit(): restore the caller and return to the firmware menu.  __cwapp_return
+; is generated by runtime_for() for the legacy (set_mode) or extra (mode
+; routine) caller.  The reset path is only a last-resort fallback when the
+; saved stack did not fit in the cwapp save area.
 __exit:
+    b __cwapp_return
+
+__cwapp_reset:
+    mov r0, #0
+    st r0, 0E7F4H
     di
     mov r0, #0
     mov r1, #0F0h

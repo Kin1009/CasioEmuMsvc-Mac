@@ -275,8 +275,39 @@ __rt_init:
     ST R0, 0E821H
     RT
 
+; cwapp only: check MENU (scan index 24) without a call, so LR stays intact.
+; The check is inlined at each key entry point below.
 ; key_down(k=ER0) -> ER0 = 1 while scan index k is held, else 0
 __key_down:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok1     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok1:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok1      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok1      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok1:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
+__key_down_raw:
     AND R0, #3FH
     MOV R2, R0
     SRL R2, #3
@@ -298,9 +329,37 @@ __key_down_n:
 ; key_hit(k=ER0) -> ER0 = 1 only on the call where k went from released to held
 ; (call it every loop iteration for every key you care about)
 __key_hit:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok2     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok2:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok2      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok2      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok2:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
     PUSH LR
     PUSH ER0
-    BL __key_down
+    BL __key_down_raw
     POP ER2
     AND R2, #3FH
     MOV R4, R2
@@ -333,6 +392,34 @@ __key_hit_no:
 
 ; key() -> ER0 = scan index 0..63 (8*KO bit + KI bit, MSB first) or -1
 __key:
+    PUSH ER0                   ;@cwapp
+    PUSH ER2                   ;@cwapp
+    PUSH ER4                   ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_menu_ok3     ;@cwapp
+    B __exit                   ;@cwapp
+__cwapp_menu_ok3:            ;@cwapp
+    MOV R2, #1                 ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #80H               ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok3      ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    ST R2, 0F046H              ;@cwapp
+    MOV R3, #4                 ;@cwapp
+    L R4, 0F040H               ;@cwapp
+    AND R4, R3                 ;@cwapp
+    BNE __cwapp_off_ok3      ;@cwapp
+    B __cwapp_off              ;@cwapp
+__cwapp_off_ok3:             ;@cwapp
+    POP ER4                    ;@cwapp
+    POP ER2                    ;@cwapp
+    POP ER0                    ;@cwapp
     MOV R0, #0
     MOV R1, #0
     MOV R2, #80H
@@ -353,6 +440,32 @@ __key_y:
     MOV ER0, #-1
 __key_f:
     RT
+
+; cwapp only: Shift+AC (OFF) mirrors the stock power-off path: turn the LCD
+; off, clear FCON, mask every interrupt, program STOPACP, and enter STOP.
+; ON then repowers the calculator and the firmware relaunches the app.
+__cwapp_off:                   ;@cwapp
+    MOV R0, #0                 ;@cwapp
+    ST R0, 0F03DH              ;@cwapp
+    ST R0, 0F00AH              ;@cwapp
+    MOV R2, #10H               ;@cwapp
+    MOV R3, #0F0H              ;@cwapp
+    MOV R4, #8                 ;@cwapp
+__cwapp_off_m:                 ;@cwapp
+    ST R0, [ER2]               ;@cwapp
+    ADD ER2, #1                ;@cwapp
+    ADD R4, #-1                ;@cwapp
+    BNE __cwapp_off_m          ;@cwapp
+    MOV R0, #50H               ;@cwapp
+    ST R0, 0F008H              ;@cwapp
+    MOV R0, #0A0H              ;@cwapp
+    ST R0, 0F008H              ;@cwapp
+    MOV R0, #2                 ;@cwapp
+    ST R0, 0F009H              ;@cwapp
+    NOP                        ;@cwapp
+    NOP                        ;@cwapp
+__cwapp_off_w:                 ;@cwapp
+    B __cwapp_off_w            ;@cwapp
 
 ; delay(n): n * ~ (busy loop) -- UNCALIBRATED, units arbitrary until measured on hardware
 __delay:

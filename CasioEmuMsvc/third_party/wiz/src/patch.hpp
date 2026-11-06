@@ -38,12 +38,13 @@ struct RomPatchReport {
 // for the bundled ROM and report hook_forced).
 RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
                          const std::string& source_name, int slot, bool force,
-                         bool allow_hook_mismatch);
+                         bool allow_hook_mismatch, bool patch_boot_entry = true);
 
 // As above, but patches an image that has already been compiled.  `slot` may be
 // 0 to use `image.slot`.  wizc uses this so a cwapp source is compiled only once.
 RomPatchReport patch_rom_image(std::vector<uint8_t> rom, const BuildResult& image,
-                               int slot, bool force, bool allow_hook_mismatch);
+                               int slot, bool force, bool allow_hook_mismatch,
+                               bool patch_boot_entry = true);
 
 // Validate the 26-slot... 12-slot menu table and the set_mode hook without
 // writing anything.  Returns an empty string when the image can be patched.

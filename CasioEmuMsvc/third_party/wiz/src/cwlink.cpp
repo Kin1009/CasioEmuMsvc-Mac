@@ -28,6 +28,7 @@ constexpr int kLegacySlots = 12;
 constexpr int kMenuBase = 0x7FF8;
 constexpr int kHook = 0x25E1E;
 constexpr uint8_t kHookNew[4] = {0x00, 0xF3, 0x40, 0x0E};  // B 3:0E40
+constexpr int kBootDispatch = 0x29448;  // BL main function 2:E234 in stock
 
 std::string basename_of(const std::string& path) {
     return fs::path(path).filename().string();
@@ -359,10 +360,16 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
     int legacy_count = 0;
     for (const Prepared& p : prepared)
         if (p.app.legacy) legacy_count++;
-    // 8 bytes per app (cmp+bne, B) plus the 12-byte replay tail.
+    const bool have_extras = legacy_count < (int)prepared.size();
+    // 8 bytes per app (cmp+bne, B) plus the 12-byte replay tail, prefixed by
+    // the 6-byte clear of the boot-path flag.
     const uint32_t dispatcher_size =
-        legacy_count > 1 ? (uint32_t)(8 * legacy_count + 12) : 0;
-    uint32_t cursor = kCodeStart + dispatcher_size;
+        legacy_count > 1 ? (uint32_t)(8 * legacy_count + 12 + 6) : 0;
+    // Multi-legacy ROMs also need a boot dispatcher: after ON the firmware
+    // reaches the main hook at 2:9448 with the running mode id in R0.  Each
+    // match sets the boot-path flag (clobbering R0) and calls the app.
+    const uint32_t boot_size = legacy_count > 1 ? (uint32_t)(18 * legacy_count + 4) : 0;
+    uint32_t cursor = kCodeStart + dispatcher_size + boot_size;
     if (cursor & 1) cursor++;
 
     std::vector<std::pair<uint32_t, uint32_t>> used;  // base, size
@@ -490,7 +497,7 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
 
     if (legacy_one) {
         RomPatchReport pr = patch_rom_image(rom, legacy_one->built, legacy_one->app.slot, force,
-                                            true);
+                                            true, prepared.size() == 1);
         for (const std::string& warning : pr.warnings) out.warnings.push_back(warning);
         if (!pr.ok) {
             out.error = pr.error;
@@ -519,8 +526,9 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
 
     if (legacy_count > 1) {
         // Dispatcher at 3:0E40: compare R8 with each legacy mode id, otherwise
-        // replay the two instructions the hook replaced.
-        std::vector<uint8_t> disp;
+        // replay the two instructions the hook replaced.  Clear the boot-path
+        // flag first: these apps are entered at _APP, not through _TRAMP.
+        std::vector<uint8_t> disp = {0x00, 0x00, 0x11, 0x90, 0xF4, 0xE7};
         for (Prepared& p : prepared) {
             if (!p.app.legacy) continue;
             append_compare(disp, p.app.mode_code);
@@ -544,6 +552,38 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
             const int off = kMenuBase + 6 * (p.app.slot - 1) + 2;
             rom[(size_t)off] = p.app.mode_code;
             rom[(size_t)off + 1] = 0;
+        }
+
+        // Boot dispatcher: 2:9448 calls the main function with R0 = D111 (the
+        // running mode id).  Relaunch that app; other ids tail-call the stock
+        // menu function, whose return address is already on the stack.  When
+        // extras exist cwmode overwrites the hook, so that case is handled
+        // after the cwmode patch below.
+        if (!have_extras) {
+            std::vector<uint8_t> boot;
+            for (Prepared& p : prepared) {
+                if (!p.app.legacy) continue;
+                boot.push_back(p.app.mode_code);
+                boot.push_back(0x70);  // cmp r0, #id
+                boot.push_back(0x07);
+                boot.push_back(0xC8);  // bne +7 words (skip flag set, BL and B)
+                boot.insert(boot.end(), {0x01, 0x00, 0x11, 0x90, 0xF4, 0xE7});
+                std::vector<uint8_t> bl = branch(0x01, p.app.entry);
+                boot.insert(boot.end(), bl.begin(), bl.end());
+                std::vector<uint8_t> fb = branch(0x00, 0x2E234);
+                boot.insert(boot.end(), fb.begin(), fb.end());
+            }
+            std::vector<uint8_t> boot_fb = branch(0x00, 0x2E234);
+            boot.insert(boot.end(), boot_fb.begin(), boot_fb.end());
+            if (boot.size() != boot_size) {
+                out.error = "internal error: boot dispatcher size mismatch";
+                return out;
+            }
+            const uint32_t boot_addr = kCodeStart + dispatcher_size;
+            if (!blank_or_force(boot_addr, (uint32_t)boot.size(), manifest_path)) return out;
+            std::memcpy(rom.data() + boot_addr, boot.data(), boot.size());
+            std::vector<uint8_t> hook_boot = branch(0x01, boot_addr);
+            std::memcpy(rom.data() + kBootDispatch, hook_boot.data(), hook_boot.size());
         }
     }
 
@@ -578,6 +618,37 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
             return out;
         }
         rom = std::move(cr.rom);
+        if (legacy_count > 0) {
+            // cwmode took over the main hook.  Put a small legacy dispatcher in
+            // front of its target so ON also relaunches the legacy app.
+            const uint32_t cw_fallback = ((uint32_t)(rom[kBootDispatch + 1] & 0x0F) << 16) |
+                                         rom[kBootDispatch + 2] |
+                                         ((uint32_t)rom[kBootDispatch + 3] << 8);
+            std::vector<uint8_t> boot;
+            for (Prepared& p : prepared) {
+                if (!p.app.legacy) continue;
+                boot.push_back(p.app.mode_code);
+                boot.push_back(0x70);  // cmp r0, #id
+                boot.push_back(0x07);
+                boot.push_back(0xC8);  // bne +7 words (skip flag set, BL and B)
+                boot.insert(boot.end(), {0x01, 0x00, 0x11, 0x90, 0xF4, 0xE7});
+                std::vector<uint8_t> bl = branch(0x01, p.app.entry);
+                boot.insert(boot.end(), bl.begin(), bl.end());
+                std::vector<uint8_t> fb = branch(0x00, cw_fallback);
+                boot.insert(boot.end(), fb.begin(), fb.end());
+            }
+            std::vector<uint8_t> fb = branch(0x00, cw_fallback);
+            boot.insert(boot.end(), fb.begin(), fb.end());
+            uint32_t boot_addr = (cr.final_cursor + 1) & ~1u;
+            if (boot_addr + boot.size() > kRomSize) {
+                out.error = "the boot dispatcher does not fit after the appended modes";
+                return out;
+            }
+            if (!blank_or_force(boot_addr, (uint32_t)boot.size(), manifest_path)) return out;
+            std::memcpy(rom.data() + boot_addr, boot.data(), boot.size());
+            std::vector<uint8_t> hook_boot = branch(0x00, boot_addr);
+            std::memcpy(rom.data() + kBootDispatch, hook_boot.data(), hook_boot.size());
+        }
     }
 
     // ---- report

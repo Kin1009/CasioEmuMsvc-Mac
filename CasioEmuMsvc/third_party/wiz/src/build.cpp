@@ -131,7 +131,132 @@ std::string make_boot(const Target& target, uint32_t org) {
     return join(keep, "\n") + "\n";
 }
 
-std::string runtime_for(const Target& target) {
+static const char* kCwappReturnLegacy =
+    "__cwapp_return:\n"
+    "    l r0, 0E7F4H\n"
+    "    mov r1, #0\n"
+    "    cmp r0, r1\n"
+    "    bne __cwapp_return_boot\n"
+    "    l r0, 0E5D3H\n"
+    "    l r1, 0E5D4H\n"
+    "    mov er4, #0\n"
+    "    cmp er0, er4\n"
+    "    bne __cwapp_return_go_l\n"
+    "    b __cwapp_reset\n"
+    "__cwapp_return_go_l:\n"
+    "    mov er8, er0\n"
+    "    mov r2, #0D5h\n"
+    "    mov r3, #0E5h\n"
+    "    mov r4, #0\n"
+    "    mov r5, #0F0h\n"
+    "__cwapp_return_loop_l:\n"
+    "    cmp er0, er4\n"
+    "    beq __cwapp_return_pop_l\n"
+    "    l r6, [er2]\n"
+    "    st r6, [er0]\n"
+    "    add er0, #1\n"
+    "    add er2, #1\n"
+    "    b __cwapp_return_loop_l\n"
+    "__cwapp_return_pop_l:\n"
+    "    mov sp, er8\n"
+    "    pop er14\n"
+    "    pop er12\n"
+    "    pop er10\n"
+    "    pop er8\n"
+    "    pop er6\n"
+    "    pop er4\n"
+    "    pop er2\n"
+    "    pop er0\n"
+    "    pop psw\n"
+    "    pop lr\n"
+    "    mov r0, #1\n"
+    "    st r0, 0D113H\n"
+    "    mov r0, #0\n"
+    "    bl 2AD4CH\n"
+    "    b 25E22h\n"
+    "__cwapp_return_boot:\n"
+    "    l r0, 0E5D3H\n"
+    "    l r1, 0E5D4H\n"
+    "    mov er4, #0\n"
+    "    cmp er0, er4\n"
+    "    bne __cwapp_return_go_b\n"
+    "    b __cwapp_reset\n"
+    "__cwapp_return_go_b:\n"
+    "    mov er8, er0\n"
+    "    mov r2, #0D5h\n"
+    "    mov r3, #0E5h\n"
+    "    mov r4, #0\n"
+    "    mov r5, #0F0h\n"
+    "__cwapp_return_loop_b:\n"
+    "    cmp er0, er4\n"
+    "    beq __cwapp_return_pop_b\n"
+    "    l r6, [er2]\n"
+    "    st r6, [er0]\n"
+    "    add er0, #1\n"
+    "    add er2, #1\n"
+    "    b __cwapp_return_loop_b\n"
+    "__cwapp_return_pop_b:\n"
+    "    mov sp, er8\n"
+    "    pop er14\n"
+    "    pop er12\n"
+    "    pop er10\n"
+    "    pop er8\n"
+    "    pop er6\n"
+    "    pop er4\n"
+    "    pop er2\n"
+    "    pop er0\n"
+    "    pop psw\n"
+    "    mov r0, #0C1H\n"
+    "    st r0, 0D111H\n"
+    "    mov r0, #1\n"
+    "    st r0, 0D113H\n"
+    "    mov r0, #0\n"
+    "    bl 2AD4CH\n"
+    "    b 25E22h\n";
+
+static const char* kCwappReturnExtra =
+    "; cwapp clean return to the mode routine that called this app.\n"
+    "__cwapp_return:\n"
+    "    l r0, 0E5D3h\n"
+    "    l r1, 0E5D4h\n"
+    "    mov er4, #0\n"
+    "    cmp er0, er4\n"
+    "    bne __cwapp_return_go\n"
+    "    b __cwapp_reset\n"
+    "__cwapp_return_go:\n"
+    "    mov er8, er0\n"
+    "    mov r2, #0D5h\n"
+    "    mov r3, #0E5h\n"
+    "    mov r4, #0\n"
+    "    mov r5, #0F0h\n"
+    "__cwapp_return_loop:\n"
+    "    cmp er0, er4\n"
+    "    beq __cwapp_return_pop\n"
+    "    l r6, [er2]\n"
+    "    st r6, [er0]\n"
+    "    add er0, #1\n"
+    "    add er2, #1\n"
+    "    b __cwapp_return_loop\n"
+    "__cwapp_return_pop:\n"
+    "    mov sp, er8\n"
+    "    pop er14\n"
+    "    pop er12\n"
+    "    pop er10\n"
+    "    pop er8\n"
+    "    pop er6\n"
+    "    pop er4\n"
+    "    pop er2\n"
+    "    pop er0\n"
+    "    pop psw\n"
+    "    mov r0, #0C1H\n"
+    "    st r0, 0D111H\n"
+    "    mov r0, #1\n"
+    "    st r0, 0D113H\n"
+    "    mov r0, #0\n"
+    "    bl 2AD4CH\n"
+    "    pop pc\n";
+
+std::string runtime_for(const Target& target, bool extra_app) {
     std::string drop = target.planes == 2 ? ";@1p" : ";@2p";
     bool ok = false;
     std::string text = read_asset("runtime.asm", ok);
@@ -146,20 +271,25 @@ std::string runtime_for(const Target& target) {
         std::string r = rstrip(line);
         if (ends_with(r, drop)) continue;
         if (ends_with(r, ";@seg") && !target.rom_seg) continue;
+        if (ends_with(r, ";@cwapp") && target.name != "cwapp") continue;
         if (ends_with(r, ";@off")) {  // VRAM row offset (cw: user y=0 is VRAM row 1)
             if (!target.row_off) continue;
             line = replace_all(line, "#32 ;@off", fmt("#%d ;@off", 32 * target.row_off));
         }
         out.push_back(line);
     }
+    if (target.name == "cwapp") {
+        const std::string block = extra_app ? kCwappReturnExtra : kCwappReturnLegacy;
+        for (const std::string& line : split(block, '\n')) out.push_back(line);
+    }
     return join(out, "\n");
 }
 
 // ------------------------------------------------------------------ pipeline
 static BuildResult finish(const std::string& body, const std::map<std::string, int>& variables,
-                          const Target& tg, uint32_t org = 0) {
+                          const Target& tg, uint32_t org = 0, bool extra_app = false) {
     std::string full = make_boot(tg, org) + body;
-    if (tg.name != "fwnx") full += runtime_for(tg);
+    if (tg.name != "fwnx") full += runtime_for(tg, extra_app);
     Assembler as(tg.core);
     auto img = as.assemble(full);
     BuildResult res;
@@ -304,7 +434,7 @@ BuildResult build_cwiz(const std::string& src, const std::string& target,
     CwizResult r = compile_cwiz(selected, tg);
     std::map<std::string, int> vars;
     for (const auto& kv : r.variables) vars[kv.first] = kv.second.addr;
-    BuildResult res = finish(r.asm_body, vars, tg, org);
+    BuildResult res = finish(r.asm_body, vars, tg, org, pp.cwapp_extra);
     res.cwapp = tg.name == "cwapp";
     res.slot = pp.slot;
     res.cwapp_extra = pp.cwapp_extra;

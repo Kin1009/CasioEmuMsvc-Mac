@@ -21,6 +21,8 @@ constexpr int kHook = 0x25E1E;
 const uint8_t kHookOld[4] = {0x03, 0xE8, 0x30, 0x68};
 const uint8_t kHookNew[4] = {0x00, 0xF3, 0x40, 0x0E};  // B 3:0E40
 constexpr int kBase = 0x30E40;
+constexpr int kBootDispatch = 0x29448;  // BL 2:E234 in the stock mode dispatcher
+const uint8_t kBootDispatchOld[4] = {0x01, 0xF2, 0x34, 0xE2};
 const char* kSlotChars = "123456789ABC";
 
 int u16(const std::vector<uint8_t>& r, int o) {
@@ -111,7 +113,7 @@ bool validate_rom(RomPatchReport& out, const std::vector<uint8_t>& rom, bool all
 
 // Write a compiled cwapp image into `rom` and select `slot`.
 void apply_program(RomPatchReport& out, std::vector<uint8_t>& rom, const BuildResult& br,
-                   int slot, bool force) {
+                   int slot, bool force, bool patch_boot_entry) {
     out.slot = slot;
     std::vector<uint8_t> code;
     if (br.rom.size() > (size_t)kBase) code.assign(br.rom.begin() + kBase, br.rom.end());
@@ -135,6 +137,25 @@ void apply_program(RomPatchReport& out, std::vector<uint8_t>& rom, const BuildRe
     for (int i = 0; i < 4; i++) rom[(size_t)kHook + i] = kHookNew[i];
     out.changes.push_back(fmt("%05X  hook  %s -> %s", kHook,
                               hex_bytes(kHookOld, 4).c_str(), hex_bytes(kHookNew, 4).c_str()));
+
+    if (patch_boot_entry) {
+        auto boot_sym = br.syms.find("_BOOT_DISPATCH");
+        if (boot_sym == br.syms.end()) {
+            out.error = "the cwapp image has no _BOOT_DISPATCH entry";
+            return;
+        }
+        const uint32_t boot = (uint32_t)boot_sym->second;
+        if (std::memcmp(&rom[(size_t)kBootDispatch], kBootDispatchOld, 4) != 0)
+            out.warnings.push_back(fmt(
+                "mode dispatcher at %05X is not the known BL 2:E234; ON/reboot may not "
+                "relaunch the app", kBootDispatch));
+        rom[(size_t)kBootDispatch] = 0x01;
+        rom[(size_t)kBootDispatch + 1] = (uint8_t)(0xF0 | ((boot >> 16) & 0x0F));
+        rom[(size_t)kBootDispatch + 2] = (uint8_t)(boot & 0xFF);
+        rom[(size_t)kBootDispatch + 3] = (uint8_t)((boot >> 8) & 0xFF);
+        out.changes.push_back(fmt("%05X  boot dispatcher BL 2:E234 -> BL %05X", kBootDispatch,
+                                  boot));
+    }
 
     int o = kMenuBase + 6 * (slot - 1) + 2;
     std::string old = hex_bytes(&rom[(size_t)o], 2);
@@ -161,7 +182,7 @@ std::string validate_580_rom(const std::vector<uint8_t>& rom, bool allow_hook_mi
 
 RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
                          const std::string& source_name, int slot, bool force,
-                         bool allow_hook_mismatch) {
+                         bool allow_hook_mismatch, bool patch_boot_entry) {
     RomPatchReport out;
     out.slot = slot;
 
@@ -210,12 +231,12 @@ RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
         out.error = slot_error(slot);
         return out;
     }
-    apply_program(out, rom, br, slot, force);
+    apply_program(out, rom, br, slot, force, patch_boot_entry);
     return out;
 }
 
 RomPatchReport patch_rom_image(std::vector<uint8_t> rom, const BuildResult& image, int slot,
-                               bool force, bool allow_hook_mismatch) {
+                               bool force, bool allow_hook_mismatch, bool patch_boot_entry) {
     RomPatchReport out;
     out.slot = slot;
 
@@ -231,7 +252,7 @@ RomPatchReport patch_rom_image(std::vector<uint8_t> rom, const BuildResult& imag
         out.error = slot_error(slot);
         return out;
     }
-    apply_program(out, rom, image, slot, force);
+    apply_program(out, rom, image, slot, force, patch_boot_entry);
     return out;
 }
 
