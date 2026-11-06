@@ -31,6 +31,13 @@ struct BuildResult {
     std::map<std::string, int> syms;       // assembler symbol table
     bool cwapp = false;                    // built for the fx-580VN X menu
     int slot = 2;                          // #slot n (1..12); 2 when absent
+    // Extra app form: `#cwapp <slot> <text> <unselected> <selected>`.
+    // `cwapp_extra` is false for the legacy bare `#cwapp` form.
+    bool cwapp_extra = false;
+    int cwapp_slot = 0;
+    std::string cwapp_text;
+    std::string cwapp_icon;
+    std::string cwapp_icon_selected;
 };
 
 // Where runtime.asm and the boot templates live. The drivers call set_data_dir()
@@ -40,18 +47,20 @@ void set_data_dir(const std::string& dir);
 const std::string& data_dir();
 
 // Boot template for `target`, with the linker-only directives removed.
-std::string make_boot(const Target& target);
+// `org` overrides the template's ORG (used to place each app of a .cwapplink
+// project at its own code block); 0 keeps the template's own origin.
+std::string make_boot(const Target& target, uint32_t org = 0);
 
 // runtime.asm with the lines tagged for the other LCD type removed.
 std::string runtime_for(const Target& target);
 
 BuildResult build_source(const std::string& src, const std::string& target,
-                         const std::string& path = "");
+                         const std::string& path = "", uint32_t org = 0);
 
 // `path` is the file `src` came from; it is only used to resolve #include and to
 // label diagnostics. Pass "" when the source has no file.
 BuildResult build_cwiz(const std::string& src, const std::string& target,
-                       const std::string& path = "");
+                       const std::string& path = "", uint32_t org = 0);
 
 // Compile a file; `target` may be empty for the pipeline default, `forced_lang`
 // may be "wiz" / "cwiz" / "" (by extension).
@@ -60,7 +69,7 @@ struct PathBuild {
     std::string lang;
 };
 PathBuild build_path(const std::string& path, const std::string& target,
-                     const std::string& forced_lang = "");
+                     const std::string& forced_lang = "", uint32_t org = 0);
 
 // "wiz" or "cwiz" for `path` (forced overrides the extension).
 std::string language_of(const std::string& path, const std::string& forced = "");

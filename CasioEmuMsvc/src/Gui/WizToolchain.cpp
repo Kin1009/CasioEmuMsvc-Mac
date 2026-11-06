@@ -44,6 +44,7 @@ bool g_shellBuildRunRequest = false;
 #include "build.hpp"
 #include "common.hpp"
 #include "cpre.hpp"
+#include "cwlink.hpp"
 #include "lint.hpp"
 #include "patch.hpp"
 #include "rop.hpp"
@@ -262,12 +263,19 @@ public:
 	}
 
 	bool OpenEditorDocument(const std::string& path, const std::string& text) override {
-		const std::string name = std::filesystem::path(path).filename().string();
+		const std::filesystem::path source(path);
+		const std::string name = source.filename().string();
 		std::snprintf(file_name_, sizeof(file_name_), "%s", name.c_str());
+		working_dir_ = source.parent_path().string();
 		editor_.SetText(text);
 		editor_.SetErrorMarkers({});
 		diags_.clear();
 		log_.clear();
+		if (wiz::is_cwapplink_path(path)) {
+			target_idx_ = 2;
+			lang_idx_ = 2;
+			picked_target_ = true;
+		}
 		return true;
 	}
 
@@ -497,10 +505,11 @@ private:
 				 const std::string& forced_target = std::string()) {
 		const std::string target = forced_target.empty() ? HardwareTarget() : forced_target;
 		try {
+			const std::string source_path = SourcePath();
 			if (EffectiveLang() == "cwiz")
-				out = wiz::build_cwiz(src, target, file_name_);
+				out = wiz::build_cwiz(src, target, source_path);
 			else
-				out = wiz::build_source(src, target);
+				out = wiz::build_source(src, target, source_path);
 			return true;
 		} catch (const wiz::CompileError& e) {
 			diag = {Sev::Error, e.line, e.col, e.what()};
@@ -526,6 +535,10 @@ private:
 		built_ok_ = false;
 		editor_.SetErrorMarkers({});
 		wiz::set_data_dir(WizDataDir());
+		if (wiz::is_cwapplink_path(SourcePath())) {
+			DoBuildLink(run_after);
+			return;
+		}
 
 		const std::string src = editor_.GetText();
 		PickTargetFromModel();
@@ -573,6 +586,93 @@ private:
 				PatchCurrentROM();
 			else
 				LoadIntoEmulator();
+		}
+	}
+
+	bool ApplySessionRom(const std::string& name, const std::vector<uint8_t>& rom,
+						 std::string& error) {
+		try {
+			m_emu->WriteModelSessionResource(name, rom);
+		} catch (const std::exception& e) {
+			error = std::string("cannot write the session image: ") + e.what();
+			return false;
+		}
+		const bool was_paused = m_emu->GetPaused();
+		m_emu->SetPaused(true);
+		bool loaded = false;
+		{
+			std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
+			const std::string previous = m_emu->ModelDefinition.rom_path;
+			m_emu->ModelDefinition.rom_path = name;
+			loaded = m_emu->chipset.ReloadRom(error);
+			if (!loaded)
+				m_emu->ModelDefinition.rom_path = previous;
+		}
+		m_emu->SetPaused(was_paused);
+		return loaded;
+	}
+
+	// A .cwapplink project: compile every listed app, place each one in its own
+	// block, append the extra apps as modes, and load the single resulting ROM.
+	void DoBuildLink(bool run_after) {
+		log_.clear();
+		diags_.clear();
+		built_ok_ = false;
+		editor_.SetErrorMarkers({});
+		if (!m_emu) {
+			AddLog(Sev::Error, "no running model");
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+		if (!Is580()) {
+			AddLog(Sev::Error,
+				   "cwapplink projects build fx-580VN X app code; the fx-880BTG has no cwapp "
+				   "boot/runtime target");
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+		const std::string project = SourcePath();
+		std::vector<uint8_t> stock;
+		try {
+			stock = m_emu->ReadModelResource(StockRomPath());
+		} catch (const std::exception& e) {
+			AddLog(Sev::Error, std::string("cannot read the stock ROM: ") + e.what());
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+		wiz::CwappLinkResult result = wiz::build_cwapplink(project, stock, false);
+		for (const std::string& warning : result.warnings) AddLog(Sev::Warning, warning);
+		if (!result.ok) {
+			AddLog(Sev::Error,
+				   wiz::fmt("%s%s: %s", result.error_file.empty() ? project.c_str() : result.error_file.c_str(),
+							result.error_line > 0 ? wiz::fmt(":%d", result.error_line).c_str() : "",
+							result.error.c_str()));
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+
+		bin_path_ = std::filesystem::path(project).replace_extension(".bin").string();
+		asm_path_.clear();
+		WriteFile(bin_path_, std::string(result.rom.begin(), result.rom.end()));
+		AddLog(Sev::Note, wiz::fmt("cwapplink: %zu app(s), %zu bytes ROM", result.apps.size(),
+								   result.rom.size()));
+		for (const wiz::CwappLinkApp& app : result.apps) {
+			AddLog(Sev::Note,
+				   wiz::fmt("  slot %d  key %-3s  entry %05X  %5u bytes  %s", app.slot,
+							app.key.empty() ? "-" : app.key.c_str(), app.entry, app.size,
+							std::filesystem::path(app.path).filename().string().c_str()));
+		}
+		built_ok_ = true;
+		PublishBuildSummary(casioemu::wizui::BuildMode::Cwapp, result.rom.size(),
+							wiz::fmt("%zu apps", result.apps.size()));
+		casioemu::shell::NotifyBuildFinished(true);
+		if (run_after) {
+			std::string error;
+			if (!ApplySessionRom("wiz/rom-cwapplink.bin", result.rom, error)) {
+				AddLog(Sev::Error, "the emulator refused the multi-app ROM: " + error);
+				return;
+			}
+			AddLog(Sev::Note, "loaded the multi-app ROM into the running model");
 		}
 	}
 
@@ -855,6 +955,31 @@ private:
 			return;
 		}
 
+		// Extra app form: `#cwapp <slot> <text> <icon> <selected>` appends a
+		// new mode (and its own code block) instead of replacing a menu slot.
+		if (image.cwapp_extra) {
+			wiz::CwappLinkResult lr =
+				wiz::build_cwapp_single_image(image, SourcePath(), rom, false);
+			for (const std::string& warning : lr.warnings) AddLog(Sev::Warning, warning);
+			if (!lr.ok) {
+				AddLog(Sev::Error, wiz::fmt("extra app: %s", lr.error.c_str()));
+				return;
+			}
+			const wiz::CwappLinkApp app = lr.apps.empty() ? wiz::CwappLinkApp{} : lr.apps.front();
+			const std::string name = wiz::fmt("wiz/rom-extra-%d.bin", app.slot);
+			std::string error;
+			if (!ApplySessionRom(name, lr.rom, error)) {
+				AddLog(Sev::Error, "the emulator refused the extra-app ROM: " + error);
+				return;
+			}
+			AddLog(Sev::Note,
+				   wiz::fmt("extra app slot %d key %s added; stock ROM on disk is unchanged",
+							app.slot, app.key.empty() ? "-" : app.key.c_str()));
+			PublishBuildSummary(casioemu::wizui::BuildMode::Cwapp, lr.rom.size(),
+								wiz::fmt("slot %d", app.slot));
+			return;
+		}
+
 		// A #slot n directive in the source chooses the menu slot; otherwise the
 		// selector next to the button does.
 		int patch_slot = slot_ + 1;
@@ -925,6 +1050,16 @@ private:
 								  "123456789ABC"[patch_slot - 1], report.code_size,
 								  in_place ? " (original ROM overwritten, backup at .orig)"
 										   : (base_file.empty() ? "" : " (custom ROM copy)")));
+	}
+
+	// The directory of the opened document/example.  Build and file open share
+	// this state, so relative #include, #binary and icon paths resolve against
+	// the document, not the process working directory.
+	std::string SourcePath() const {
+		if (working_dir_.empty()) return file_name_;
+		const std::filesystem::path name(file_name_);
+		if (name.is_absolute()) return name.string();
+		return (std::filesystem::path(working_dir_) / name).string();
 	}
 
 	std::string Stem() const {
@@ -1113,6 +1248,7 @@ private:
 	}
 
 	void LoadExample(const std::filesystem::path& path) {
+		working_dir_ = path.parent_path().string();
 		std::ifstream stream(path, std::ios::binary);
 		if (!stream) {
 			AddLog(Sev::Error, "cannot open " + path.string());
@@ -1127,6 +1263,10 @@ private:
 		std::snprintf(file_name_, sizeof file_name_, "%s", name.c_str());
 		const std::string ext = path.extension().string();
 		lang_idx_ = (ext == ".wz") ? 1 : 2;
+		if (ext == ".cwapplink") {
+			target_idx_ = 2;
+			picked_target_ = true;
+		}
 
 		const bool is_rop = text.find("#rop") != std::string::npos;
 		const bool is_880 = text.find("880") != std::string::npos &&
@@ -1157,6 +1297,7 @@ private:
 
 	static std::string ExampleFileLabel(const std::filesystem::path& path) {
 		const std::string ext = path.extension().string();
+		if (ext == ".cwapplink") return path.stem().string() + "  (CWapp project)";
 		return path.stem().string() + "  (" + (ext == ".wz" ? "Wiz" : "CWiz") + ")";
 	}
 
@@ -1167,7 +1308,7 @@ private:
 			if (!it->is_regular_file(ec) || it->path().parent_path() == root)
 				continue;
 			const std::string ext = it->path().extension().string();
-			if (ext == ".wz" || ext == ".cwiz")
+			if (ext == ".wz" || ext == ".cwiz" || ext == ".cwapplink")
 				names.insert(it->path().filename().string());
 		}
 		return names;
@@ -1183,7 +1324,7 @@ private:
 				dirs.push_back(it->path());
 			} else if (it->is_regular_file(ec)) {
 				const std::string ext = it->path().extension().string();
-				if (ext != ".wz" && ext != ".cwiz")
+				if (ext != ".wz" && ext != ".cwiz" && ext != ".cwapplink")
 					continue;
 				if (root && nested.count(it->path().filename().string()))
 					continue;
@@ -1748,7 +1889,21 @@ private:
 
 		std::vector<uint8_t> rom;
 		try {
-			if (last_build_.cwapp) {
+			if (last_build_.cwapp_extra) {
+				if (!Is580()) {
+					AddLog(Sev::Error, "the firmware-app patch is only supported on the fx-580VN X");
+					return;
+				}
+				wiz::CwappLinkResult link = wiz::build_cwapp_single_image(
+					last_build_, SourcePath(), m_emu->ReadModelResource(stock), true);
+				for (const std::string& warning : link.warnings)
+					AddLog(Sev::Warning, warning);
+				if (!link.ok) {
+					AddLog(Sev::Error, "extra app: " + link.error);
+					return;
+				}
+				rom = std::move(link.rom);
+			} else if (last_build_.cwapp) {
 				if (!Is580()) {
 					AddLog(Sev::Error, "the firmware-app patch is only supported on the fx-580VN X");
 					return;
@@ -1860,6 +2015,7 @@ private:
 	std::string stock_rom_;
 	std::string stock_rom_path_;
 	std::string original_rom_override_;
+	std::string working_dir_;
 	std::string bin_path_;
 	std::string asm_path_;
 	std::string last_asm_listing_;

@@ -93,6 +93,12 @@ static bool is_dir_directive(const std::string& line) {
 }
 
 // `re.match(r'^\s*b\s+_main\s*$', line, re.I)`
+static bool is_org_directive(const std::string& line) {
+    std::string t = to_lower(strip(line));
+    return t.compare(0, 3, "org") == 0 &&
+           (t.size() == 3 || t[3] == ' ' || t[3] == '\t');
+}
+
 static bool is_b_main(const std::string& line) {
     std::vector<std::string> toks;
     std::string cur;
@@ -108,7 +114,7 @@ static bool is_b_main(const std::string& line) {
     return to_lower(toks[0]) == "b" && to_lower(toks[1]) == "_main";
 }
 
-std::string make_boot(const Target& target) {
+std::string make_boot(const Target& target, uint32_t org) {
     bool ok = false;
     std::string t = read_asset(target.tmpl, ok);
     if (!ok) throw std::runtime_error("cannot read boot template " + target.tmpl +
@@ -119,6 +125,7 @@ std::string make_boot(const Target& target) {
         std::string line = raw;
         if (is_dir_directive(line)) continue;
         if (is_b_main(line)) line = "    B __wiz_entry";
+        if (org && is_org_directive(line)) line = fmt("    ORG %Xh", org);
         keep.push_back(line);
     }
     return join(keep, "\n") + "\n";
@@ -150,8 +157,8 @@ std::string runtime_for(const Target& target) {
 
 // ------------------------------------------------------------------ pipeline
 static BuildResult finish(const std::string& body, const std::map<std::string, int>& variables,
-                          const Target& tg) {
-    std::string full = make_boot(tg) + body;
+                          const Target& tg, uint32_t org = 0) {
+    std::string full = make_boot(tg, org) + body;
     if (tg.name != "fwnx") full += runtime_for(tg);
     Assembler as(tg.core);
     auto img = as.assemble(full);
@@ -224,18 +231,38 @@ static std::string expand_wiz_imports(const std::string& src, const std::string&
     return expand(src, main_dir);
 }
 
+static int extra_cwapp_line(const std::string& src) {
+    int number = 0;
+    for (const std::string& raw : split(src, '\n')) {
+        number++;
+        const std::string t = strip(raw);
+        if (t.rfind("#cwapp", 0) == 0 && t.size() > 6 &&
+            (t[6] == ' ' || t[6] == '\t'))
+            return number;
+    }
+    return 0;
+}
+
 BuildResult build_source(const std::string& src, const std::string& target,
-                         const std::string& path) {
+                         const std::string& path, uint32_t org) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
+    const int extra_line = tg.name == "cwapp" ? extra_cwapp_line(src) : 0;
+    if (extra_line > 0) {
+        throw CompileError(
+            "the '#cwapp <slot> <text> <icon> <selected>' form is CWiz only",
+            extra_line, 0,
+            "use a .cwiz source for an extra app, or the bare '#cwapp' + '#slot n' form",
+            "build.cwapp-extra-wiz");
+    }
     std::string selected = select_sections(expand_wiz_imports(src, target, path), tg);
     WizResult r = compile_to_asm(selected, tg);
-    BuildResult res = finish(r.asm_body, r.variables, tg);
+    BuildResult res = finish(r.asm_body, r.variables, tg, org);
     res.cwapp = tg.name == "cwapp";
     return res;
 }
 
 BuildResult build_cwiz(const std::string& src, const std::string& target,
-                       const std::string& path) {
+                       const std::string& path, uint32_t org) {
     const Target& tg = get_target(target.empty() ? DEFAULT_TARGET : target);
     // CWiz is the language with preprocessor directives; Wiz uses `#` for comments.
     CwizPreprocessInfo pp = preprocess_cwiz_info(src, path, tg.name);
@@ -277,9 +304,14 @@ BuildResult build_cwiz(const std::string& src, const std::string& target,
     CwizResult r = compile_cwiz(selected, tg);
     std::map<std::string, int> vars;
     for (const auto& kv : r.variables) vars[kv.first] = kv.second.addr;
-    BuildResult res = finish(r.asm_body, vars, tg);
+    BuildResult res = finish(r.asm_body, vars, tg, org);
     res.cwapp = tg.name == "cwapp";
     res.slot = pp.slot;
+    res.cwapp_extra = pp.cwapp_extra;
+    res.cwapp_slot = pp.cwapp_extra ? pp.cwapp_slot : pp.slot;
+    res.cwapp_text = pp.cwapp_text;
+    res.cwapp_icon = pp.cwapp_icon;
+    res.cwapp_icon_selected = pp.cwapp_icon_selected;
     return res;
 }
 
@@ -293,16 +325,16 @@ std::string language_of(const std::string& path, const std::string& forced) {
 }
 
 PathBuild build_path(const std::string& path, const std::string& target,
-                     const std::string& forced_lang) {
+                     const std::string& forced_lang, uint32_t org) {
     bool ok = false;
     std::string text = read_text_file(path, &ok);
     if (!ok) throw CompileError("cannot read file: " + path);
     PathBuild pb;
     pb.lang = language_of(path, forced_lang);
     if (pb.lang == "cwiz")
-        pb.r = build_cwiz(text, target, path);
+        pb.r = build_cwiz(text, target, path, org);
     else
-        pb.r = build_source(text, target, path);
+        pb.r = build_source(text, target, path, org);
     return pb;
 }
 

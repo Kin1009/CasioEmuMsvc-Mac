@@ -8,6 +8,7 @@
 
 #include "build.hpp"
 #include "common.hpp"
+#include "cwlink.hpp"
 
 namespace wiz {
 namespace {
@@ -152,13 +153,17 @@ void apply_program(RomPatchReport& out, std::vector<uint8_t>& rom, const BuildRe
 
 }  // namespace
 
+std::string validate_580_rom(const std::vector<uint8_t>& rom, bool allow_hook_mismatch) {
+    RomPatchReport out;
+    if (!validate_rom(out, rom, allow_hook_mismatch)) return out.error;
+    return "";
+}
+
 RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
                          const std::string& source_name, int slot, bool force,
                          bool allow_hook_mismatch) {
     RomPatchReport out;
     out.slot = slot;
-
-    if (!validate_rom(out, rom, allow_hook_mismatch)) return out;
 
     BuildResult br;
     try {
@@ -176,6 +181,29 @@ RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
         return out;
     }
 
+    if (br.cwapp_extra) {
+        CwappLinkResult lr = build_cwapp_single(source_name, rom, force);
+        for (const std::string& warning : lr.warnings) out.warnings.push_back(warning);
+        if (!lr.ok) {
+            out.error = lr.error;
+            out.error_file = lr.error_file;
+            out.error_line = lr.error_line;
+            return out;
+        }
+        if (!lr.apps.empty()) {
+            const CwappLinkApp& app = lr.apps.front();
+            out.slot = app.slot;
+            out.code_size = (int)app.size;
+            out.app_entry = app.entry;
+        }
+        out.rom = std::move(lr.rom);
+        out.changes = lr.summary;
+        out.ok = true;
+        return out;
+    }
+
+    if (!validate_rom(out, rom, allow_hook_mismatch)) return out;
+
     if (slot <= 0) slot = br.slot;
     out.slot = slot;
     if (!(1 <= slot && slot <= kMenuSlots)) {
@@ -191,6 +219,10 @@ RomPatchReport patch_rom_image(std::vector<uint8_t> rom, const BuildResult& imag
     RomPatchReport out;
     out.slot = slot;
 
+    if (image.cwapp_extra) {
+        out.error = "the extra #cwapp form needs its source file; use the .cwapplink builder";
+        return out;
+    }
     if (!validate_rom(out, rom, allow_hook_mismatch)) return out;
 
     if (slot <= 0) slot = image.slot;

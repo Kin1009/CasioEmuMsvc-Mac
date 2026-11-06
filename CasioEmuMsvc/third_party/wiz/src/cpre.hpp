@@ -34,6 +34,13 @@ struct CwizPreprocessInfo {
     unsigned long org = 0;   // that origin (the patch slot still picks the real address)
     std::string binary_path; // #binary directive file path (if any)
     std::vector<std::string> binary_asm; // DB lines emitted
+    // `#cwapp <slot> <text> <unselected> <selected>` (extra app).  False for
+    // the legacy bare `#cwapp` form.
+    bool cwapp_extra = false;
+    int cwapp_slot = 0;
+    std::string cwapp_text;
+    std::string cwapp_icon;
+    std::string cwapp_icon_selected;
 };
 
 // Preprocess `src` (which came from file `file`) for target `target` (an internal

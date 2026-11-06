@@ -94,6 +94,9 @@ public:
             "model is rebooted on it.");
         ImGui::Text("Model: %s   (%s)", model.c_str(),
                     is580 ? "0x40000 ROM, text names" : "0x60000 code window, 64x13 text images");
+        ImGui::TextDisabled(
+            "Appended modes take the next shortcut labels in order: D, E, F, x, y, z, M, "
+            "+, -, *, /, .");
         ImGui::Separator();
 
         int count = count_;

@@ -481,6 +481,43 @@ private:
     }
 };
 
+// Split a directive argument list on whitespace, honouring double quotes and
+// backslash escapes inside them.  Used by `#cwapp <slot> <text> <icon> <icon>`.
+static std::vector<std::string> split_quoted_args(const std::string& text, std::string& err) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && std::isspace((unsigned char)text[i])) i++;
+        if (i >= text.size()) break;
+        std::string token;
+        if (text[i] == '"') {
+            i++;
+            bool closed = false;
+            while (i < text.size()) {
+                if (text[i] == '\\' && i + 1 < text.size()) {
+                    token += text[i + 1];
+                    i += 2;
+                    continue;
+                }
+                if (text[i] == '"') {
+                    i++;
+                    closed = true;
+                    break;
+                }
+                token += text[i++];
+            }
+            if (!closed) {
+                err = "unterminated quoted argument";
+                return {};
+            }
+        } else {
+            while (i < text.size() && !std::isspace((unsigned char)text[i])) token += text[i++];
+        }
+        out.push_back(token);
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- preprocessor
 class Pre {
 public:
@@ -500,6 +537,11 @@ public:
         slot_seen_ = false;
         has_org_ = false;
         org_ = 0;
+        app_extra_ = false;
+        app_slot_ = 0;
+        app_text_.clear();
+        app_icon_.clear();
+        app_icon_sel_.clear();
         active_stack.push_back(Frame{true, true, true, false});
         emit_lines(src, file);
         if (active_stack.size() != 1)
@@ -514,6 +556,11 @@ public:
     bool has_org() const { return has_org_; }
     unsigned long org() const { return org_; }
     std::string binary_path() const { return binary_path_; }
+    bool cwapp_extra() const { return app_extra_; }
+    int cwapp_slot() const { return app_slot_; }
+    std::string cwapp_text() const { return app_text_; }
+    std::string cwapp_icon() const { return app_icon_; }
+    std::string cwapp_icon_selected() const { return app_icon_sel_; }
 
 private:
     struct Frame {
@@ -536,6 +583,9 @@ private:
     bool has_org_ = false;
     unsigned long org_ = 0;
     std::string binary_path_ = "";
+    bool app_extra_ = false;
+    int app_slot_ = 0;
+    std::string app_text_, app_icon_, app_icon_sel_;
     int file_line = 0;
     int line_offset_ = 0;          // #line: reported = physical + offset
     std::string logical_file_;     // #line "file" (empty = physical file)
@@ -759,6 +809,43 @@ private:
             }
             has_cwapp_ = true;
             slot_seen_ = false;
+            app_extra_ = false;
+            app_slot_ = 0;
+            app_text_.clear();
+            app_icon_.clear();
+            app_icon_sel_.clear();
+            const std::string args = strip(rest);
+            if (!args.empty()) {
+                std::string terr;
+                std::vector<std::string> toks = split_quoted_args(args, terr);
+                if (!terr.empty())
+                    throw CwizError("#cwapp: " + terr, line, 0,
+                                    "write '#cwapp 1 \"Name\" icon.png selected.png'",
+                                    "preproc.directive-argument");
+                if (toks.size() < 4)
+                    throw CwizError(
+                        "#cwapp with arguments needs a slot, a text and two icon paths",
+                        line, 0,
+                        "write '#cwapp 1 \"Name\" icon.png selected.png' (or use a bare '#cwapp' with '#slot n')",
+                        "preproc.directive-argument");
+                unsigned long n = 0;
+                std::string nerr;
+                if (!parse_directive_number(toks[0], n, nerr) || n == 0 || n > 0x7FFFFFFFul)
+                    throw CwizError("#cwapp: the first argument must be a positive app slot",
+                                    line, 0,
+                                    "write '#cwapp 1 \"Name\" icon.png selected.png'",
+                                    "preproc.directive-argument");
+                app_extra_ = true;
+                app_slot_ = (int)n;
+                std::vector<std::string> text_parts(toks.begin() + 1, toks.end() - 2);
+                app_text_ = join(text_parts, " ");
+                app_icon_ = toks[toks.size() - 2];
+                app_icon_sel_ = toks.back();
+                if (app_text_.empty())
+                    throw CwizError("#cwapp: the mode text is empty", line, 0,
+                                    "put the menu name between the slot and the icon paths",
+                                    "preproc.directive-argument");
+            }
             push_out("for cwapp", file, line);
             return;
         }
@@ -842,11 +929,16 @@ private:
         }
         if (name == "slot") {
             // `#slot n` - choose the fx-580VN X menu slot (1..12) that the
-            // compiler patches.  Only meaningful in a #cwapp section.
+            // compiler patches.  Only meaningful in a legacy #cwapp section.
             if (!has_cwapp_)
                 throw CwizError("#slot is only available after #cwapp", line, 0,
                                 "move '#slot n' below the '#cwapp' line",
                                 "preproc.directive-order");
+            if (app_extra_)
+                throw CwizError("#slot is not used with '#cwapp <slot> <text> <image> <selected>'",
+                                line, 0,
+                                "the slot is already the first argument of this #cwapp line; remove #slot",
+                                "preproc.directive-conflict");
             if (slot_seen_)
                 throw CwizError("#slot is already set for this #cwapp section", line, 0,
                                 "keep a single '#slot n' per #cwapp section",
@@ -1387,6 +1479,11 @@ CwizPreprocessInfo preprocess_cwiz_info(const std::string& src, const std::strin
     info.has_org = pre.has_org();
     info.org = pre.org();
     info.binary_path = pre.binary_path();
+    info.cwapp_extra = pre.cwapp_extra();
+    info.cwapp_slot = pre.cwapp_slot();
+    info.cwapp_text = pre.cwapp_text();
+    info.cwapp_icon = pre.cwapp_icon();
+    info.cwapp_icon_selected = pre.cwapp_icon_selected();
     return info;
 }
 

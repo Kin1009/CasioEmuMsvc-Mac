@@ -18,6 +18,7 @@ struct BuildResult;
 struct RomPatchReport {
     bool ok = false;
     std::string error;       // human-readable, set when !ok
+    std::string error_file;  // source file for compile errors when known
     int error_line = -1;     // source line for compile errors
     int error_col = -1;
     std::vector<std::string> warnings;
@@ -43,5 +44,11 @@ RomPatchReport patch_rom(std::vector<uint8_t> rom, const std::string& source,
 // 0 to use `image.slot`.  wizc uses this so a cwapp source is compiled only once.
 RomPatchReport patch_rom_image(std::vector<uint8_t> rom, const BuildResult& image,
                                int slot, bool force, bool allow_hook_mismatch);
+
+// Validate the 26-slot... 12-slot menu table and the set_mode hook without
+// writing anything.  Returns an empty string when the image can be patched.
+// The .cwapplink builder uses this before installing its own multi-app
+// dispatcher.
+std::string validate_580_rom(const std::vector<uint8_t>& rom, bool allow_hook_mismatch);
 
 }  // namespace wiz

@@ -116,9 +116,19 @@ static bool parse_header(const std::string& raw, std::vector<std::string>& names
     std::string rest = rstrip(raw.substr(1));
     size_t hash = rest.find('#');
     if (hash != std::string::npos) rest = rstrip(rest.substr(0, hash));
-    if (rest != "cwapp") return false;
-    names.push_back(rest);
-    return true;
+    if (rest == "cwapp") {
+        names.push_back("cwapp");
+        return true;
+    }
+    // Extra app form: `#cwapp <slot> <text> <icon> <selected>`.  The arguments
+    // are parsed by the CWiz preprocessor; for section selection this is still
+    // the cwapp target.
+    if (rest.size() > 5 && rest.compare(0, 5, "cwapp") == 0 &&
+        (rest[5] == ' ' || rest[5] == '\t')) {
+        names.push_back("cwapp");
+        return true;
+    }
+    return false;
 }
 
 static bool is_separator(const std::string& raw) {
