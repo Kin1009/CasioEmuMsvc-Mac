@@ -19,7 +19,7 @@ for the smaller status-icon region. Nothing appears until the relevant render ca
 | **bitmap** | `bitmap/01_bitmap.cwiz` | ROM byte-table bitmap drawing (`sprite`). |
 | **status** | `status/01_status_cycle_580.cwiz/.wz`, `status/02_status_cycle_880.cwiz/.wz` | Cycle every supported status icon with `setStatus()` / `renderStatus()`. |
 | **showcase** | `showcase/01_example_showcase.cwiz`, `showcase/01_example_showcase.wz` | Interactive tour: arrays, helpers, math, keys, shapes, sprites, fonts, status, rendering. |
-| **cwapp** | `cwapp/01_cwapp.cwiz`, `cwapp/02_app_hello.wz` | Full patched ROM (`#cwapp`, `#org`, `#for 580`). |
+| **cwapp** | `cwapp/01_cwapp.cwiz`, `cwapp/02_app_hello.wz`, `cwapp/03_exit_menu.cwiz` | Full patched ROM (`#cwapp`, `#org`, `#for 580`); the exit example shows MENU, `exit()` and ON behaviour. |
 | **580/880** | `580_880/01_target.cwiz` | Target-independent; 190x63 (580, 1 bp) or 192x64 (880, 2 bp). |
 | **rop** | `rop/01_hello.cwiz` … `rop/07_rop_guide.cwiz` | CWiz- and Wiz-syntax ROP payloads (`#rop`, `#org 0xE9E0`, `#launcher common`). `04_keys`/`06_rop_keys` show `getkey()` + `keytable()`; `07_rop_guide` combines SHIFT waits, Vietnamese text, bitmap, line and key dispatch; `08_key_asm` writes the getkey chain with raw `asm { }` blocks. |
 

@@ -1,0 +1,40 @@
+// cwapp/03_exit_menu.cwiz - leave a firmware app cleanly.
+//
+// #cwapp patches this program into the fx-580VN X firmware and starts it from
+// the app menu. While the program runs:
+//
+//   MENU      returns to the firmware mode menu (the cwapp runtime handles it)
+//   EXE       calls exit(), which performs the same clean return
+//   AC        reaches the program normally as K_AC
+//   ON        repowers the calculator, then relaunches this app
+//   Shift+AC  powers the calculator off
+//
+// The clean return restores the firmware stack and opens the mode menu, so
+// there is no reset and no boot splash.
+#for 580
+#cwapp
+#slot 1
+
+void draw(int k) {
+    clear();
+    text(4, 4, "cwapp exit demo");
+    text(4, 18, "MENU: mode menu");
+    text(4, 30, "EXE: exit()");
+    text(4, 44, "AC: app key");
+    text(4, 58, "last key:");
+    print(78, 58, k);
+    render();
+}
+
+void main() {
+    buffered(1);
+    draw(-1);
+    while (1) {
+        int k = key();
+        if (k == K_EXE)
+            exit();
+        if (k >= 0)
+            draw(k);
+        delay(3);
+    }
+}
