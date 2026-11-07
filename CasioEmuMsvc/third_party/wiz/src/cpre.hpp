@@ -26,6 +26,12 @@
 
 namespace wiz {
 
+struct PreserveRange {
+    int line = 0;
+    unsigned long addr = 0;
+    unsigned long len = 0;
+};
+
 struct CwizPreprocessInfo {
     std::string text;
     bool has_cwapp = false;  // the source contains a #cwapp section
@@ -41,6 +47,8 @@ struct CwizPreprocessInfo {
     std::string cwapp_text;
     std::string cwapp_icon;
     std::string cwapp_icon_selected;
+    // Repeatable `#preserve <addr> <len>` ranges for the cwapp target.
+    std::vector<PreserveRange> preserve;
 };
 
 // Preprocess `src` (which came from file `file`) for target `target` (an internal

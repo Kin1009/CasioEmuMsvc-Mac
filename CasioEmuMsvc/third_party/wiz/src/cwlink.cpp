@@ -280,17 +280,24 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
                 return out;
             }
             p.app.icon = resolve_relative(entry.path, p.built.cwapp_icon);
-            p.app.icon_selected = resolve_relative(entry.path, p.built.cwapp_icon_selected);
             std::string image_error;
             if (!cwmode::load_image(p.app.icon, p.icon, image_error)) {
                 out.error = image_error;
                 out.error_file = entry.path;
                 return out;
             }
-            if (!cwmode::load_image(p.app.icon_selected, p.icon_sel, image_error)) {
-                out.error = image_error;
-                out.error_file = entry.path;
-                return out;
+            if (p.built.cwapp_icon_selected.empty()) {
+                // Three-argument form: the selected variant is the inverse.
+                p.app.icon_selected.clear();
+                p.icon_sel = cwmode::invert_image(p.icon);
+            } else {
+                p.app.icon_selected =
+                    resolve_relative(entry.path, p.built.cwapp_icon_selected);
+                if (!cwmode::load_image(p.app.icon_selected, p.icon_sel, image_error)) {
+                    out.error = image_error;
+                    out.error_file = entry.path;
+                    return out;
+                }
             }
             if (p.icon.width < 48 || p.icon.height < 23 || p.icon_sel.width < 48 ||
                 p.icon_sel.height < 23) {
@@ -722,11 +729,19 @@ CwappLinkResult build_single_from_image(const BuildResult& built,
     cwmode::Image icon, icon_sel;
     std::string image_error;
     const std::string icon_path = resolve_relative(source_path, built.cwapp_icon);
-    const std::string sel_path = resolve_relative(source_path, built.cwapp_icon_selected);
-    if (!cwmode::load_image(icon_path, icon, image_error) ||
-        !cwmode::load_image(sel_path, icon_sel, image_error)) {
+    std::string sel_path;
+    if (!cwmode::load_image(icon_path, icon, image_error)) {
         out.error = image_error;
         return out;
+    }
+    if (built.cwapp_icon_selected.empty()) {
+        icon_sel = cwmode::invert_image(icon);
+    } else {
+        sel_path = resolve_relative(source_path, built.cwapp_icon_selected);
+        if (!cwmode::load_image(sel_path, icon_sel, image_error)) {
+            out.error = image_error;
+            return out;
+        }
     }
     if (icon.width < 48 || icon.height < 23 || icon_sel.width < 48 || icon_sel.height < 23) {
         out.error = "the mode icons must be at least 48x23 on the fx-580VN X";

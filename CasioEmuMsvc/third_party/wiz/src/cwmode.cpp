@@ -471,6 +471,25 @@ bool load_image(const std::string& path, Image& out, std::string& error) {
     return true;
 }
 
+Image invert_image(const Image& image) {
+    Image out;
+    if (image.empty()) return out;
+    out.width = image.width;
+    out.height = image.height;
+    out.rgba.resize(image.rgba.size());
+    for (size_t i = 0; i < image.rgba.size(); i += 4) {
+        const int a = image.rgba[i + 3];
+        // Flatten over white first, so a transparent background behaves like
+        // the white background of an opaque icon before inversion.
+        auto over_white = [a](int c) { return (c * a + 255 * (255 - a) + 127) / 255; };
+        out.rgba[i + 0] = (uint8_t)(255 - over_white(image.rgba[i + 0]));
+        out.rgba[i + 1] = (uint8_t)(255 - over_white(image.rgba[i + 1]));
+        out.rgba[i + 2] = (uint8_t)(255 - over_white(image.rgba[i + 2]));
+        out.rgba[i + 3] = 255;
+    }
+    return out;
+}
+
 Analysis analyze(const std::vector<uint8_t>& rom, Model model) {
     Analysis a;
     std::vector<uint8_t> copy = rom;  // analyze_or_fail only reads, but keeps the API const.

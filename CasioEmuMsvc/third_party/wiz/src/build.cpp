@@ -169,6 +169,7 @@ static const char* kCwappReturnLegacy =
     "    pop er0\n"
     "    pop psw\n"
     "    pop lr\n"
+    "    bl __restore_preserved\n"
     "    mov r0, #1\n"
     "    st r0, 0D113H\n"
     "    mov r0, #0\n"
@@ -206,6 +207,7 @@ static const char* kCwappReturnLegacy =
     "    pop er2\n"
     "    pop er0\n"
     "    pop psw\n"
+    "    bl __restore_preserved\n"
     "    mov r0, #0C1H\n"
     "    st r0, 0D111H\n"
     "    mov r0, #1\n"
@@ -248,6 +250,7 @@ static const char* kCwappReturnExtra =
     "    pop er2\n"
     "    pop er0\n"
     "    pop psw\n"
+    "    bl __restore_preserved\n"
     "    mov r0, #0C1H\n"
     "    st r0, 0D111H\n"
     "    mov r0, #1\n"
@@ -256,7 +259,7 @@ static const char* kCwappReturnExtra =
     "    bl 2AD4CH\n"
     "    pop pc\n";
 
-std::string runtime_for(const Target& target, bool extra_app) {
+std::string runtime_for(const Target& target, bool extra_app, bool preserve_runtime) {
     std::string drop = target.planes == 2 ? ";@1p" : ";@2p";
     bool ok = false;
     std::string text = read_asset("runtime.asm", ok);
@@ -272,6 +275,7 @@ std::string runtime_for(const Target& target, bool extra_app) {
         if (ends_with(r, drop)) continue;
         if (ends_with(r, ";@seg") && !target.rom_seg) continue;
         if (ends_with(r, ";@cwapp") && target.name != "cwapp") continue;
+        if (ends_with(r, ";@preserve") && !preserve_runtime) continue;
         if (ends_with(r, ";@off")) {  // VRAM row offset (cw: user y=0 is VRAM row 1)
             if (!target.row_off) continue;
             line = replace_all(line, "#32 ;@off", fmt("#%d ;@off", 32 * target.row_off));
@@ -286,10 +290,81 @@ std::string runtime_for(const Target& target, bool extra_app) {
 }
 
 // ------------------------------------------------------------------ pipeline
+static void validate_preserve_ranges(const std::vector<PreserveRange>& ranges,
+                                     const Target& tg) {
+    if (ranges.empty()) return;
+    if (tg.name != "cwapp")
+        throw CompileError("#preserve is only available for the cwapp target", 0, 0,
+                           "move the range to a #cwapp source", "build.preserve-target");
+    if ((int)ranges.size() > kCwappPreserveRanges)
+        throw CompileError(fmt("#preserve has %d ranges; at most %d are supported",
+                               (int)ranges.size(), kCwappPreserveRanges),
+                           0, 0, "combine adjacent ranges or remove one", "build.preserve-full");
+    unsigned long total = 0;
+    for (size_t i = 0; i < ranges.size(); i++) {
+        const PreserveRange& r = ranges[i];
+        if (r.addr < 0xD000ul || r.addr > 0xFFFFul || r.len == 0 ||
+            r.addr + r.len - 1 > 0xFFFFul)
+            throw CompileError(fmt("#preserve range %lu+%lu is outside cwapp RAM "
+                                   "0xD000..0xFFFF", r.addr, r.len),
+                               r.line, 0, "use #preserve 0xD111 2 with a 16-bit address",
+                               "build.preserve-range");
+        const unsigned long end = r.addr + r.len - 1;
+        if (r.addr <= 0xE7FFul && end >= 0xE5D3ul)
+            throw CompileError(fmt("#preserve range %04lX..%04lX overlaps the cwapp "
+                                   "save area 0xE5D3..0xE7FF", r.addr, end),
+                               r.line, 0, "choose an address outside the saved stack",
+                               "build.preserve-save-area");
+        for (size_t j = 0; j < i; j++) {
+            const PreserveRange& p = ranges[j];
+            const unsigned long p_end = p.addr + p.len - 1;
+            if (r.addr <= p_end && end >= p.addr)
+                throw CompileError(fmt("#preserve range %04lX..%04lX overlaps %04lX..%04lX",
+                                       r.addr, end, p.addr, p_end),
+                                   r.line, 0, "merge or remove the overlapping range",
+                                   "build.preserve-overlap");
+        }
+        total += r.len;
+    }
+    if (total > (unsigned long)kCwappPreserveBytes)
+        throw CompileError(fmt("#preserve needs %lu snapshot bytes; at most %d are "
+                               "supported", total, kCwappPreserveBytes),
+                           0, 0, "preserve fewer bytes", "build.preserve-full");
+}
+
 static BuildResult finish(const std::string& body, const std::map<std::string, int>& variables,
-                          const Target& tg, uint32_t org = 0, bool extra_app = false) {
+                          const Target& tg, uint32_t org = 0, bool extra_app = false,
+                          const std::vector<PreserveRange>& preserve = {},
+                          bool preserve_used = false) {
+    validate_preserve_ranges(preserve, tg);
     std::string full = make_boot(tg, org) + body;
-    if (tg.name != "fwnx") full += runtime_for(tg, extra_app);
+    if (tg.name == "cwapp") {
+        full += "__cwapp_preserve_init:\n";
+        full += "    push lr\n";
+        // The state block lives in RAM; clear count and used before the first
+        // registration.  RAM is not guaranteed to be zero on entry.
+        full += "    mov r0,#(__cwapp_preserve_state & 0FFH)\n";
+        full += "    mov r1,#((__cwapp_preserve_state >> 8) & 0FFH)\n";
+        full += "    mov r2,#0\n";
+        full += "    st r2,[er0]\n";
+        full += "    add er0,#1\n";
+        full += "    st r2,[er0]\n";
+        for (const PreserveRange& r : preserve) {
+            full += fmt("    mov r0,#0x%02lX\n", r.addr & 0xFFul);
+            full += fmt("    mov r1,#0x%02lX\n", (r.addr >> 8) & 0xFFul);
+            full += fmt("    mov r2,#0x%02lX\n", r.len & 0xFFul);
+            full += fmt("    mov r3,#0x%02lX\n", (r.len >> 8) & 0xFFul);
+            full += "    bl __preserve\n";
+        }
+        full += "    pop pc\n";
+        if (!preserve_used) {
+            // The clean-return path always calls the restore hook and the init
+            // hook always exists; keep the unused versions tiny.
+            full += "__preserve:\n    mov er0,#0\n    rt\n";
+            full += "__restore_preserved:\n    rt\n";
+        }
+    }
+    if (tg.name != "fwnx") full += runtime_for(tg, extra_app, preserve_used);
     Assembler as(tg.core);
     auto img = as.assemble(full);
     BuildResult res;
@@ -386,7 +461,10 @@ BuildResult build_source(const std::string& src, const std::string& target,
     }
     std::string selected = select_sections(expand_wiz_imports(src, target, path), tg);
     WizResult r = compile_to_asm(selected, tg);
-    BuildResult res = finish(r.asm_body, r.variables, tg, org);
+    const bool preserve_used =
+        tg.name == "cwapp" && (selected.find("preserve(") != std::string::npos ||
+                               selected.find("restore_preserved(") != std::string::npos);
+    BuildResult res = finish(r.asm_body, r.variables, tg, org, false, {}, preserve_used);
     res.cwapp = tg.name == "cwapp";
     return res;
 }
@@ -434,7 +512,11 @@ BuildResult build_cwiz(const std::string& src, const std::string& target,
     CwizResult r = compile_cwiz(selected, tg);
     std::map<std::string, int> vars;
     for (const auto& kv : r.variables) vars[kv.first] = kv.second.addr;
-    BuildResult res = finish(r.asm_body, vars, tg, org, pp.cwapp_extra);
+    const bool preserve_used =
+        !pp.preserve.empty() || pp.text.find("preserve(") != std::string::npos ||
+        pp.text.find("restore_preserved(") != std::string::npos;
+    BuildResult res = finish(r.asm_body, vars, tg, org, pp.cwapp_extra, pp.preserve,
+                             preserve_used);
     res.cwapp = tg.name == "cwapp";
     res.slot = pp.slot;
     res.cwapp_extra = pp.cwapp_extra;

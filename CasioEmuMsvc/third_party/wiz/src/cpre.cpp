@@ -533,6 +533,7 @@ public:
         root_file = file;
         prev_target_for.clear();
         has_cwapp_ = false;
+        preserve_.clear();
         slot_ = 2;
         slot_seen_ = false;
         has_org_ = false;
@@ -561,6 +562,7 @@ public:
     std::string cwapp_text() const { return app_text_; }
     std::string cwapp_icon() const { return app_icon_; }
     std::string cwapp_icon_selected() const { return app_icon_sel_; }
+    const std::vector<PreserveRange>& preserve() const { return preserve_; }
 
 private:
     struct Frame {
@@ -578,6 +580,7 @@ private:
     std::string root_file;
     bool in_block = false;  // inside a /* ... */ comment
     bool has_cwapp_ = false;
+    std::vector<PreserveRange> preserve_;
     int slot_ = 2;
     bool slot_seen_ = false;
     bool has_org_ = false;
@@ -808,6 +811,7 @@ private:
                                 "preproc.directive-order");
             }
             has_cwapp_ = true;
+            preserve_.clear();
             slot_seen_ = false;
             app_extra_ = false;
             app_slot_ = 0;
@@ -822,11 +826,12 @@ private:
                     throw CwizError("#cwapp: " + terr, line, 0,
                                     "write '#cwapp 1 \"Name\" icon.png selected.png'",
                                     "preproc.directive-argument");
-                if (toks.size() < 4)
+                if (toks.size() < 3)
                     throw CwizError(
-                        "#cwapp with arguments needs a slot, a text and two icon paths",
+                        "#cwapp with arguments needs a slot, a text and one or two icon paths",
                         line, 0,
-                        "write '#cwapp 1 \"Name\" icon.png selected.png' (or use a bare '#cwapp' with '#slot n')",
+                        "write '#cwapp 1 \"Name\" icon.png [selected.png]' (or use a bare "
+                        "'#cwapp' with '#slot n')",
                         "preproc.directive-argument");
                 unsigned long n = 0;
                 std::string nerr;
@@ -837,10 +842,16 @@ private:
                                     "preproc.directive-argument");
                 app_extra_ = true;
                 app_slot_ = (int)n;
-                std::vector<std::string> text_parts(toks.begin() + 1, toks.end() - 2);
-                app_text_ = join(text_parts, " ");
-                app_icon_ = toks[toks.size() - 2];
-                app_icon_sel_ = toks.back();
+                if (toks.size() == 3) {
+                    app_text_ = toks[1];
+                    app_icon_ = toks[2];
+                    app_icon_sel_.clear();
+                } else {
+                    std::vector<std::string> text_parts(toks.begin() + 1, toks.end() - 2);
+                    app_text_ = join(text_parts, " ");
+                    app_icon_ = toks[toks.size() - 2];
+                    app_icon_sel_ = toks.back();
+                }
                 if (app_text_.empty())
                     throw CwizError("#cwapp: the mode text is empty", line, 0,
                                     "put the menu name between the slot and the icon paths",
@@ -927,6 +938,30 @@ private:
             push_out(list, file, line);
             return;
         }
+        if (name == "preserve") {
+            if (!has_cwapp_)
+                throw CwizError("#preserve is only available after #cwapp", line, 0,
+                                "move '#preserve <addr> <len>' below the '#cwapp' line",
+                                "preproc.directive-order");
+            std::string terr;
+            std::vector<std::string> toks = split_quoted_args(rest, terr);
+            if (!terr.empty() || toks.size() != 2)
+                throw CwizError("#preserve needs exactly an address and a length", line, 0,
+                                "write '#preserve 0xD111 2' (hex or decimal)",
+                                "preproc.directive-argument");
+            unsigned long addr = 0, len = 0;
+            std::string err;
+            if (!parse_directive_number(toks[0], addr, err) || addr > 0xFFFFul)
+                throw CwizError("#preserve: bad address '" + toks[0] + "'",
+                                line, 0, "use a 16-bit address such as 0xD111",
+                                "preproc.directive-argument");
+            if (!parse_directive_number(toks[1], len, err) || len == 0 || len > 0xFFFFul)
+                throw CwizError("#preserve: bad length '" + toks[1] + "'",
+                                line, 0, "use a positive length such as 2",
+                                "preproc.directive-argument");
+            preserve_.push_back(PreserveRange{line, addr, len});
+            return;
+        }
         if (name == "slot") {
             // `#slot n` - choose the fx-580VN X menu slot (1..12) that the
             // compiler patches.  Only meaningful in a legacy #cwapp section.
@@ -935,7 +970,7 @@ private:
                                 "move '#slot n' below the '#cwapp' line",
                                 "preproc.directive-order");
             if (app_extra_)
-                throw CwizError("#slot is not used with '#cwapp <slot> <text> <image> <selected>'",
+                throw CwizError("#slot is not used with '#cwapp <slot> <text> <image> [<selected>]'",
                                 line, 0,
                                 "the slot is already the first argument of this #cwapp line; remove #slot",
                                 "preproc.directive-conflict");
@@ -1484,6 +1519,7 @@ CwizPreprocessInfo preprocess_cwiz_info(const std::string& src, const std::strin
     info.cwapp_text = pre.cwapp_text();
     info.cwapp_icon = pre.cwapp_icon();
     info.cwapp_icon_selected = pre.cwapp_icon_selected();
+    info.preserve = pre.preserve();
     return info;
 }
 

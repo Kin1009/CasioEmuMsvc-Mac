@@ -761,3 +761,177 @@ __va_arg:
     ADD ER2, #2
     ST ER2, [ER4]       ; *(&ap) = ap + 2
     RT
+
+; cwapp only: #preserve / preserve() / restore_preserved().
+; The compiler allocates __cwapp_preserve_state (see build.hpp):
+;   +0 count, +1 used snapshot bytes, +2 8 x (addr lo, addr hi, len lo, len hi),
+;   +34 128 snapshot bytes.  __preserve takes ER0=addr, ER2=len and returns
+;   ER0=1 on success, 0 on a rejected range or a full table.
+__preserve:                    ;@cwapp ;@preserve
+    PUSH ER2                   ;@cwapp ;@preserve
+    PUSH ER4                   ;@cwapp ;@preserve
+    PUSH ER6                   ;@cwapp ;@preserve
+    PUSH ER8                   ;@cwapp ;@preserve
+    PUSH ER10                  ;@cwapp ;@preserve
+    PUSH ER12                  ;@cwapp ;@preserve
+    PUSH ER14                  ;@cwapp ;@preserve
+    MOV ER6, ER0               ;@cwapp ;@preserve
+    MOV ER8, ER2               ;@cwapp ;@preserve
+    MOV ER0, #0                ;@cwapp ;@preserve
+    CMP ER8, ER0               ;@cwapp ;@preserve
+    BEQ __pres_fail            ;@cwapp ;@preserve
+    MOV R0, R9                 ;@cwapp ;@preserve
+    CMP R0, #0                 ;@cwapp ;@preserve
+    BNE __pres_fail            ;@cwapp ;@preserve
+    ; addr must be 0xD000..0xFFFF (high byte 0xD0..0xFF) ;@preserve
+    TB R7.7                    ;@cwapp ;@preserve
+    BEQ __pres_fail            ;@cwapp ;@preserve
+    MOV R0, R7                 ;@cwapp ;@preserve
+    CMP R0, #0D0H              ;@cwapp ;@preserve
+    BLTS __pres_fail           ;@cwapp ;@preserve
+    ; end = addr + len; reject a 16-bit wrap ;@preserve
+    MOV ER12, ER6              ;@cwapp ;@preserve
+    ADD ER12, ER8              ;@cwapp ;@preserve
+    CMP ER12, ER6              ;@cwapp ;@preserve
+    BLTS __pres_fail           ;@cwapp ;@preserve
+    ; reject 0xE5D3..0xE7FF ;@preserve
+    MOV R0, #0FFH              ;@cwapp ;@preserve
+    MOV R1, #0E7H              ;@cwapp ;@preserve
+    CMP ER6, ER0               ;@cwapp ;@preserve
+    BGTS __pres_area_ok        ;@cwapp ;@preserve
+    MOV R0, #0D3H              ;@cwapp ;@preserve
+    MOV R1, #0E5H              ;@cwapp ;@preserve
+    MOV ER10, ER12             ;@cwapp ;@preserve
+    ADD ER10, #-1              ;@cwapp ;@preserve
+    CMP ER10, ER0               ;@cwapp ;@preserve
+    BLTS __pres_area_ok        ;@cwapp ;@preserve
+    B __pres_fail              ;@cwapp ;@preserve
+__pres_area_ok:                ;@cwapp ;@preserve
+    MOV R0, #(__cwapp_preserve_state & 0FFH)       ;@cwapp ;@preserve
+    MOV R1, #((__cwapp_preserve_state >> 8) & 0FFH);@cwapp ;@preserve
+    L R14, [ER0]               ;@cwapp ;@preserve
+    CMP R14, #8                ;@cwapp ;@preserve
+    BGE __pres_fail            ;@cwapp ;@preserve
+    MOV ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    L R15, [ER2]               ;@cwapp ;@preserve
+    ; used + len must be 1..128 ;@preserve
+    MOV R0, R15                ;@cwapp ;@preserve
+    MOV R1, #0                 ;@cwapp ;@preserve
+    MOV ER4, ER8               ;@cwapp ;@preserve
+    ADD ER4, ER0               ;@cwapp ;@preserve
+    MOV R0, #128               ;@cwapp ;@preserve
+    MOV R1, #0                 ;@cwapp ;@preserve
+    CMP ER4, ER0               ;@cwapp ;@preserve
+    BGTS __pres_fail           ;@cwapp ;@preserve
+    MOV R0, #0                 ;@cwapp ;@preserve
+    CMP ER4, ER0               ;@cwapp ;@preserve
+    BEQ __pres_fail            ;@cwapp ;@preserve
+    ; descriptor pointer = state + 2 + count*4 ;@preserve
+    MOV R0, #(__cwapp_preserve_state & 0FFH)       ;@cwapp ;@preserve
+    MOV R1, #((__cwapp_preserve_state >> 8) & 0FFH);@cwapp ;@preserve
+    MOV ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, #2                ;@cwapp ;@preserve
+    MOV R0, R14                ;@cwapp ;@preserve
+    MOV R1, #0                 ;@cwapp ;@preserve
+    ADD ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, ER0               ;@cwapp ;@preserve
+    ST R6, [ER2]               ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    ST R7, [ER2]               ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    ST R8, [ER2]               ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    ST R9, [ER2]               ;@cwapp ;@preserve
+    ; snapshot pointer = state + 34 + used ;@preserve
+    MOV R0, #(__cwapp_preserve_state & 0FFH)      ;@cwapp ;@preserve
+    MOV R1, #((__cwapp_preserve_state >> 8) & 0FFH);@cwapp ;@preserve
+    MOV ER10, ER0              ;@cwapp ;@preserve
+    ADD ER10, #34              ;@cwapp ;@preserve
+    MOV R0, R15                ;@cwapp ;@preserve
+    MOV R1, #0                 ;@cwapp ;@preserve
+    ADD ER10, ER0              ;@cwapp ;@preserve
+__pres_copy:                   ;@cwapp ;@preserve
+    L R0, [ER6]                ;@cwapp ;@preserve
+    ST R0, [ER10]              ;@cwapp ;@preserve
+    ADD ER6, #1                ;@cwapp ;@preserve
+    ADD ER10, #1               ;@cwapp ;@preserve
+    CMP ER6, ER12              ;@cwapp ;@preserve
+    BNE __pres_copy            ;@cwapp ;@preserve
+    ; count++, used += len ;@preserve
+    MOV R0, #(__cwapp_preserve_state & 0FFH)       ;@cwapp ;@preserve
+    MOV R1, #((__cwapp_preserve_state >> 8) & 0FFH);@cwapp ;@preserve
+    ADD R14, #1                ;@cwapp ;@preserve
+    ST R14, [ER0]              ;@cwapp ;@preserve
+    ADD ER0, #1                ;@cwapp ;@preserve
+    ADD R15, R8                ;@cwapp ;@preserve
+    ST R15, [ER0]              ;@cwapp ;@preserve
+    MOV ER0, #1                ;@cwapp ;@preserve
+    B __pres_done              ;@cwapp ;@preserve
+__pres_fail:                   ;@cwapp ;@preserve
+    MOV ER0, #0                ;@cwapp ;@preserve
+__pres_done:                   ;@cwapp ;@preserve
+    POP ER14                   ;@cwapp ;@preserve
+    POP ER12                   ;@cwapp ;@preserve
+    POP ER10                   ;@cwapp ;@preserve
+    POP ER8                    ;@cwapp ;@preserve
+    POP ER6                    ;@cwapp ;@preserve
+    POP ER4                    ;@cwapp ;@preserve
+    POP ER2                    ;@cwapp ;@preserve
+    RT                         ;@cwapp ;@preserve
+
+; Restore every registered range, byte for byte.  Called by the clean return
+; before the firmware state is handed back, and available to programs that
+; mutate a preserved range in the middle of a run.
+__restore_preserved:           ;@cwapp ;@preserve
+    PUSH ER0                   ;@cwapp ;@preserve
+    PUSH ER2                   ;@cwapp ;@preserve
+    PUSH ER4                   ;@cwapp ;@preserve
+    PUSH ER6                   ;@cwapp ;@preserve
+    PUSH ER8                   ;@cwapp ;@preserve
+    PUSH ER10                  ;@cwapp ;@preserve
+    PUSH ER12                  ;@cwapp ;@preserve
+    PUSH ER14                  ;@cwapp ;@preserve
+    MOV R0, #(__cwapp_preserve_state & 0FFH)       ;@cwapp ;@preserve
+    MOV R1, #((__cwapp_preserve_state >> 8) & 0FFH);@cwapp ;@preserve
+    L R14, [ER0]               ;@cwapp ;@preserve
+    CMP R14, #0                ;@cwapp ;@preserve
+    BEQ __rst_done             ;@cwapp ;@preserve
+    MOV ER2, ER0               ;@cwapp ;@preserve
+    ADD ER2, #2                ;@cwapp ;@preserve
+    MOV ER10, ER0              ;@cwapp ;@preserve
+    ADD ER10, #34              ;@cwapp ;@preserve
+    MOV R15, #0                ;@cwapp ;@preserve
+__rst_one:                     ;@cwapp ;@preserve
+    L R6, [ER2]                ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    L R7, [ER2]                ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    L R8, [ER2]                ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    L R9, [ER2]                ;@cwapp ;@preserve
+    ADD ER2, #1                ;@cwapp ;@preserve
+    MOV ER12, ER6              ;@cwapp ;@preserve
+    ADD ER12, ER8              ;@cwapp ;@preserve
+__rst_copy:                    ;@cwapp ;@preserve
+    L R0, [ER10]               ;@cwapp ;@preserve
+    ST R0, [ER6]               ;@cwapp ;@preserve
+    ADD ER6, #1                ;@cwapp ;@preserve
+    ADD ER10, #1               ;@cwapp ;@preserve
+    CMP ER6, ER12              ;@cwapp ;@preserve
+    BNE __rst_copy             ;@cwapp ;@preserve
+    ADD R15, #1                ;@cwapp ;@preserve
+    CMP R15, R14               ;@cwapp ;@preserve
+    BLTS __rst_one             ;@cwapp ;@preserve
+__rst_done:                    ;@cwapp ;@preserve
+    POP ER14                   ;@cwapp ;@preserve
+    POP ER12                   ;@cwapp ;@preserve
+    POP ER10                   ;@cwapp ;@preserve
+    POP ER8                    ;@cwapp ;@preserve
+    POP ER6                    ;@cwapp ;@preserve
+    POP ER4                    ;@cwapp ;@preserve
+    POP ER2                    ;@cwapp ;@preserve
+    POP ER0                    ;@cwapp ;@preserve
+    RT                         ;@cwapp ;@preserve

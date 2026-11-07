@@ -54,6 +54,11 @@ struct Image {
 bool decode_image(const std::vector<uint8_t>& bytes, Image& out, std::string& error);
 bool load_image(const std::string& path, Image& out, std::string& error);
 
+// The selected variant of an icon: flatten alpha over white, invert the RGB
+// channels and store the result as opaque RGBA.  For binary black/white icons
+// this is exactly the bitwise complement of the packed 1-bit/two-plane data.
+Image invert_image(const Image& image);
+
 // ------------------------------------------------------------------ analysis
 struct Analysis {
     bool ok = false;

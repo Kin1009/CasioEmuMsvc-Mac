@@ -23,6 +23,17 @@
 #include "targets.hpp"
 
 namespace wiz {
+// cwapp #preserve: fixed runtime registration capacity and snapshot bytes.
+// The hidden state block is allocated through the compiler RAM allocator:
+//   0      count (uint8)
+//   1      used snapshot bytes (uint8)
+//   2..33  8 descriptors of 4 bytes: addr lo/hi, len lo/hi
+//   34..   128 snapshot bytes
+constexpr int kCwappPreserveRanges = 8;
+constexpr int kCwappPreserveBytes = 128;
+constexpr int kCwappPreserveStateBytes =
+    2 + 4 * kCwappPreserveRanges + kCwappPreserveBytes;
+
 
 struct BuildResult {
     std::vector<uint8_t> rom;
@@ -52,7 +63,8 @@ const std::string& data_dir();
 std::string make_boot(const Target& target, uint32_t org = 0);
 
 // runtime.asm with the lines tagged for the other LCD type removed.
-std::string runtime_for(const Target& target, bool extra_app = false);
+std::string runtime_for(const Target& target, bool extra_app = false,
+                        bool preserve_runtime = false);
 
 BuildResult build_source(const std::string& src, const std::string& target,
                          const std::string& path = "", uint32_t org = 0);

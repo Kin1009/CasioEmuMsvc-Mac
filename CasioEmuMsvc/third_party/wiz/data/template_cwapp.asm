@@ -87,6 +87,7 @@ _save_done:
     st er0, 0F044H       ; KOMASK = 0: all key columns enabled
     st r0, 0F042H        ; KIMASK = 0
     st er0, 0F046H       ; KO = 0
+    bl __cwapp_preserve_init
     b _main
 
 ; exit(): restore the caller and return to the firmware menu.  __cwapp_return

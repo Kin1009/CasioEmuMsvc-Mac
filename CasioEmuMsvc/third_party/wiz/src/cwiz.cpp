@@ -14,6 +14,7 @@
 #include "font_cw.hpp"
 #include "font_cw_vn.hpp"
 #include "vn_f4.hpp"
+#include "build.hpp"
 #include "wiz.hpp"  // key_consts()
 
 namespace wiz {
@@ -2892,6 +2893,8 @@ static const std::map<std::string, BuiltinInfo> CW_BUILTINS = {
     {"renderStatus", {0, 0, "renderStatus()", 0}},
     {"ticks", {0, 0, "ticks()", 0}},
     {"delay_ms", {1, 1, "delay_ms(ms)", 0}},
+    {"preserve", {2, 2, "preserve(addr, len)", 1u << 0}},
+    {"restore_preserved", {0, 0, "restore_preserved()", 0}},
     {"__va_start", {0, 0, "__va_start()", 0}},
     {"__va_arg", {1, 1, "__va_arg(ap)", 1u << 0}},
     {"_hpeek", {1, 1, "_hpeek(addr)", 1u << 0}},
@@ -4053,8 +4056,9 @@ private:
                     c, fmt("pass %s argument(s): %s", expected.c_str(), bi.sig),
                     "sema.argument-count");
             }
-            if (name == "exit" && target.rom_seg == 0)
-                err("exit() exists only for the cwapp target", c,
+            if ((name == "exit" || name == "preserve" || name == "restore_preserved") &&
+                target.rom_seg == 0)
+                err(name + "() exists only for the cwapp target", c,
                     "use it only in a #cwapp program", "sema.builtin-target");
             for (size_t i = 0; i < c->list.size(); i++) {
                 NodeP a = c->list[i];
@@ -4166,7 +4170,10 @@ public:
         emit("BL __init");
         if (an.has_main) emit("BL f_main");
         label("__wiz_halt");
-        emit("B __wiz_halt");
+        if (target.name == "cwapp")
+            emit("B __exit");
+        else
+            emit("B __wiz_halt");
 
         label("__init");
         emit("PUSH LR");
@@ -4188,6 +4195,8 @@ public:
             emit_func(an.funcs[name]);
         }
         emit_data();
+        if (preserve_addr)
+            lines.push_back(fmt("__cwapp_preserve_state EQU 0x%04X", preserve_addr));
         std::string out;
         for (size_t i = 0; i < lines.size(); i++) {
             if (i) out += "\n";
@@ -4200,6 +4209,7 @@ private:
     Analyzed& an;
     const Target& target;
     std::vector<std::string> lines;
+    int preserve_addr = 0;
     int nlabel = 0;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> str_order;
     int next_addr = 0;
@@ -4268,6 +4278,9 @@ private:
             }
         for (Sym* sym : an.globals)
             if (sym->init_kind == 1) global_inits.push_back({sym, sym->init_node});
+        if (target.name == "cwapp")
+            preserve_addr = alloc(nullptr, kCwappPreserveStateBytes,
+                                  "cwapp preserve buffer");
     }
 
     int alloc(Sym* sym, int size_bytes, const std::string& what) {

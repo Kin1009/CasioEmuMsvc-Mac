@@ -1,4 +1,5 @@
 // wiz.cpp - the Wiz language: lexer, parser and code generator.
+#include "build.hpp"
 #include "wiz.hpp"
 
 #include <algorithm>
@@ -75,6 +76,7 @@ static const std::map<std::string, std::pair<int, int>> BUILTINS = {
     {"key_down", {1, 1}}, {"key_hit", {1, 1}}, {"buffered", {1, 1}}, {"flip", {0, 0}},
     {"render", {0, 0}}, {"renderStatus", {0, 0}}, {"_rpeek", {1, 1}}, {"exit", {0, 0}},
     {"ticks", {0, 0}}, {"delay_ms", {1, 1}}, {"_hpeek", {1, 1}}, {"_hpoke", {2, 2}},
+    {"preserve", {2, 2}}, {"restore_preserved", {0, 0}},
 };
 
 static const std::map<std::string, const char*> BUILTIN_SIGS = {
@@ -87,7 +89,9 @@ static const std::map<std::string, const char*> BUILTIN_SIGS = {
     {"render", "render()"},          {"renderStatus", "renderStatus()"},
     {"_rpeek", "_rpeek(addr)"},      {"exit", "exit()"},
     {"ticks", "ticks()"},            {"delay_ms", "delay_ms(ms)"},
-    {"_hpeek", "_hpeek(addr)"},      {"_hpoke", "_hpoke(addr, value)"}};
+    {"_hpeek", "_hpeek(addr)"},      {"_hpoke", "_hpoke(addr, value)"},
+    {"preserve", "preserve(addr, len)"},
+    {"restore_preserved", "restore_preserved()"}};
 
 static const std::set<std::string> KEYWORDS = {
     "def", "if", "elif", "else", "while", "for", "in", "range", "return", "break",
@@ -2712,9 +2716,10 @@ void Compiler::call(const NodeP& e) {
             emit("PUSH ER0");
         }
         for (int i = (int)e->args.size() - 1; i >= 0; i--) emit(fmt("POP ER%d", 2 * i));
-        if (name == "exit" && target.name != "cwapp")
+        if ((name == "exit" || name == "preserve" || name == "restore_preserved") &&
+            target.name != "cwapp")
             throw WizError(
-                "exit() exists only for the cwapp target (a program patched into the firmware)",
+                name + "() exists only for the cwapp target (a program patched into the firmware)",
                 e->line, 0, "use it only in a 'for cwapp' section", "sema.builtin-target");
         if (name == "pixel") {
             if (e->args.size() == 2) emit("MOV ER4, #1");
@@ -2886,7 +2891,10 @@ std::string Compiler::compile(const std::string& src) {
     emit("BL __init");
     if (find_func("main")) emit("BL f_main");
     label("__wiz_halt");
-    emit("B __wiz_halt");
+    if (target.name == "cwapp")
+        emit("B __exit");
+    else
+        emit("B __wiz_halt");
     fn.clear();
     label("__init");
     emit("PUSH LR");
@@ -2897,6 +2905,10 @@ std::string Compiler::compile(const std::string& src) {
     for (auto& kv : funcs) func(kv.second);
     expand_frames();
     emit_data();
+    if (target.name == "cwapp") {
+        const int addr = alloc_bytes(kCwappPreserveStateBytes, "cwapp preserve buffer", 0);
+        out.push_back(fmt("__cwapp_preserve_state EQU 0x%04X", addr));
+    }
     std::string body;
     for (auto& l : out) { body += l; body += "\n"; }
     return body;
