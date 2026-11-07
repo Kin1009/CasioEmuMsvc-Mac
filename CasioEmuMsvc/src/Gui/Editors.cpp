@@ -198,6 +198,9 @@ inline auto MMU_Hex(auto he) {
 		return me_mmu->ReadData((size_t)data + off, 0);
 	};
 	he->WriteFn = [](ImU8* data, size_t off, ImU8 d) {
+		if (!m_emu)
+			return static_cast<ImU8>(0);
+		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		return me_mmu->WriteData((size_t)data + off, d, 0);
 	};
 	return he;
@@ -223,9 +226,12 @@ inline auto EPS_ROM_Hex(auto he) {
 		return static_cast<ImU8>((off & 1) ? word : (word >> 8));
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
+		if (!m_emu)
+			return;
 		auto* eps = m_emu->chipset.epscpu;
 		if (!eps)
 			return;
+		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		const uint32_t word_address = static_cast<uint32_t>(off / 2);
 		auto word = eps->ReadCodeWord(word_address);
 		word = (off & 1)
@@ -246,9 +252,12 @@ inline auto EPS_FLASH_Hex(auto he) {
 		return static_cast<ImU8>((off & 1) ? word : (word >> 8));
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
+		if (!m_emu)
+			return;
 		auto* eps = m_emu->chipset.epscpu;
 		if (!eps)
 			return;
+		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		const uint32_t flash_word_offset = static_cast<uint32_t>(off / 2);
 		const uint32_t word_address = kEpsFlashBaseWord + flash_word_offset;
 		auto word = eps->ReadCodeWord(word_address);
@@ -267,8 +276,10 @@ inline auto EPS_VRAM_Hex(auto he) {
 		return m_emu->chipset.epscpu ? m_emu->chipset.epscpu->ReadLcdMemory(off) : 0xff;
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
-		if (m_emu->chipset.epscpu)
-			m_emu->chipset.epscpu->WriteLcdMemory(off, value);
+		if (!m_emu || !m_emu->chipset.epscpu)
+			return;
+		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
+		m_emu->chipset.epscpu->WriteLcdMemory(off, value);
 	};
 	return he;
 }
@@ -281,7 +292,10 @@ std::vector<UIWindow*> GetEditors() {
 		const size_t bases[] = {0, 0x100, 0x1000, 0};
 		for (unsigned space = 0; space < 4; ++space) {
 			auto* editor = new HexEditor(names[space], reinterpret_cast<void*>(static_cast<uintptr_t>(space)), sizes[space], bases[space]);
-			if (space == 3) editor->ContextMenuFn = nullptr; // ROM has execution breakpoints in CodeViewer.
+			if (space == 3) {
+				editor->ContextMenuFn = nullptr; // ROM has execution breakpoints in CodeViewer.
+				editor->ReadOnly = true;
+			}
 			editor->ReadFn = [](const ImU8* data, size_t off) -> ImU8 {
 				auto* core = m_emu->chipset.t4x;
 				unsigned space = static_cast<unsigned>(reinterpret_cast<uintptr_t>(data));
@@ -290,16 +304,23 @@ std::vector<UIWindow*> GetEditors() {
 				return core->ReadCodeByte(static_cast<unsigned>(off));
 			};
 			editor->WriteFn = [](ImU8* data, size_t off, ImU8 value) {
-				if (!m_emu->GetPaused())
+				if (!m_emu)
 					return;
-				auto* core = m_emu->chipset.t4x;
-				unsigned space = static_cast<unsigned>(reinterpret_cast<uintptr_t>(data));
-				if (space != 3)
+				const unsigned space = static_cast<unsigned>(reinterpret_cast<uintptr_t>(data));
+				if (space == 3)
+					return; // ROM stays read-only.
+				if (!m_emu->GetPaused())
+					m_emu->SetPaused(true);
+				std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
+				if (auto* core = m_emu->chipset.t4x)
 					core->WriteMemory(space, static_cast<unsigned>(off), value);
-				else {
-					m_emu->chipset.WriteTiCode(off, {&value, 1});
-				}
 			};
+			if (space != 3) {
+				editor->EditBeginFn = [] {
+					if (m_emu && !m_emu->GetPaused())
+						m_emu->SetPaused(true);
+				};
+			}
 			windows.push_back(editor);
 		}
 		return windows;
@@ -312,7 +333,9 @@ std::vector<UIWindow*> GetEditors() {
 		const size_t rom_display_bytes = m_emu->chipset.epscpu->RomFormat() == casioemu::Eps6800RomFormat::UnpackedNibbles
 											 ? m_emu->chipset.rom_data.size() / 2
 											 : m_emu->chipset.rom_data.size();
-		windows.push_back(EPS_ROM_Hex(new HexEditor{"ROM", nullptr, rom_display_bytes, 0}));
+		auto* rom_editor = new HexEditor{"ROM", nullptr, rom_display_bytes, 0};
+		rom_editor->ReadOnly = true;
+		windows.push_back(EPS_ROM_Hex(rom_editor));
 		if (!m_emu->chipset.flash_data.empty())
 			windows.push_back(EPS_FLASH_Hex(new HexEditor{"Flash", nullptr, m_emu->chipset.flash_data.size(), kEpsFlashBaseByte}));
 		windows.push_back(MMU_Hex(new HexEditor{"RAM", nullptr, 0x2080, 0}));
@@ -322,6 +345,7 @@ std::vector<UIWindow*> GetEditors() {
 	else {
 		auto* rom_editor = new HexEditor{"ROM", m_emu->chipset.rom_data.data(), m_emu->chipset.rom_data.size(), 0};
 		rom_editor->SelSpansEnabled = false;
+		rom_editor->ReadOnly = true;
 		windows.push_back(rom_editor);
 		auto* ram_editor = Highlight_Default(
 			MMU_Hex(

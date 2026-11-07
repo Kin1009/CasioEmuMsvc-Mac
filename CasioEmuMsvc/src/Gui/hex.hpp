@@ -124,12 +124,14 @@ struct MemoryEditor {
 	bool (*HighlightFn)(const ImU8* data, size_t off); //= 0      // optional handler to return Highlight property (to support non-contiguous highlighting).
 	void* contextmenuuserdata = 0;
 	void (*ContextMenuFn)(void* userdata, size_t off){};
+	std::function<void()> EditBeginFn; // pause/seize the machine before an inline edit
 
 	// [Internal State]
 	bool ContentsWidthChanged;
 	size_t DataPreviewAddr;
 	size_t DataEditingAddr;
 	bool DataEditingTakeFocus;
+	int PendingHexDigit = -1;
 	char DataInputBuf[32];
 	char AddrInputBuf[32];
 	size_t GotoAddr;
@@ -181,6 +183,7 @@ struct MemoryEditor {
 	// Range selection and text decoding.
 	size_t SelStart = (size_t)-1;
 	size_t SelEnd = (size_t)-1;
+	double LastSelectionClick = -1.0;
 	bool SelDragging = false;
 	bool SelectionMenuRequested = false;
 	bool ShowTextPanel = false;
@@ -197,6 +200,12 @@ struct MemoryEditor {
 	int CopyNoticeFrame = -1000;
 	int SelTestStage = 0;
 	bool SelTestParsed = false;
+	ImVec2 EditTestPos{};
+	size_t EditTestAddr = 0;
+	bool EditTestPosSet = false;
+	int EditTestStage = 0;
+	bool EditTestOk = true;
+	uint8_t EditTestOriginal = 0;
 	bool GotoEnvApplied = false;
 	bool SelTestActive = false;
 	size_t SelTestStartAddr = 0;
@@ -240,6 +249,7 @@ struct MemoryEditor {
 	void SelectByte(size_t addr, bool extend) {
 		// Clicking a byte leaves the single-byte editor so Cmd+C always
 		// targets the range instead of a focused hex input.
+		LastSelectionClick = ImGui::GetTime();
 		DataEditingAddr = DataPreviewAddr = (size_t)-1;
 		DataEditingTakeFocus = false;
 		if (extend && HasSelection())
@@ -267,6 +277,216 @@ struct MemoryEditor {
 			SelEnd = mem_size > 0 ? mem_size - 1 : 0;
 		else
 			SelEnd = static_cast<size_t>(value);
+	}
+
+	int PressedHexDigit() const {
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.WantTextInput || io.KeyCtrl || io.KeySuper || io.KeyAlt)
+			return -1;
+		for (int value = 0; value < 10; ++value) {
+			if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_0 + value), false))
+				return value;
+		}
+		for (int value = 0; value < 6; ++value) {
+			if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_A + value), false))
+				return 10 + value;
+		}
+		return -1;
+	}
+
+	void RunEditTest(const ImU8* data, size_t mem_size) {
+		if (std::getenv("CASIOEMU_HEX_EDIT_HOLD") && EditTestStage == 0 && mem_size > 0) {
+			ImGui::SetWindowFocus();
+			SelectByte(0, false);
+			SelDragging = false;
+			DataEditingAddr = DataPreviewAddr = 0;
+			DataEditingTakeFocus = true;
+			EditTestStage = 99;
+			return;
+		}
+		if (!std::getenv("CASIOEMU_HEX_EDIT_TEST") || EditTestStage >= 99 || mem_size < 8)
+			return;
+		ImGuiIO& io = ImGui::GetIO();
+		if (ReadOnly) {
+			if (EditTestStage == 0) {
+				ImGui::SetWindowFocus();
+				SelectByte(0, false);
+				SelDragging = false;
+				EditTestOriginal = ReadByte(data, 0, mem_size);
+				io.AddKeyEvent(ImGuiKey_A, true);
+				EditTestStage = 1;
+			}
+			else if (EditTestStage == 1) {
+				io.AddKeyEvent(ImGuiKey_A, false);
+				EditTestStage = 2;
+			}
+			else if (EditTestStage == 2) {
+				const bool ok = DataEditingAddr == (size_t)-1 &&
+					ReadByte(data, 0, mem_size) == EditTestOriginal;
+				std::fprintf(stderr, "[edit] readonly=%s %s\n",
+					DataEditingAddr == (size_t)-1 ? "ignored" : "opened", ok ? "PASS" : "FAIL");
+				EditTestStage = 99;
+			}
+			return;
+		}
+		switch (EditTestStage) {
+		case 0:
+			ImGui::SetWindowFocus();
+			SelectByte(0, false);
+			SelDragging = false;
+			DataEditingAddr = DataPreviewAddr = (size_t)-1;
+			io.AddKeyEvent(ImGuiKey_1, true);
+			EditTestStage = 1;
+			break;
+		case 1:
+			io.AddKeyEvent(ImGuiKey_1, false);
+			EditTestStage = 2;
+			break;
+		case 2:
+			EditTestOk = EditTestOk && DataEditingAddr == 0;
+			std::fprintf(stderr, "[edit] open addr=%zX editing=%d buf=%s %s\n", EditTestAddr,
+				DataEditingAddr == 0 ? 1 : 0, DataInputBuf,
+				DataEditingAddr == 0 ? "PASS" : "FAIL");
+			EditTestStage = 3;
+			break;
+		case 3:
+			EditTestStage = 4;
+			break;
+		case 4:
+			io.AddInputCharactersUTF8("2");
+			EditTestStage = 5;
+			break;
+		case 5:
+			EditTestStage = 6;
+			break;
+		case 6:
+			EditTestStage = 7;
+			break;
+		case 7:
+			io.AddInputCharactersUTF8("3");
+			EditTestStage = 8;
+			break;
+		case 8:
+			io.AddInputCharactersUTF8("4");
+			EditTestStage = 9;
+			break;
+		case 9:
+			EditTestStage = 10;
+			break;
+		case 10:
+			EditTestStage = 11;
+			break;
+		case 11:
+			io.AddInputCharactersUTF8("5");
+			EditTestStage = 12;
+			break;
+		case 12:
+			io.AddInputCharactersUTF8("6");
+			EditTestStage = 13;
+			break;
+		case 13: {
+			const uint8_t v0 = ReadByte(data, 0, mem_size);
+			const uint8_t v1 = ReadByte(data, 1, mem_size);
+			const uint8_t v2 = ReadByte(data, 2, mem_size);
+			const bool ok = v0 == 0x12 && v1 == 0x34 && v2 == 0x56 &&
+				DataEditingAddr == 3;
+			std::fprintf(stderr, "[edit] write=%02X %02X %02X addr=%zX %s\n", v0, v1, v2,
+				DataEditingAddr, ok ? "PASS" : "FAIL");
+			EditTestOk = EditTestOk && ok;
+			SelStart = 0;
+			SelEnd = 5;
+			DataEditingAddr = DataPreviewAddr = (size_t)-1;
+			io.AddKeyEvent(ImGuiKey_7, true);
+			EditTestStage = 14;
+			break;
+		}
+		case 14:
+			io.AddKeyEvent(ImGuiKey_7, false);
+			EditTestStage = 15;
+			break;
+		case 15: {
+			const bool ok = DataEditingAddr == (size_t)-1 && ReadByte(data, 0, mem_size) == 0x12;
+			std::fprintf(stderr, "[edit] range=%s %s\n",
+				DataEditingAddr == (size_t)-1 ? "ignored" : "edited", ok ? "PASS" : "FAIL");
+			EditTestOk = EditTestOk && ok;
+			SelectByte(1, false);
+			SelDragging = false;
+			io.AddKeyEvent(ImGuiKey_B, true);
+			EditTestStage = 16;
+			break;
+		}
+		case 16:
+			io.AddKeyEvent(ImGuiKey_B, false);
+			EditTestStage = 17;
+			break;
+		case 17:
+			EditTestStage = 18;
+			break;
+		case 18:
+			EditTestStage = 19;
+			break;
+		case 19:
+			if (DataInputBuf[0] != 'B')
+				break;
+			io.AddKeyEvent(ImGuiKey_Backspace, true);
+			EditTestStage = 20;
+			break;
+		case 20:
+			io.AddKeyEvent(ImGuiKey_Backspace, false);
+			EditTestStage = 21;
+			break;
+		case 21: {
+			const bool ok = DataEditingAddr == 1 &&
+				ReadByte(data, 0, mem_size) == 0x12 &&
+				ReadByte(data, 1, mem_size) == 0x34 &&
+				ReadByte(data, 2, mem_size) == 0x56;
+			std::fprintf(stderr, "[edit] backspace addr=%zX bytes=%02X %02X %02X %s\n",
+				DataEditingAddr, ReadByte(data, 0, mem_size), ReadByte(data, 1, mem_size),
+				ReadByte(data, 2, mem_size), ok ? "PASS" : "FAIL");
+			EditTestOk = EditTestOk && ok;
+			io.AddKeyEvent(ImGuiKey_Escape, true);
+			EditTestStage = 22;
+			break;
+		}
+		case 22:
+			io.AddKeyEvent(ImGuiKey_Escape, false);
+			EditTestStage = 23;
+			break;
+		case 23: {
+			const bool ok = DataEditingAddr == (size_t)-1 &&
+				ReadByte(data, 0, mem_size) == 0x12 &&
+				ReadByte(data, 1, mem_size) == 0x34 &&
+				ReadByte(data, 2, mem_size) == 0x56;
+			std::fprintf(stderr, "[edit] escape=%s %s\n",
+				DataEditingAddr == (size_t)-1 ? "closed" : "open", ok ? "PASS" : "FAIL");
+			EditTestOk = EditTestOk && ok;
+			std::fprintf(stderr, "[edit] result=%s\n", EditTestOk ? "PASS" : "FAIL");
+			EditTestStage = 99;
+			break;
+		}
+		}
+	}
+
+	void MaybeBeginTypingEdit() {
+		if (ReadOnly || DataEditingAddr != (size_t)-1 || !HasSelection())
+			return;
+		const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+		const bool recently_clicked = LastSelectionClick >= 0.0 &&
+			ImGui::GetTime() - LastSelectionClick < 2.0;
+		if (!focused && !recently_clicked)
+			return;
+		size_t first = 0, last = 0;
+		NormalizeSelection(first, last);
+		if (first != last)
+			return;
+		const int digit = PressedHexDigit();
+		if (digit < 0)
+			return;
+		if (EditBeginFn)
+			EditBeginFn();
+		DataEditingAddr = DataPreviewAddr = first;
+		DataEditingTakeFocus = true;
+		PendingHexDigit = digit;
 	}
 
 	static const char* LookupGlyph(uint8_t page, uint8_t code) {
@@ -950,6 +1170,7 @@ struct MemoryEditor {
 						// Display text input on current byte
 						bool data_write = false;
 						ImGui::PushID((void*)addr);
+						const int seed_digit = PendingHexDigit;
 						if (DataEditingTakeFocus) {
 							ImGui::SetKeyboardFocusHere(0);
 							sprintf(AddrInputBuf, format_data, s.AddrDigitsCount, base_display_addr + addr);
@@ -959,29 +1180,36 @@ struct MemoryEditor {
 							// FIXME: We should have a way to retrieve the text edit cursor position more easily in the API, this is rather tedious. This is such a ugly mess we may be better off not using InputText() at all here.
 							static int Callback(ImGuiInputTextCallbackData* data) {
 								UserData* user_data = (UserData*)data->UserData;
+								if (user_data->SeedDigit >= 0) {
+									const char digit[2] = {
+										"0123456789ABCDEF"[user_data->SeedDigit], '\0'};
+									data->DeleteChars(0, data->BufTextLen);
+									data->InsertChars(0, digit);
+									data->SelectionStart = data->SelectionEnd = data->CursorPos = 1;
+									user_data->SeedDigit = -1;
+									return 0;
+								}
 								if (!data->HasSelection())
 									user_data->CursorPos = data->CursorPos;
-								if (data->SelectionStart == 0 && data->SelectionEnd == data->BufTextLen) {
-									// When not editing a byte, always refresh its InputText content pulled from underlying memory data
-									// (this is a bit tricky, since InputText technically "owns" the master copy of the buffer we edit it in there)
-									data->DeleteChars(0, data->BufTextLen);
-									data->InsertChars(0, user_data->CurrentBufOverwrite);
-									data->SelectionStart = 0;
-									data->SelectionEnd = 2;
-									data->CursorPos = 0;
-								}
 								return 0;
 							}
 							char CurrentBufOverwrite[3]; // Input
 							int CursorPos;				 // Output
+							int SeedDigit = -1;		 // Input
 						};
 						UserData user_data;
 						user_data.CursorPos = -1;
+						user_data.SeedDigit = seed_digit;
 						sprintf(user_data.CurrentBufOverwrite, format_byte, ReadFn ? ReadFn(mem_data, addr) : mem_data[addr]);
 						ImGuiInputTextFlags flags = ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_NoHorizontalScroll | ImGuiInputTextFlags_CallbackAlways;
 						flags |= ImGuiInputTextFlags_AlwaysOverwrite; // was ImGuiInputTextFlags_AlwaysInsertMode
+						if (seed_digit >= 0)
+							flags &= ~ImGuiInputTextFlags_AutoSelectAll;
 						ImGui::SetNextItemWidth(s.GlyphWidth * 2);
-						if (ImGui::InputText("##data", DataInputBuf, IM_ARRAYSIZE(DataInputBuf), flags, UserData::Callback, &user_data))
+						const bool input_entered = ImGui::InputText("##data", DataInputBuf, IM_ARRAYSIZE(DataInputBuf), flags, UserData::Callback, &user_data);
+						if (seed_digit >= 0 && ImGui::IsItemActive())
+							PendingHexDigit = -1;
+						if (input_entered)
 							data_write = data_next = true;
 						else if (!DataEditingTakeFocus && !ImGui::IsItemActive())
 							DataEditingAddr = data_editing_addr_next = (size_t)-1;
@@ -1022,11 +1250,19 @@ struct MemoryEditor {
 						if (ImGui::IsItemHovered()) {
 							hovered_any_byte = true;
 							const ImGuiIO& io = ImGui::GetIO();
-							if (ImGui::IsMouseClicked(0))
-								SelectByte(addr, io.KeyShift);
 							if (ImGui::IsMouseDoubleClicked(0)) {
-								DataEditingTakeFocus = !ReadOnly;
-								data_editing_addr_next = addr;
+								// A double-click edits the byte.  It must not run
+								// SelectByte after the first click, because that
+								// would clear the editor again.
+								if (!ReadOnly) {
+									if (EditBeginFn)
+										EditBeginFn();
+									DataEditingTakeFocus = true;
+									data_editing_addr_next = addr;
+								}
+							}
+							else if (ImGui::IsMouseClicked(0)) {
+								SelectByte(addr, io.KeyShift);
 							}
 							if (ImGui::IsItemClicked(1)) {
 								size_t sel_first = 0, sel_last = 0;
@@ -1075,12 +1311,16 @@ struct MemoryEditor {
 					const float ascii_rel = ascii_io.MousePos.x - ascii_pos.x;
 					const int ascii_col = static_cast<int>(ascii_rel / std::max(1.0f, s.GlyphWidth));
 					const size_t ascii_addr = line_addr + static_cast<size_t>(std::max(0, ascii_col));
-					if (ImGui::IsItemClicked(0) && ascii_col >= 0 && ascii_col < Cols &&
-						ascii_addr < mem_size)
-						SelectByte(ascii_addr, ascii_io.KeyShift);
-					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size) {
+					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size &&
+						!ReadOnly) {
+						if (EditBeginFn)
+							EditBeginFn();
 						DataEditingAddr = DataPreviewAddr = ascii_addr;
 						DataEditingTakeFocus = true;
+					}
+					else if (ImGui::IsItemClicked(0) && ascii_col >= 0 && ascii_col < Cols &&
+						ascii_addr < mem_size) {
+						SelectByte(ascii_addr, ascii_io.KeyShift);
 					}
 					ImGui::PopID();
 					ImVec2 pos = ascii_pos;
@@ -1142,14 +1382,22 @@ struct MemoryEditor {
 		ImGui::SetCursorPosX(s.WindowWidth);
 		ImGui::Dummy(ImVec2(0.0f, 0.0f));
 
-		if (data_next && DataEditingAddr + 1 < mem_size) {
+		if (data_next && DataEditingAddr != (size_t)-1 && DataEditingAddr + 1 < mem_size) {
 			DataEditingAddr = DataPreviewAddr = DataEditingAddr + 1;
+			if (HasSelection()) {
+				size_t first = 0, last = 0;
+				NormalizeSelection(first, last);
+				if (first == last)
+					SelStart = SelEnd = DataEditingAddr;
+			}
 			DataEditingTakeFocus = true;
 		}
-		else if (data_editing_addr_next != (size_t)-1) {
+		else if (!ReadOnly && data_editing_addr_next != (size_t)-1) {
 			DataEditingAddr = DataPreviewAddr = data_editing_addr_next;
 			DataEditingTakeFocus = true;
 		}
+		MaybeBeginTypingEdit();
+		RunEditTest(mem_data, mem_size);
 
 		const bool lock_show_data_preview = OptShowDataPreview;
 		if (OptShowOptions) {
@@ -1619,6 +1867,7 @@ struct MemoryEditor {
 						// Display text input on current byte
 						bool data_write = false;
 						ImGui::PushID((void*)addr);
+						const int seed_digit = PendingHexDigit;
 						if (DataEditingTakeFocus) {
 							ImGui::SetKeyboardFocusHere(0);
 							sprintf(AddrInputBuf, format_data, s.AddrDigitsCount, base_display_addr + addr);
@@ -1628,34 +1877,39 @@ struct MemoryEditor {
 							// FIXME: We should have a way to retrieve the text edit cursor position more easily in the API, this is rather tedious. This is such a ugly mess we may be better off not using InputText() at all here.
 							static int Callback(ImGuiInputTextCallbackData* data) {
 								UserData* user_data = (UserData*)data->UserData;
+								if (user_data->SeedDigit >= 0) {
+									const char digit[2] = {
+										"0123456789ABCDEF"[user_data->SeedDigit], '\0'};
+									data->DeleteChars(0, data->BufTextLen);
+									data->InsertChars(0, digit);
+									data->SelectionStart = data->SelectionEnd = data->CursorPos = 1;
+									user_data->SeedDigit = -1;
+									return 0;
+								}
 								if (!data->HasSelection())
 									user_data->CursorPos = data->CursorPos;
-								if (data->SelectionStart == 0 && data->SelectionEnd == data->BufTextLen) {
-									// When not editing a byte, always refresh its InputText content pulled from underlying memory data
-									// (this is a bit tricky, since InputText technically "owns" the master copy of the buffer we edit it in there)
-									data->DeleteChars(0, data->BufTextLen);
-									data->InsertChars(0, user_data->CurrentBufOverwrite);
-									data->SelectionStart = 0;
-									data->SelectionEnd = 2;
-									data->CursorPos = 0;
-								}
 								return 0;
 							}
 							char CurrentBufOverwrite[3]; // Input
 							int CursorPos;				 // Output
+							int SeedDigit = -1;		 // Input
 						};
 						UserData user_data;
 						user_data.CursorPos = -1;
+						user_data.SeedDigit = seed_digit;
 						sprintf(user_data.CurrentBufOverwrite, format_byte, ReadFn ? ReadFn(mem_data, addr) : mem_data[addr]);
 						ImGuiInputTextFlags flags = ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_NoHorizontalScroll | ImGuiInputTextFlags_CallbackAlways;
 						flags |= ImGuiInputTextFlags_AlwaysOverwrite; // was ImGuiInputTextFlags_AlwaysInsertMode
+						if (seed_digit >= 0)
+							flags &= ~ImGuiInputTextFlags_AutoSelectAll;
 						ImGui::SetNextItemWidth(s.GlyphWidth * 2);
-						if (ImGui::InputText("##data", DataInputBuf, IM_ARRAYSIZE(DataInputBuf), flags, UserData::Callback, &user_data))
+						const bool input_entered = ImGui::InputText("##data", DataInputBuf, IM_ARRAYSIZE(DataInputBuf), flags, UserData::Callback, &user_data);
+						if (seed_digit >= 0 && ImGui::IsItemActive())
+							PendingHexDigit = -1;
+						if (input_entered)
 							data_write = data_next = true;
 						else if (!DataEditingTakeFocus && !ImGui::IsItemActive())
 							DataEditingAddr = data_editing_addr_next = (size_t)-1;
-						if (DataEditingTakeFocus)
-							ImGui::SetKeyboardFocusHere(-1);
 						DataEditingTakeFocus = false;
 						if (user_data.CursorPos >= 2)
 							data_write = data_next = true;
@@ -1702,11 +1956,19 @@ struct MemoryEditor {
 						if (ImGui::IsItemHovered()) {
 							hovered_any_byte = true;
 							const ImGuiIO& io = ImGui::GetIO();
-							if (ImGui::IsMouseClicked(0))
-								SelectByte(addr, io.KeyShift);
 							if (ImGui::IsMouseDoubleClicked(0)) {
-								DataEditingTakeFocus = !ReadOnly;
-								data_editing_addr_next = addr;
+								// A double-click edits the byte.  It must not run
+								// SelectByte after the first click, because that
+								// would clear the editor again.
+								if (!ReadOnly) {
+									if (EditBeginFn)
+										EditBeginFn();
+									DataEditingTakeFocus = true;
+									data_editing_addr_next = addr;
+								}
+							}
+							else if (ImGui::IsMouseClicked(0)) {
+								SelectByte(addr, io.KeyShift);
 							}
 							if (ImGui::IsItemClicked(1)) {
 								size_t sel_first = 0, sel_last = 0;
@@ -1755,12 +2017,16 @@ struct MemoryEditor {
 					const float ascii_rel = ascii_io.MousePos.x - ascii_pos.x;
 					const int ascii_col = static_cast<int>(ascii_rel / std::max(1.0f, s.GlyphWidth));
 					const size_t ascii_addr = line_addr + static_cast<size_t>(std::max(0, ascii_col));
-					if (ImGui::IsItemClicked(0) && ascii_col >= 0 && ascii_col < Cols &&
-						ascii_addr < mem_size)
-						SelectByte(ascii_addr, ascii_io.KeyShift);
-					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size) {
+					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size &&
+						!ReadOnly) {
+						if (EditBeginFn)
+							EditBeginFn();
 						DataEditingAddr = DataPreviewAddr = ascii_addr;
 						DataEditingTakeFocus = true;
+					}
+					else if (ImGui::IsItemClicked(0) && ascii_col >= 0 && ascii_col < Cols &&
+						ascii_addr < mem_size) {
+						SelectByte(ascii_addr, ascii_io.KeyShift);
 					}
 					ImGui::PopID();
 					ImVec2 pos = ascii_pos;
@@ -1822,14 +2088,22 @@ struct MemoryEditor {
 		ImGui::SetCursorPosX(s.WindowWidth);
 		ImGui::Dummy(ImVec2(0.0f, 0.0f));
 
-		if (data_next && DataEditingAddr + 1 < mem_size) {
+		if (data_next && DataEditingAddr != (size_t)-1 && DataEditingAddr + 1 < mem_size) {
 			DataEditingAddr = DataPreviewAddr = DataEditingAddr + 1;
+			if (HasSelection()) {
+				size_t first = 0, last = 0;
+				NormalizeSelection(first, last);
+				if (first == last)
+					SelStart = SelEnd = DataEditingAddr;
+			}
 			DataEditingTakeFocus = true;
 		}
-		else if (data_editing_addr_next != (size_t)-1) {
+		else if (!ReadOnly && data_editing_addr_next != (size_t)-1) {
 			DataEditingAddr = DataPreviewAddr = data_editing_addr_next;
 			DataEditingTakeFocus = true;
 		}
+		MaybeBeginTypingEdit();
+		RunEditTest(mem_data, mem_size);
 
 		const bool lock_show_data_preview = OptShowDataPreview;
 		if (OptShowOptions) {
@@ -1914,8 +2188,10 @@ struct MemoryEditor {
 				ImGui::BeginChild("##scrolling");
 				ImGui::SetScrollFromPosY(ImGui::GetCursorStartPos().y + (GotoAddr / Cols) * ImGui::GetTextLineHeight());
 				ImGui::EndChild();
-				DataEditingAddr = DataPreviewAddr = GotoAddr;
-				DataEditingTakeFocus = true;
+				if (!ReadOnly) {
+					DataEditingAddr = DataPreviewAddr = GotoAddr;
+					DataEditingTakeFocus = true;
+				}
 			}
 			GotoAddr = (size_t)-1;
 		}
