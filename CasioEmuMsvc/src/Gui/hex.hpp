@@ -570,6 +570,17 @@ struct MemoryEditor {
 		bool dark = true;
 	};
 
+	// Hex digits and ASCII glyphs are drawn brighter than ordinary UI text so
+	// they stay readable on the darker span tints.
+	ImVec4 LighterTextColor() const {
+		ImVec4 c = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+		const float lift = 0.22f;
+		c.x += (1.0f - c.x) * lift;
+		c.y += (1.0f - c.y) * lift;
+		c.z += (1.0f - c.z) * lift;
+		return c;
+	}
+
 	SpanTintInfo SpanTint(ImU32 packed) const {
 		ImVec4 source = ImGui::ColorConvertU32ToFloat4(packed);
 		if (source.w <= 0.0f && source.x <= 0.0f && source.y <= 0.0f && source.z <= 0.0f)
@@ -581,8 +592,8 @@ struct MemoryEditor {
 		// Keep the semantic hue, but never paint the raw model colour.  The
 		// tint stays close to the editor background on both sides of the
 		// luminance scale so normal and dimmed text keep their contrast.
-		saturation = 0.30f;
-		value = dark ? 0.36f : 0.70f;
+		saturation = 0.35f;
+		value = dark ? 0.22f : 0.50f;
 		ImVec4 fill;
 		ImGui::ColorConvertHSVtoRGB(hue, saturation, value, fill.x, fill.y, fill.z);
 		fill.w = SpanTintOpacity;
@@ -610,7 +621,7 @@ struct MemoryEditor {
 			return DimTextCache;
 		const ImVec4 background = EditorBackground();
 		const bool dark = SrgbLuminance(background) < 0.45f;
-		const float value = dark ? 0.36f : 0.70f;
+		const float value = dark ? 0.22f : 0.50f;
 		const float alpha = SpanTintOpacity;
 		ImVec4 candidate = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 		// Sample the hue circle and raise the disabled text colour only as far
@@ -863,7 +874,7 @@ struct MemoryEditor {
 		if (OptShowAscii)
 			draw_list->AddLine(ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y), ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y + 9999), ImGui::GetColorU32(ImGuiCol_Border));
 
-		const ImU32 color_text = ImGui::GetColorU32(ImGuiCol_Text);
+		const ImU32 color_text = ImGui::ColorConvertFloat4ToU32(LighterTextColor());
 		const ImU32 color_disabled = OptGreyOutZeroes
 			? ImGui::ColorConvertFloat4ToU32(DimTextColor()) : color_text;
 
@@ -982,19 +993,19 @@ struct MemoryEditor {
 
 						if (OptShowHexII) {
 							if ((b >= 32 && b < 128))
-								ImGui::Text(".%c ", b);
+								ImGui::TextColored(LighterTextColor(), ".%c ", b);
 							else if (b == 0xFF && OptGreyOutZeroes)
 								ImGui::TextDisabled("## ");
 							else if (b == 0x00)
 								ImGui::Text("   ");
 							else
-								ImGui::Text(format_byte_space, b);
+								ImGui::TextColored(LighterTextColor(), format_byte_space, b);
 						}
 						else {
 							if (b == 0 && OptGreyOutZeroes)
 								ImGui::TextDisabled("00 ");
 							else
-								ImGui::Text(format_byte_space, b);
+								ImGui::TextColored(LighterTextColor(), format_byte_space, b);
 						}
 						if (ImGui::IsItemHovered()) {
 							hovered_any_byte = true;
@@ -1519,7 +1530,7 @@ struct MemoryEditor {
 		if (OptShowAscii)
 			draw_list->AddLine(ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y), ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y + 9999), ImGui::GetColorU32(ImGuiCol_Border));
 
-		const ImU32 color_text = ImGui::GetColorU32(ImGuiCol_Text);
+		const ImU32 color_text = ImGui::ColorConvertFloat4ToU32(LighterTextColor());
 		const ImU32 color_disabled = OptGreyOutZeroes
 			? ImGui::ColorConvertFloat4ToU32(DimTextColor()) : color_text;
 
@@ -1662,19 +1673,19 @@ struct MemoryEditor {
 
 						if (OptShowHexII) {
 							if ((b >= 32 && b < 128))
-								ImGui::Text(".%c ", b);
+								ImGui::TextColored(LighterTextColor(), ".%c ", b);
 							else if (b == 0xFF && OptGreyOutZeroes)
 								ImGui::TextDisabled("## ");
 							else if (b == 0x00)
 								ImGui::Text("   ");
 							else
-								ImGui::Text(format_byte_space, b);
+								ImGui::TextColored(LighterTextColor(), format_byte_space, b);
 						}
 						else {
 							if (b == 0 && OptGreyOutZeroes)
 								ImGui::TextDisabled("00 ");
 							else
-								ImGui::Text(format_byte_space, b);
+								ImGui::TextColored(LighterTextColor(), format_byte_space, b);
 						}
 						if (ImGui::IsItemHovered()) {
 							hovered_any_byte = true;
