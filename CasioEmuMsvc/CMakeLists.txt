@@ -361,8 +361,8 @@ if(BUILD_EXECUTABLE)
             MACOSX_BUNDLE_BUNDLE_NAME "CasioEmuMsvc"
             MACOSX_BUNDLE_IDENTIFIER "com.telecomadm1145.casioemumsvc"
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.telecomadm1145.casioemumsvc"
-            MACOSX_BUNDLE_BUNDLE_VERSION "1.0.0"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0.0"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1.1.0"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.1.0"
             MACOSX_BUNDLE_COPYRIGHT "Copyright (C) 2024-2026 telecomadm1145"
             MACOSX_BUNDLE_ICON_FILE "icon.icns"
         )
