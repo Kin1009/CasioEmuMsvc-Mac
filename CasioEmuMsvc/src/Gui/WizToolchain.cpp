@@ -205,6 +205,8 @@ void ResetExamplesToBundled() {
 	CopyExamplesTree(bundled, user, false);
 }
 
+
+
 // ---------------------------------------------------------------- small text
 std::vector<std::string> SplitLines(const std::string& text) {
 	std::vector<std::string> lines;
@@ -2093,6 +2095,14 @@ private:
 };
 
 }  // namespace
+
+std::string WizExamplesDirectory() {
+	return WizExamplesDir();
+}
+
+void ResetWizExamples() {
+	ResetExamplesToBundled();
+}
 
 namespace casioemu::wizui {
 namespace {

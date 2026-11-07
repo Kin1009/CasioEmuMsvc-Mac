@@ -38,3 +38,9 @@ void ResetBuildSummary();
 
 UIWindow* CreateToolchainWindow();
 UIWindow* CreateCalcScreenWindow();
+
+// Example library used by the editor's Examples menu. Returns the writable
+// user copy (created from the bundle on first use) and restores that copy from
+// the bundled files when the reset action is used.
+std::string WizExamplesDirectory();
+void ResetWizExamples();

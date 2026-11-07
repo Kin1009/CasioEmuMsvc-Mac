@@ -1074,6 +1074,37 @@ void TransferDocumentToToolchain(FileDocument& doc);
 void SaveFileDocument(FileDocument& doc, const std::string& path);
 bool FileDocumentDirty(const FileDocument& doc);
 
+void RenderEditorExampleTree(const std::filesystem::path& dir) {
+	std::error_code ec;
+	std::vector<std::filesystem::path> dirs;
+	std::vector<std::filesystem::path> files;
+	for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+		if (it->is_directory(ec))
+			dirs.push_back(it->path());
+		else if (it->is_regular_file(ec)) {
+			const std::string ext = it->path().extension().string();
+			if (ext == ".wz" || ext == ".cwiz" || ext == ".cwapplink")
+				files.push_back(it->path());
+		}
+	}
+	std::sort(dirs.begin(), dirs.end());
+	std::sort(files.begin(), files.end());
+	for (const auto& sub : dirs) {
+		ImGui::PushID(sub.string().c_str());
+		if (ImGui::BeginMenu(sub.filename().string().c_str())) {
+			RenderEditorExampleTree(sub);
+			ImGui::EndMenu();
+		}
+		ImGui::PopID();
+	}
+	for (const auto& file : files) {
+		ImGui::PushID(file.string().c_str());
+		if (ImGui::MenuItem(file.filename().string().c_str()))
+			OpenFileInEditor(file);
+		ImGui::PopID();
+	}
+}
+
 void BuildToolchain(bool run) {
 	UIWindow* win = FindWindow("Wiz Compiler");
 	if (!win)
@@ -2788,6 +2819,18 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 				AppendOutput("[wiz] no ROP launcher yet; build a ROP payload first");
 			else
 				AppendOutput("[wiz] launcher copied to clipboard");
+		}
+		ImGui::SameLine();
+		if (ImGui::Button(L("Shell.Examples", "Examples")))
+			ImGui::OpenPopup("##editor_examples");
+		if (ImGui::BeginPopup("##editor_examples")) {
+			if (ImGui::MenuItem(L("Shell.ResetExamples", "Reset Examples"))) {
+				ResetWizExamples();
+				AppendOutput("[wiz] examples restored from the app bundle");
+			}
+			ImGui::Separator();
+			RenderEditorExampleTree(WizExamplesDirectory());
+			ImGui::EndPopup();
 		}
 
 		// Row 6: original ROM for cwapp patching / ROM-referenced builds.
