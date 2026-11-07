@@ -124,7 +124,7 @@ std::string WizDataDir() {
 #endif
 }
 
-std::string WizExamplesDir() {
+std::string BundledExamplesDir() {
 	if (const char* env = std::getenv("WIZ_DATA_DIR")) {
 		if (*env) {
 			std::filesystem::path candidate = std::filesystem::path(env) / "examples";
@@ -146,6 +146,63 @@ std::string WizExamplesDir() {
 		}
 	}
 	return (std::filesystem::path(WizDataDir()) / "examples").string();
+}
+
+// Examples are copied out of the app bundle on first use and then live in the
+// user's application-support folder.  Rebuilding or reinstalling the app no
+// longer overwrites edits made in the editor; the Reset Examples action is the
+// only thing that restores the bundled copies.
+std::string UserExamplesDir() {
+	char* pref = SDL_GetPrefPath("Kin1009", "CasioEmuMsvc");
+	if (!pref)
+		return {};
+	std::string root(pref);
+	SDL_free(pref);
+	return (std::filesystem::path(root) / "examples").string();
+}
+
+bool CopyExamplesTree(const std::string& source, const std::string& target,
+					  bool overwrite) {
+	if (source.empty() || target.empty())
+		return false;
+	std::error_code ec;
+	std::filesystem::create_directories(target, ec);
+	if (ec)
+		return false;
+	auto options = std::filesystem::copy_options::recursive;
+	options |= overwrite ? std::filesystem::copy_options::overwrite_existing
+						 : std::filesystem::copy_options::skip_existing;
+	std::filesystem::copy(source, target, options, ec);
+	return !ec;
+}
+
+std::string WizExamplesDir() {
+	static std::string resolved;
+	if (!resolved.empty())
+		return resolved;
+	const std::string bundled = BundledExamplesDir();
+	const std::string user = UserExamplesDir();
+	if (!user.empty()) {
+		std::error_code ec;
+		if (!std::filesystem::is_directory(user, ec))
+			CopyExamplesTree(bundled, user, false);
+		if (std::filesystem::is_directory(user, ec)) {
+			resolved = user;
+			return resolved;
+		}
+	}
+	resolved = bundled;
+	return resolved;
+}
+
+void ResetExamplesToBundled() {
+	const std::string bundled = BundledExamplesDir();
+	const std::string user = UserExamplesDir();
+	if (user.empty())
+		return;
+	std::error_code ec;
+	std::filesystem::remove_all(user, ec);
+	CopyExamplesTree(bundled, user, false);
 }
 
 // ---------------------------------------------------------------- small text
@@ -1365,6 +1422,11 @@ private:
 			ImGui::MenuItem("(examples not found)", nullptr, false, false);
 			return;
 		}
+		if (ImGui::MenuItem("Reset Examples")) {
+			ResetExamplesToBundled();
+			AddLog(Sev::Note, "examples restored from the app bundle");
+		}
+		ImGui::Separator();
 		const std::set<std::string> nested = NestedExampleNames(root);
 		RenderExampleDir(root, true, nested);
 	}
