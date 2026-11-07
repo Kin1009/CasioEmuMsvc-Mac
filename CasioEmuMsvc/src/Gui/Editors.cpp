@@ -55,6 +55,18 @@ static void DrawColumnSelector(MemoryEditor& editor) {
 	}
 	ImGui::SameLine();
 	ImGui::TextDisabled("bytes per line");
+	ImGui::SameLine();
+	ImGui::TextDisabled("Tint");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(std::min(150.0f, std::max(90.0f, ImGui::GetContentRegionAvail().x * 0.3f)));
+	float tint_percent = MemoryEditor::SpanTintOpacity * 100.0f;
+	if (ImGui::SliderFloat("##span_tint", &tint_percent, 0.0f, 100.0f, "%.0f%%"))
+		MemoryEditor::SpanTintOpacity = std::clamp(tint_percent / 100.0f, 0.0f, 1.0f);
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+		ImGui::BeginTooltip();
+		ImGui::TextUnformatted("Opacity of the RAM/ROM span highlights. 0% hides them, 100% is solid.");
+		ImGui::EndTooltip();
+	}
 	ImGui::Spacing();
 }
 
