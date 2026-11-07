@@ -609,6 +609,10 @@ private:
 				m_emu->ModelDefinition.rom_path = previous;
 		}
 		m_emu->SetPaused(was_paused);
+		// Boot the freshly loaded image from its reset vector instead of leaving
+		// the CPU in whatever state the previous program was in.
+		if (loaded)
+			m_emu->ResetToMainMenu();
 		return loaded;
 	}
 
@@ -1171,6 +1175,10 @@ private:
 			loaded = m_emu->chipset.ReloadRom(error);
 		}
 		m_emu->SetPaused(was_paused);
+		// Show the stock image's own power-on screen, not the leftover state of
+		// the patched program.
+		if (loaded)
+			m_emu->ResetToMainMenu();
 		AddLog(loaded ? Sev::Note : Sev::Error,
 			   loaded ? "the stock ROM is loaded again" : "cannot reload the stock ROM: " + error);
 	}
