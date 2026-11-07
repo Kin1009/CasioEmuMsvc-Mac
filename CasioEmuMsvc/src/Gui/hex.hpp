@@ -100,13 +100,13 @@ struct MemoryEditor {
 	// Span fill opacity override, shared by every memory view (0 = invisible,
 	// 1 = solid, negative = use the theme default).
 	static inline float SpanTintOpacity = -1.0f;
-	static float DefaultSpanTintOpacity(bool dark) { return dark ? 0.34f : 0.30f; }
+	static float DefaultSpanTintOpacity(bool dark) { (void)dark; return 0.85f; }
 	static float EffectiveSpanTintOpacity(bool dark) {
 		return SpanTintOpacity >= 0.0f ? SpanTintOpacity : DefaultSpanTintOpacity(dark);
 	}
 	// Span vibrancy (saturation) and an optional uniform colour override.
 	// With SpanTintUniform off each span keeps its own semantic hue.
-	static inline float SpanTintSaturation = 0.62f;
+	static inline float SpanTintSaturation = 1.0f;
 	static inline bool SpanTintUniform = false;
 	static inline ImVec4 SpanTintColor = ImVec4(0.31f, 0.78f, 0.47f, 1.0f);
 	bool OptShowOptions;							   // = true   // display options button/context menu. when disabled, options will be locked unless you provide your own UI for them.
