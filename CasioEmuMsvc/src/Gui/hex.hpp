@@ -97,8 +97,13 @@ struct MemoryEditor {
 	bool Open;										   // = true   // set to false when DrawWindow() was closed. ignore if not using DrawWindow().
 	bool ReadOnly;									   // = false  // disable any editing.
 	int Cols;										   // = 16     // number of columns to display.
-	// Span fill opacity, shared by every memory view (0 = invisible, 1 = solid).
-	static inline float SpanTintOpacity = 0.34f;
+	// Span fill opacity override, shared by every memory view (0 = invisible,
+	// 1 = solid, negative = use the theme default).
+	static inline float SpanTintOpacity = -1.0f;
+	static float DefaultSpanTintOpacity(bool dark) { return dark ? 0.34f : 0.30f; }
+	static float EffectiveSpanTintOpacity(bool dark) {
+		return SpanTintOpacity >= 0.0f ? SpanTintOpacity : DefaultSpanTintOpacity(dark);
+	}
 	bool OptShowOptions;							   // = true   // display options button/context menu. when disabled, options will be locked unless you provide your own UI for them.
 	bool OptShowDataPreview;						   // = false  // display a footer previewing the decimal/binary/hex/float representation of the currently selected bytes.
 	bool OptShowHexII;								   // = false  // display values in HexII representation instead of regular hexadecimal: hide null/zero bytes, ascii values as ".X".
@@ -592,16 +597,17 @@ struct MemoryEditor {
 		// Keep the semantic hue, but never paint the raw model colour.  The
 		// tint stays close to the editor background on both sides of the
 		// luminance scale so normal and dimmed text keep their contrast.
-		saturation = 0.35f;
-		value = dark ? 0.22f : 0.50f;
+		saturation = 0.30f;
+		value = dark ? 0.36f : 0.70f;
 		ImVec4 fill;
 		ImGui::ColorConvertHSVtoRGB(hue, saturation, value, fill.x, fill.y, fill.z);
-		fill.w = SpanTintOpacity;
+		const float opacity = EffectiveSpanTintOpacity(dark);
+		fill.w = opacity;
 		SpanTintInfo info;
 		info.fill = fill;
 		info.dark = dark;
 		info.border = fill;
-		info.border.w = std::clamp(SpanTintOpacity * 1.5f, 0.0f, 1.0f);
+		info.border.w = std::clamp(opacity * 1.5f, 0.0f, 1.0f);
 		// The outline, not the fill, makes the region obvious.
 		info.add_border = true;
 		info.fill_u32 = ImGui::ColorConvertFloat4ToU32(fill);
@@ -621,14 +627,14 @@ struct MemoryEditor {
 			return DimTextCache;
 		const ImVec4 background = EditorBackground();
 		const bool dark = SrgbLuminance(background) < 0.45f;
-		const float value = dark ? 0.22f : 0.50f;
-		const float alpha = SpanTintOpacity;
+		const float value = dark ? 0.36f : 0.70f;
+		const float alpha = EffectiveSpanTintOpacity(dark);
 		ImVec4 candidate = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 		// Sample the hue circle and raise the disabled text colour only as far
 		// as the worst tinted background requires.
 		for (int step = 0; step < 12; ++step) {
 			ImVec4 tint;
-			ImGui::ColorConvertHSVtoRGB(static_cast<float>(step) / 12.0f, 0.25f, value,
+			ImGui::ColorConvertHSVtoRGB(static_cast<float>(step) / 12.0f, 0.30f, value,
 				tint.x, tint.y, tint.z);
 			tint.w = alpha;
 			candidate = EnsureContrast(candidate, Composite(tint, background));
