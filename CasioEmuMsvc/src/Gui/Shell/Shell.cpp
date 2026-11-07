@@ -3451,7 +3451,7 @@ const std::vector<PaletteCommand>& Commands() {
 		{ "folder.open", "File: Open Folder...", "" },
 		{ "plugin.install", "Plugins: Open Settings > Plugins", "" },
 		{ "plugin.manager", "Plugins: Open Settings > Plugins", "" },
-		{ "view.sidebar", "View: Toggle Sidebar", "" },
+		{ "view.sidebar", "View: Toggle Sidebar", "Cmd+Shift+B" },
 		{ "view.panel", "View: Toggle Bottom Panel", "" },
 		{ "view.tools", "View: Toggle Tool Dock", "" },
 		{ "view.calculator", "View: Toggle Calculator Panel", "" },
@@ -3956,7 +3956,11 @@ void RenderShortcuts() {
 		if (ImGui::IsKeyPressed(ImGuiKey_W, false))
 			CloseFileDocument(g.activeFile);
 	}
-	if (ImGui::IsKeyPressed(ImGuiKey_B, false)) ToggleSidebar();
+	// Avoid a bare Cmd+B toggle while a search/text field has focus: the model
+	// picker and editors made the sidebar vanish mid-typing.
+	if (!ImGui::GetIO().WantTextInput && io.KeyShift &&
+		ImGui::IsKeyPressed(ImGuiKey_B, false))
+		ToggleSidebar();
 	if (ImGui::IsKeyPressed(ImGuiKey_J, false)) ToggleBottomPanel();
 	if (ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false)) FocusTerminal();
 	if (ImGui::IsKeyPressed(ImGuiKey_Comma, false)) OpenSettings();
