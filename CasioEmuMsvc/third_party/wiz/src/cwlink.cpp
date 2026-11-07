@@ -107,6 +107,16 @@ bool same_image(const cwmode::Image& a, const cwmode::Image& b) {
     return a.width == b.width && a.height == b.height && a.rgba == b.rgba;
 }
 
+// A blank 48x23 source for `#cwapp <slot> "<text>"`.  Passing it through
+// prepare_mode_icon yields the stock border and empty shortcut-key box.
+cwmode::Image blank_580_icon() {
+    cwmode::Image image;
+    image.width = 48;
+    image.height = 23;
+    image.rgba.assign((size_t)image.width * image.height * 4, 255);
+    return image;
+}
+
 }  // namespace
 
 bool is_cwapplink_path(const std::string& path) {
@@ -279,17 +289,23 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
                 out.error_file = entry.path;
                 return out;
             }
-            p.app.icon = resolve_relative(entry.path, p.built.cwapp_icon);
             std::string image_error;
-            if (!cwmode::load_image(p.app.icon, p.icon, image_error)) {
-                out.error = image_error;
-                out.error_file = entry.path;
-                return out;
+            if (p.built.cwapp_icon.empty()) {
+                p.app.icon.clear();
+                p.icon = cwmode::prepare_mode_icon(blank_580_icon(),
+                                                   cwmode::Model::Cw580);
+            } else {
+                p.app.icon = resolve_relative(entry.path, p.built.cwapp_icon);
+                if (!cwmode::load_image(p.app.icon, p.icon, image_error)) {
+                    out.error = image_error;
+                    out.error_file = entry.path;
+                    return out;
+                }
+                // Apply the stock tile decoration (border + shortcut-key box)
+                // to the unselected image.  Pre-decorated images are detected
+                // and are not cropped a second time.
+                p.icon = cwmode::prepare_mode_icon(p.icon, cwmode::Model::Cw580);
             }
-            // Apply the stock tile decoration (border + shortcut-key box) to
-            // the unselected image.  Pre-decorated images are detected and are
-            // not cropped a second time.
-            p.icon = cwmode::prepare_mode_icon(p.icon, cwmode::Model::Cw580);
             if (p.built.cwapp_icon_selected.empty()) {
                 // Three-argument form: the selected variant is the exact
                 // inverse of the decorated unselected image.
@@ -728,13 +744,18 @@ CwappLinkResult build_single_from_image(const BuildResult& built,
 
     cwmode::Image icon, icon_sel;
     std::string image_error;
-    const std::string icon_path = resolve_relative(source_path, built.cwapp_icon);
+    const std::string icon_path =
+        built.cwapp_icon.empty() ? std::string() : resolve_relative(source_path, built.cwapp_icon);
     std::string sel_path;
-    if (!cwmode::load_image(icon_path, icon, image_error)) {
-        out.error = image_error;
-        return out;
+    if (built.cwapp_icon.empty()) {
+        icon = cwmode::prepare_mode_icon(blank_580_icon(), cwmode::Model::Cw580);
+    } else {
+        if (!cwmode::load_image(icon_path, icon, image_error)) {
+            out.error = image_error;
+            return out;
+        }
+        icon = cwmode::prepare_mode_icon(icon, cwmode::Model::Cw580);
     }
-    icon = cwmode::prepare_mode_icon(icon, cwmode::Model::Cw580);
     if (built.cwapp_icon_selected.empty()) {
         icon_sel = cwmode::invert_image(icon);
     } else {

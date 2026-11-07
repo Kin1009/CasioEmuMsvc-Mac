@@ -482,15 +482,18 @@ private:
 };
 
 // Split a directive argument list on whitespace, honouring double quotes and
-// backslash escapes inside them.  Used by `#cwapp <slot> <text> <icon> <icon>`.
-static std::vector<std::string> split_quoted_args(const std::string& text, std::string& err) {
+// backslash escapes inside them.  Used by `#cwapp <slot> <text> [<icon> [<selected>]]`.
+static std::vector<std::string> split_quoted_args(const std::string& text, std::string& err,
+                                                  std::vector<bool>* quoted_out = nullptr) {
     std::vector<std::string> out;
+    if (quoted_out) quoted_out->clear();
     size_t i = 0;
     while (i < text.size()) {
         while (i < text.size() && std::isspace((unsigned char)text[i])) i++;
         if (i >= text.size()) break;
         std::string token;
-        if (text[i] == '"') {
+        const bool quoted = text[i] == '"';
+        if (quoted) {
             i++;
             bool closed = false;
             while (i < text.size()) {
@@ -514,6 +517,7 @@ static std::vector<std::string> split_quoted_args(const std::string& text, std::
             while (i < text.size() && !std::isspace((unsigned char)text[i])) token += text[i++];
         }
         out.push_back(token);
+        if (quoted_out) quoted_out->push_back(quoted);
     }
     return out;
 }
@@ -821,16 +825,17 @@ private:
             const std::string args = strip(rest);
             if (!args.empty()) {
                 std::string terr;
-                std::vector<std::string> toks = split_quoted_args(args, terr);
+                std::vector<bool> quoted;
+                std::vector<std::string> toks = split_quoted_args(args, terr, &quoted);
                 if (!terr.empty())
                     throw CwizError("#cwapp: " + terr, line, 0,
-                                    "write '#cwapp 1 \"Name\" icon.png selected.png'",
+                                    "write '#cwapp 1 \"Name\" [icon.png [selected.png]]'",
                                     "preproc.directive-argument");
-                if (toks.size() < 3)
+                if (toks.size() < 2)
                     throw CwizError(
-                        "#cwapp with arguments needs a slot, a text and one or two icon paths",
+                        "#cwapp with arguments needs a slot and a text (icon paths are optional)",
                         line, 0,
-                        "write '#cwapp 1 \"Name\" icon.png [selected.png]' (or use a bare "
+                        "write '#cwapp 1 \"Name\" [icon.png [selected.png]]' (or use a bare "
                         "'#cwapp' with '#slot n')",
                         "preproc.directive-argument");
                 unsigned long n = 0;
@@ -842,7 +847,17 @@ private:
                                     "preproc.directive-argument");
                 app_extra_ = true;
                 app_slot_ = (int)n;
-                if (toks.size() == 3) {
+                if (toks.size() == 2) {
+                    if (!quoted[1])
+                        throw CwizError(
+                            "#cwapp: the mode text must be quoted when there are no icon paths",
+                            line, 0,
+                            "write '#cwapp 1 \"Name\"' and add icon paths if wanted",
+                            "preproc.directive-argument");
+                    app_text_ = toks[1];
+                    app_icon_.clear();
+                    app_icon_sel_.clear();
+                } else if (toks.size() == 3) {
                     app_text_ = toks[1];
                     app_icon_ = toks[2];
                     app_icon_sel_.clear();
