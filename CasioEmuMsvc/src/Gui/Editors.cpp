@@ -69,6 +69,33 @@ static void DrawColumnSelector(MemoryEditor& editor) {
 		ImGui::EndTooltip();
 	}
 	ImGui::Spacing();
+	ImGui::TextDisabled("Vibrancy");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(std::min(120.0f, std::max(70.0f, ImGui::GetContentRegionAvail().x * 0.25f)));
+	float vibrancy = MemoryEditor::SpanTintSaturation * 100.0f;
+	if (ImGui::SliderFloat("##span_vibrancy", &vibrancy, 0.0f, 100.0f, "%.0f%%"))
+		MemoryEditor::SpanTintSaturation = std::clamp(vibrancy / 100.0f, 0.0f, 1.0f);
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+		ImGui::BeginTooltip();
+		ImGui::TextUnformatted("Saturation of the span highlights. Higher values keep each span's hue vivid.");
+		ImGui::EndTooltip();
+	}
+	ImGui::SameLine();
+	ImGui::Checkbox("One colour", &MemoryEditor::SpanTintUniform);
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+		ImGui::BeginTooltip();
+		ImGui::TextUnformatted("Use the picked colour for every span instead of each span's own hue.");
+		ImGui::EndTooltip();
+	}
+	ImGui::SameLine();
+	if (!MemoryEditor::SpanTintUniform)
+		ImGui::BeginDisabled();
+	ImGui::SetNextItemWidth(28.0f);
+	ImGui::ColorEdit3("##span_colour", &MemoryEditor::SpanTintColor.x,
+		ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha);
+	if (!MemoryEditor::SpanTintUniform)
+		ImGui::EndDisabled();
+	ImGui::Spacing();
 }
 
 struct HexEditor : public UIWindow, public MemoryEditor {

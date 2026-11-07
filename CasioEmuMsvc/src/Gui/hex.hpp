@@ -104,6 +104,11 @@ struct MemoryEditor {
 	static float EffectiveSpanTintOpacity(bool dark) {
 		return SpanTintOpacity >= 0.0f ? SpanTintOpacity : DefaultSpanTintOpacity(dark);
 	}
+	// Span vibrancy (saturation) and an optional uniform colour override.
+	// With SpanTintUniform off each span keeps its own semantic hue.
+	static inline float SpanTintSaturation = 0.62f;
+	static inline bool SpanTintUniform = false;
+	static inline ImVec4 SpanTintColor = ImVec4(0.31f, 0.78f, 0.47f, 1.0f);
 	bool OptShowOptions;							   // = true   // display options button/context menu. when disabled, options will be locked unless you provide your own UI for them.
 	bool OptShowDataPreview;						   // = false  // display a footer previewing the decimal/binary/hex/float representation of the currently selected bytes.
 	bool OptShowHexII;								   // = false  // display values in HexII representation instead of regular hexadecimal: hide null/zero bytes, ascii values as ".X".
@@ -593,12 +598,13 @@ struct MemoryEditor {
 		const ImVec4 background = EditorBackground();
 		const bool dark = SrgbLuminance(background) < 0.45f;
 		float hue = 0.0f, saturation = 0.0f, value = 0.0f;
-		ImGui::ColorConvertRGBtoHSV(source.x, source.y, source.z, hue, saturation, value);
+		const ImVec4 hue_source = SpanTintUniform ? SpanTintColor : source;
+		ImGui::ColorConvertRGBtoHSV(hue_source.x, hue_source.y, hue_source.z, hue, saturation, value);
 		// Keep the semantic hue, but never paint the raw model colour.  The
 		// tint stays close to the editor background on both sides of the
 		// luminance scale so normal and dimmed text keep their contrast.
-		saturation = 0.30f;
-		value = dark ? 0.36f : 0.70f;
+		saturation = SpanTintSaturation;
+		value = dark ? 0.22f : 0.50f;
 		ImVec4 fill;
 		ImGui::ColorConvertHSVtoRGB(hue, saturation, value, fill.x, fill.y, fill.z);
 		const float opacity = EffectiveSpanTintOpacity(dark);
@@ -627,15 +633,15 @@ struct MemoryEditor {
 			return DimTextCache;
 		const ImVec4 background = EditorBackground();
 		const bool dark = SrgbLuminance(background) < 0.45f;
-		const float value = dark ? 0.36f : 0.70f;
+		const float value = dark ? 0.22f : 0.50f;
 		const float alpha = EffectiveSpanTintOpacity(dark);
 		ImVec4 candidate = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 		// Sample the hue circle and raise the disabled text colour only as far
 		// as the worst tinted background requires.
 		for (int step = 0; step < 12; ++step) {
 			ImVec4 tint;
-			ImGui::ColorConvertHSVtoRGB(static_cast<float>(step) / 12.0f, 0.30f, value,
-				tint.x, tint.y, tint.z);
+			ImGui::ColorConvertHSVtoRGB(static_cast<float>(step) / 12.0f,
+				SpanTintSaturation, value, tint.x, tint.y, tint.z);
 			tint.w = alpha;
 			candidate = EnsureContrast(candidate, Composite(tint, background));
 		}
