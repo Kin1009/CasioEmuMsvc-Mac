@@ -198,9 +198,6 @@ inline auto MMU_Hex(auto he) {
 		return me_mmu->ReadData((size_t)data + off, 0);
 	};
 	he->WriteFn = [](ImU8* data, size_t off, ImU8 d) {
-		if (!m_emu)
-			return static_cast<ImU8>(0);
-		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		return me_mmu->WriteData((size_t)data + off, d, 0);
 	};
 	return he;
@@ -226,12 +223,9 @@ inline auto EPS_ROM_Hex(auto he) {
 		return static_cast<ImU8>((off & 1) ? word : (word >> 8));
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
-		if (!m_emu)
-			return;
 		auto* eps = m_emu->chipset.epscpu;
 		if (!eps)
 			return;
-		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		const uint32_t word_address = static_cast<uint32_t>(off / 2);
 		auto word = eps->ReadCodeWord(word_address);
 		word = (off & 1)
@@ -252,12 +246,9 @@ inline auto EPS_FLASH_Hex(auto he) {
 		return static_cast<ImU8>((off & 1) ? word : (word >> 8));
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
-		if (!m_emu)
-			return;
 		auto* eps = m_emu->chipset.epscpu;
 		if (!eps)
 			return;
-		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 		const uint32_t flash_word_offset = static_cast<uint32_t>(off / 2);
 		const uint32_t word_address = kEpsFlashBaseWord + flash_word_offset;
 		auto word = eps->ReadCodeWord(word_address);
@@ -276,10 +267,8 @@ inline auto EPS_VRAM_Hex(auto he) {
 		return m_emu->chipset.epscpu ? m_emu->chipset.epscpu->ReadLcdMemory(off) : 0xff;
 	};
 	he->WriteFn = [](ImU8*, size_t off, ImU8 value) {
-		if (!m_emu || !m_emu->chipset.epscpu)
-			return;
-		std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
-		m_emu->chipset.epscpu->WriteLcdMemory(off, value);
+		if (m_emu->chipset.epscpu)
+			m_emu->chipset.epscpu->WriteLcdMemory(off, value);
 	};
 	return he;
 }
@@ -304,23 +293,12 @@ std::vector<UIWindow*> GetEditors() {
 				return core->ReadCodeByte(static_cast<unsigned>(off));
 			};
 			editor->WriteFn = [](ImU8* data, size_t off, ImU8 value) {
-				if (!m_emu)
-					return;
 				const unsigned space = static_cast<unsigned>(reinterpret_cast<uintptr_t>(data));
 				if (space == 3)
 					return; // ROM stays read-only.
-				if (!m_emu->GetPaused())
-					m_emu->SetPaused(true);
-				std::lock_guard<casioemu::FairRecursiveMutex> lock(m_emu->access_mx);
 				if (auto* core = m_emu->chipset.t4x)
 					core->WriteMemory(space, static_cast<unsigned>(off), value);
 			};
-			if (space != 3) {
-				editor->EditBeginFn = [] {
-					if (m_emu && !m_emu->GetPaused())
-						m_emu->SetPaused(true);
-				};
-			}
 			windows.push_back(editor);
 		}
 		return windows;

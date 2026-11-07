@@ -124,7 +124,6 @@ struct MemoryEditor {
 	bool (*HighlightFn)(const ImU8* data, size_t off); //= 0      // optional handler to return Highlight property (to support non-contiguous highlighting).
 	void* contextmenuuserdata = 0;
 	void (*ContextMenuFn)(void* userdata, size_t off){};
-	std::function<void()> EditBeginFn; // pause/seize the machine before an inline edit
 
 	// [Internal State]
 	bool ContentsWidthChanged;
@@ -295,6 +294,15 @@ struct MemoryEditor {
 	}
 
 	void RunEditTest(const ImU8* data, size_t mem_size) {
+		static int start_delay = -1;
+		if (start_delay < 0) {
+			const char* delay = std::getenv("CASIOEMU_HEX_EDIT_DELAY");
+			start_delay = delay ? std::max(0, std::atoi(delay)) : 0;
+		}
+		if (EditTestStage == 0 && start_delay > 0) {
+			--start_delay;
+			return;
+		}
 		if (std::getenv("CASIOEMU_HEX_EDIT_HOLD") && EditTestStage == 0 && mem_size > 0) {
 			ImGui::SetWindowFocus();
 			SelectByte(0, false);
@@ -482,8 +490,6 @@ struct MemoryEditor {
 		const int digit = PressedHexDigit();
 		if (digit < 0)
 			return;
-		if (EditBeginFn)
-			EditBeginFn();
 		DataEditingAddr = DataPreviewAddr = first;
 		DataEditingTakeFocus = true;
 		PendingHexDigit = digit;
@@ -1255,8 +1261,6 @@ struct MemoryEditor {
 								// SelectByte after the first click, because that
 								// would clear the editor again.
 								if (!ReadOnly) {
-									if (EditBeginFn)
-										EditBeginFn();
 									DataEditingTakeFocus = true;
 									data_editing_addr_next = addr;
 								}
@@ -1313,8 +1317,6 @@ struct MemoryEditor {
 					const size_t ascii_addr = line_addr + static_cast<size_t>(std::max(0, ascii_col));
 					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size &&
 						!ReadOnly) {
-						if (EditBeginFn)
-							EditBeginFn();
 						DataEditingAddr = DataPreviewAddr = ascii_addr;
 						DataEditingTakeFocus = true;
 					}
@@ -1961,8 +1963,6 @@ struct MemoryEditor {
 								// SelectByte after the first click, because that
 								// would clear the editor again.
 								if (!ReadOnly) {
-									if (EditBeginFn)
-										EditBeginFn();
 									DataEditingTakeFocus = true;
 									data_editing_addr_next = addr;
 								}
@@ -2019,8 +2019,6 @@ struct MemoryEditor {
 					const size_t ascii_addr = line_addr + static_cast<size_t>(std::max(0, ascii_col));
 					if (ascii_hovered && ImGui::IsMouseDoubleClicked(0) && ascii_addr < mem_size &&
 						!ReadOnly) {
-						if (EditBeginFn)
-							EditBeginFn();
 						DataEditingAddr = DataPreviewAddr = ascii_addr;
 						DataEditingTakeFocus = true;
 					}
