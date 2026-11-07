@@ -579,19 +579,18 @@ struct MemoryEditor {
 		// Keep the semantic hue, but never paint the raw model colour.  The
 		// tint stays close to the editor background on both sides of the
 		// luminance scale so normal and dimmed text keep their contrast.
-		saturation = 0.25f;
-		value = dark ? 0.34f : 0.82f;
+		saturation = 0.30f;
+		value = dark ? 0.36f : 0.70f;
 		ImVec4 fill;
 		ImGui::ColorConvertHSVtoRGB(hue, saturation, value, fill.x, fill.y, fill.z);
-		fill.w = dark ? 0.15f : 0.12f;
+		fill.w = dark ? 0.34f : 0.30f;
 		SpanTintInfo info;
 		info.fill = fill;
 		info.dark = dark;
 		info.border = fill;
-		info.border.w = dark ? 0.34f : 0.28f;
-		// Light editors need a little more structure at the edge instead of a
-		// stronger fill.
-		info.add_border = !dark;
+		info.border.w = 0.50f;
+		// The outline, not the fill, makes the region obvious.
+		info.add_border = true;
 		info.fill_u32 = ImGui::ColorConvertFloat4ToU32(fill);
 		info.border_u32 = ImGui::ColorConvertFloat4ToU32(info.border);
 		const ImVec4 tinted_background = Composite(fill, background);
@@ -609,8 +608,8 @@ struct MemoryEditor {
 			return DimTextCache;
 		const ImVec4 background = EditorBackground();
 		const bool dark = SrgbLuminance(background) < 0.45f;
-		const float value = dark ? 0.34f : 0.82f;
-		const float alpha = dark ? 0.15f : 0.12f;
+		const float value = dark ? 0.36f : 0.70f;
+		const float alpha = dark ? 0.34f : 0.30f;
 		ImVec4 candidate = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 		// Sample the hue circle and raise the disabled text colour only as far
 		// as the worst tinted background requires.
@@ -687,11 +686,9 @@ struct MemoryEditor {
 				draw_list->AddRectFilled(ImVec2(x0, line_min.y + 1.0f),
 					ImVec2(x1, line_min.y + s.LineHeight - 1.0f), fill_u32, 3.0f);
 				if (tint.add_border) {
-					ImVec4 border = tint.border;
-					border.w /= static_cast<float>(stack);
 					draw_list->AddRect(ImVec2(x0 + 0.5f, line_min.y + 1.5f),
 						ImVec2(x1 - 0.5f, line_min.y + s.LineHeight - 1.5f),
-						ImGui::ColorConvertFloat4ToU32(border), 3.0f, 0, 1.0f);
+						tint.border_u32, 3.0f, 0, 1.0f);
 				}
 				if (std::getenv("CASIOEMU_HEX_SPAN_REPORT")) {
 					std::fprintf(stderr,
