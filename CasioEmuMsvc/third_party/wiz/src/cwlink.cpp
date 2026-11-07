@@ -286,8 +286,13 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
                 out.error_file = entry.path;
                 return out;
             }
+            // Apply the stock tile decoration (border + shortcut-key box) to
+            // the unselected image.  Pre-decorated images are detected and are
+            // not cropped a second time.
+            p.icon = cwmode::prepare_mode_icon(p.icon, cwmode::Model::Cw580);
             if (p.built.cwapp_icon_selected.empty()) {
-                // Three-argument form: the selected variant is the inverse.
+                // Three-argument form: the selected variant is the exact
+                // inverse of the decorated unselected image.
                 p.app.icon_selected.clear();
                 p.icon_sel = cwmode::invert_image(p.icon);
             } else {
@@ -298,12 +303,7 @@ CwappLinkResult build_cwapplink(const std::string& manifest_path,
                     out.error_file = entry.path;
                     return out;
                 }
-            }
-            if (p.icon.width < 48 || p.icon.height < 23 || p.icon_sel.width < 48 ||
-                p.icon_sel.height < 23) {
-                out.error = "the mode icons must be at least 48x23 on the fx-580VN X";
-                out.error_file = entry.path;
-                return out;
+                p.icon_sel = cwmode::prepare_mode_icon(p.icon_sel, cwmode::Model::Cw580);
             }
             if (!same_image(p.icon, p.icon_sel)) {
                 out.warnings.push_back(fmt(
@@ -734,6 +734,7 @@ CwappLinkResult build_single_from_image(const BuildResult& built,
         out.error = image_error;
         return out;
     }
+    icon = cwmode::prepare_mode_icon(icon, cwmode::Model::Cw580);
     if (built.cwapp_icon_selected.empty()) {
         icon_sel = cwmode::invert_image(icon);
     } else {
@@ -742,10 +743,7 @@ CwappLinkResult build_single_from_image(const BuildResult& built,
             out.error = image_error;
             return out;
         }
-    }
-    if (icon.width < 48 || icon.height < 23 || icon_sel.width < 48 || icon_sel.height < 23) {
-        out.error = "the mode icons must be at least 48x23 on the fx-580VN X";
-        return out;
+        icon_sel = cwmode::prepare_mode_icon(icon_sel, cwmode::Model::Cw580);
     }
     if (!same_image(icon, icon_sel)) {
         out.warnings.push_back(

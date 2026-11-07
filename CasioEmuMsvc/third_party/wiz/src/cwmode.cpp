@@ -1109,3 +1109,161 @@ PatchResult patch(const std::vector<uint8_t>& input, const std::vector<ModeSpec>
 
 }  // namespace cwmode
 }  // namespace wiz
+
+namespace wiz {
+namespace cwmode {
+
+// ------------------------------------------------------------------ mode icons
+namespace {
+struct IconGeometry {
+    int width = 48;
+    int height = 23;
+    int content_width = 46;
+    int content_height = 22;
+    int box_x0 = 38;
+    int box_x1 = 46;
+    int box_y0 = 12;
+    int box_y1 = 21;
+};
+
+IconGeometry icon_geometry(Model model, bool border) {
+    IconGeometry g;
+    if (model == Model::Cw880) {
+        g.width = 64;
+        g.height = 16;
+        g.content_width = 62;
+        g.content_height = 15;
+        g.box_x0 = 54;
+        g.box_x1 = 62;
+        g.box_y0 = 8;
+        g.box_y1 = 14;
+    }
+    if (!border) {
+        g.content_width = g.width;
+        g.content_height = g.height;
+    }
+    return g;
+}
+
+void icon_set_px(Image& image, int x, int y, uint8_t v) {
+    if (x < 0 || y < 0 || x >= image.width || y >= image.height) return;
+    size_t i = ((size_t)y * image.width + x) * 4;
+    image.rgba[i + 0] = v;
+    image.rgba[i + 1] = v;
+    image.rgba[i + 2] = v;
+    image.rgba[i + 3] = 255;
+}
+
+void icon_set_ink(Image& image, int x, int y, bool ink) {
+    icon_set_px(image, x, y, ink ? 0 : 255);
+}
+
+bool icon_source_ink(const Image& src, int x, int y, int threshold) {
+    if (x < 0 || y < 0 || x >= src.width || y >= src.height) return false;
+    size_t i = ((size_t)y * src.width + x) * 4;
+    if (src.rgba[i + 3] < 128) return false;
+    const int lum = (299 * src.rgba[i + 0] + 587 * src.rgba[i + 1] + 114 * src.rgba[i + 2]) / 1000;
+    return lum < threshold;
+}
+
+// True when the image is already a target-size tile carrying the stock border
+// and key box.  Such an image must not be cropped a second time.
+bool icon_has_decoration(const Image& image, const IconGeometry& g, int threshold) {
+    if (image.width != g.width || image.height != g.height) return false;
+    for (int y = 1; y <= g.height - 2; y++)
+        if (!icon_source_ink(image, g.width - 2, y, threshold)) return false;
+    for (int x = 1; x <= g.width - 3; x++)
+        if (!icon_source_ink(image, x, g.height - 1, threshold)) return false;
+    for (int y = g.box_y0; y <= g.box_y1; y++)
+        for (int x = g.box_x0; x <= g.box_x1; x++) {
+            if (x == g.box_x0 && y == g.box_y0) continue;  // rounded corner
+            if (!icon_source_ink(image, x, y, threshold)) return false;
+        }
+    return !icon_source_ink(image, g.box_x0, g.box_y0, threshold);
+}
+}  // namespace
+
+Image prepare_mode_icon(const Image& source, Model model, int threshold, bool border) {
+    const IconGeometry g = icon_geometry(model, border);
+    Image out;
+    out.width = g.width;
+    out.height = g.height;
+    out.rgba.assign((size_t)out.width * out.height * 4, 255);
+    if (source.empty()) return out;
+    if (threshold < 0) threshold = 0;
+    if (threshold > 255) threshold = 255;
+
+    const int cw = g.content_width;
+    const int ch = g.content_height;
+    const int sw = source.width;
+    const int sh = source.height;
+    const bool already = border && icon_has_decoration(source, g, threshold);
+
+    if (already) {
+        // Pre-decorated tile: threshold in place so art is not shifted and the
+        // border/box are not cropped off.
+        for (int y = 0; y < out.height; y++)
+            for (int x = 0; x < out.width; x++)
+                icon_set_ink(out, x, y, icon_source_ink(source, x, y, threshold));
+    } else {
+        Image content;
+        content.width = cw;
+        content.height = ch;
+        content.rgba.assign((size_t)cw * ch * 4, 255);
+        for (int y = 0; y < ch; y++)
+            for (int x = 0; x < cw; x++) icon_set_ink(content, x, y, false);
+
+        if (sw >= cw && sh >= ch) {
+            // Larger artwork: centre-crop, no resampling.
+            const int ox = (sw - cw) / 2;
+            const int oy = (sh - ch) / 2;
+            for (int y = 0; y < ch; y++)
+                for (int x = 0; x < cw; x++)
+                    icon_set_ink(content, x, y,
+                                 icon_source_ink(source, x + ox, y + oy, threshold));
+        } else if (sw <= cw && sh <= ch) {
+            // Smaller artwork: centre without upscaling, pad with background.
+            const int ox = (cw - sw) / 2;
+            const int oy = (ch - sh) / 2;
+            for (int y = 0; y < sh; y++)
+                for (int x = 0; x < sw; x++)
+                    icon_set_ink(content, x + ox, y + oy,
+                                 icon_source_ink(source, x, y, threshold));
+        } else {
+            // Mixed size: scale down preserving aspect, then pad.
+            const double scale = std::min((double)cw / sw, (double)ch / sh);
+            int dw = (int)(sw * scale);
+            int dh = (int)(sh * scale);
+            if (dw < 1) dw = 1;
+            if (dh < 1) dh = 1;
+            if (dw > cw) dw = cw;
+            if (dh > ch) dh = ch;
+            const int ox = (cw - dw) / 2;
+            const int oy = (ch - dh) / 2;
+            for (int y = 0; y < dh; y++)
+                for (int x = 0; x < dw; x++) {
+                    const int sx = std::min(sw - 1, x * sw / dw);
+                    const int sy = std::min(sh - 1, y * sh / dh);
+                    icon_set_ink(content, x + ox, y + oy,
+                                 icon_source_ink(source, sx, sy, threshold));
+                }
+        }
+        for (int y = 0; y < ch; y++)
+            for (int x = 0; x < cw; x++) {
+                const size_t i = ((size_t)y * cw + x) * 4;
+                icon_set_ink(out, x, y, content.rgba[i] == 0);
+            }
+    }
+
+    if (border) {
+        for (int y = 1; y <= g.height - 2; y++) icon_set_ink(out, g.width - 2, y, true);
+        for (int x = 1; x <= g.width - 3; x++) icon_set_ink(out, x, g.height - 1, true);
+        for (int y = g.box_y0; y <= g.box_y1; y++)
+            for (int x = g.box_x0; x <= g.box_x1; x++) icon_set_ink(out, x, y, true);
+        icon_set_ink(out, g.box_x0, g.box_y0, false);
+    }
+    return out;
+}
+
+}  // namespace cwmode
+}  // namespace wiz

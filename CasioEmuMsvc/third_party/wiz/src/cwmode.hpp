@@ -59,6 +59,15 @@ bool load_image(const std::string& path, Image& out, std::string& error);
 // this is exactly the bitwise complement of the packed 1-bit/two-plane data.
 Image invert_image(const Image& image);
 
+// Convert artwork into a stock-style mode icon at the exact model size:
+// threshold luminance, crop/pad/scale into the content area, then paint the
+// stock right/bottom separator and the shortcut-key box on top.  With
+// `border=false` the full canvas is used and no separator/box is drawn.
+// Decoration is idempotent: a target-size image that already contains the
+// stock separator/box is thresholded in place instead of being cropped again.
+Image prepare_mode_icon(const Image& source, Model model, int threshold = 128,
+                        bool border = true);
+
 // ------------------------------------------------------------------ analysis
 struct Analysis {
     bool ok = false;
