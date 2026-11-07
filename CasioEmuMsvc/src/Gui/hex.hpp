@@ -52,6 +52,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
+#include <cmath>
 #include <optional>
 #include <stdint.h> // uint8_t, etc.
 #include <stdio.h>	// sprintf, scanf
@@ -174,6 +175,8 @@ struct MemoryEditor {
 	bool ShowSpansPanel = false;
 	bool InlineSelectionShown = false;
 	int InlineRevealAtFrame = 0;
+	mutable int DimTextFrame = -1;
+	mutable ImVec4 DimTextCache{};
 	bool SelSpansEnabled = false;
 	std::function<bool(size_t)> SelSpansAllowed;
 	ImVec2 SelPopupPos{};
@@ -484,7 +487,7 @@ struct MemoryEditor {
 				MarkedSpan span;
 				span.start = static_cast<size_t>(start);
 				span.length = static_cast<size_t>(length);
-				span.color = (index % 2) ? ImColor(80, 180, 255, 90) : ImColor(255, 140, 60, 90);
+				span.color = (index % 2) ? ImColor(40, 40, 150, 255) : ImColor(40, 150, 40, 255);
 				span.desc = (index % 2) ? "test span B" : "test span A";
 				result->push_back(span);
 				++index;
@@ -498,6 +501,131 @@ struct MemoryEditor {
 		return result;
 	}
 
+	static float SrgbLuminance(const ImVec4& color) {
+		auto linear = [](float value) {
+			return value <= 0.03928f ? value / 12.92f :
+				std::pow((value + 0.055f) / 1.055f, 2.4f);
+		};
+		return 0.2126f * linear(color.x) + 0.7152f * linear(color.y) +
+			0.0722f * linear(color.z);
+	}
+
+	static ImVec4 Composite(const ImVec4& foreground, const ImVec4& background) {
+		const float alpha = foreground.w;
+		return ImVec4(foreground.x * alpha + background.x * (1.0f - alpha),
+			foreground.y * alpha + background.y * (1.0f - alpha),
+			foreground.z * alpha + background.z * (1.0f - alpha), 1.0f);
+	}
+
+	static float ContrastRatio(const ImVec4& a, const ImVec4& b) {
+		const float high = std::max(SrgbLuminance(a), SrgbLuminance(b));
+		const float low = std::min(SrgbLuminance(a), SrgbLuminance(b));
+		return (high + 0.05f) / (low + 0.05f);
+	}
+
+	static ImVec4 EnsureContrast(const ImVec4& foreground, const ImVec4& background,
+		float target = 4.6f) {
+		if (ContrastRatio(Composite(foreground, background), background) >= target)
+			return foreground;
+		const ImVec4 normal = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+		float low = 0.0f;
+		float high = 1.0f;
+		ImVec4 candidate = normal;
+		for (int step = 0; step < 12; ++step) {
+			const float blend = (low + high) * 0.5f;
+			candidate = ImVec4(
+				foreground.x + (normal.x - foreground.x) * blend,
+				foreground.y + (normal.y - foreground.y) * blend,
+				foreground.z + (normal.z - foreground.z) * blend,
+				foreground.w + (normal.w - foreground.w) * blend);
+			if (ContrastRatio(Composite(candidate, background), background) >= target)
+				high = blend;
+			else
+				low = blend;
+		}
+		return candidate;
+	}
+
+	ImVec4 EditorBackground() const {
+		ImVec4 background = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+		if (background.w < 0.01f)
+			background = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+		if (background.w < 0.01f)
+			background = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
+		background.w = 1.0f;
+		return background;
+	}
+
+	struct SpanTintInfo {
+		ImVec4 fill{};
+		ImVec4 border{};
+		ImU32 fill_u32 = 0;
+		ImU32 border_u32 = 0;
+		bool add_border = false;
+		float normal_contrast = 0.0f;
+		float dim_contrast = 0.0f;
+		float base_dim_contrast = 0.0f;
+		bool dark = true;
+	};
+
+	SpanTintInfo SpanTint(ImU32 packed) const {
+		ImVec4 source = ImGui::ColorConvertU32ToFloat4(packed);
+		if (source.w <= 0.0f && source.x <= 0.0f && source.y <= 0.0f && source.z <= 0.0f)
+			source = ImGui::ColorConvertU32ToFloat4(IM_COL32(110, 150, 210, 255));
+		const ImVec4 background = EditorBackground();
+		const bool dark = SrgbLuminance(background) < 0.45f;
+		float hue = 0.0f, saturation = 0.0f, value = 0.0f;
+		ImGui::ColorConvertRGBtoHSV(source.x, source.y, source.z, hue, saturation, value);
+		// Keep the semantic hue, but never paint the raw model colour.  The
+		// tint stays close to the editor background on both sides of the
+		// luminance scale so normal and dimmed text keep their contrast.
+		saturation = 0.25f;
+		value = dark ? 0.34f : 0.82f;
+		ImVec4 fill;
+		ImGui::ColorConvertHSVtoRGB(hue, saturation, value, fill.x, fill.y, fill.z);
+		fill.w = dark ? 0.15f : 0.12f;
+		SpanTintInfo info;
+		info.fill = fill;
+		info.dark = dark;
+		info.border = fill;
+		info.border.w = dark ? 0.34f : 0.28f;
+		// Light editors need a little more structure at the edge instead of a
+		// stronger fill.
+		info.add_border = !dark;
+		info.fill_u32 = ImGui::ColorConvertFloat4ToU32(fill);
+		info.border_u32 = ImGui::ColorConvertFloat4ToU32(info.border);
+		const ImVec4 tinted_background = Composite(fill, background);
+		const ImVec4 normal_text = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+		const ImVec4 dim_text = DimTextColor();
+		info.normal_contrast = ContrastRatio(Composite(normal_text, tinted_background), tinted_background);
+		info.dim_contrast = ContrastRatio(Composite(dim_text, tinted_background), tinted_background);
+		info.base_dim_contrast = ContrastRatio(Composite(dim_text, background), background);
+		return info;
+	}
+
+	ImVec4 DimTextColor() const {
+		const int frame = ImGui::GetFrameCount();
+		if (DimTextFrame == frame)
+			return DimTextCache;
+		const ImVec4 background = EditorBackground();
+		const bool dark = SrgbLuminance(background) < 0.45f;
+		const float value = dark ? 0.34f : 0.82f;
+		const float alpha = dark ? 0.15f : 0.12f;
+		ImVec4 candidate = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+		// Sample the hue circle and raise the disabled text colour only as far
+		// as the worst tinted background requires.
+		for (int step = 0; step < 12; ++step) {
+			ImVec4 tint;
+			ImGui::ColorConvertHSVtoRGB(static_cast<float>(step) / 12.0f, 0.25f, value,
+				tint.x, tint.y, tint.z);
+			tint.w = alpha;
+			candidate = EnsureContrast(candidate, Composite(tint, background));
+		}
+		DimTextFrame = frame;
+		DimTextCache = candidate;
+		return candidate;
+	}
+
 	void DrawSpanLine(ImDrawList* draw_list, const Sizes& s, const ImVec2& line_min,
 		size_t line_i, size_t line_start_abs, size_t line_end_abs,
 		const std::vector<MarkedSpan>& spans) const {
@@ -509,6 +637,13 @@ struct MemoryEditor {
 			return hex_origin + s.HexCellWidth * static_cast<float>(n) +
 				(mid > 0 ? static_cast<float>(n / static_cast<size_t>(mid)) * group : 0.0f);
 		};
+		struct Intersection {
+			size_t span = 0;
+			size_t first = 0;
+			size_t last = 0;
+		};
+		std::vector<Intersection> intersections;
+		std::vector<int> overlap(static_cast<size_t>(Cols), 0);
 		for (size_t span_index = 0; span_index < spans.size(); ++span_index) {
 			const MarkedSpan& span = spans[span_index];
 			if (span.length == 0 || span.start > line_end_abs)
@@ -520,28 +655,57 @@ struct MemoryEditor {
 			const size_t last = std::min(span_last, line_end_abs) - line_start_abs;
 			if (first >= static_cast<size_t>(Cols))
 				continue;
-			const ImU32 span_color = static_cast<ImU32>(span.color);
-			for (size_t segment_first = first; segment_first <= last;) {
-				size_t segment_last = last;
+			intersections.push_back({span_index, first, last});
+			for (size_t column = first; column <= last && column < static_cast<size_t>(Cols); ++column)
+				++overlap[column];
+		}
+		for (const Intersection& intersection : intersections) {
+			const MarkedSpan& span = spans[intersection.span];
+			const SpanTintInfo tint = SpanTint(static_cast<ImU32>(span.color));
+			for (size_t segment_first = intersection.first; segment_first <= intersection.last;) {
+				size_t group_end = intersection.last;
 				if (mid > 0) {
 					const size_t boundary = (segment_first / static_cast<size_t>(mid) + 1) *
 						static_cast<size_t>(mid);
-					if (boundary <= last)
-						segment_last = boundary - 1;
+					if (boundary <= group_end)
+						group_end = boundary - 1;
 				}
+				// Split where overlap changes so the per-span alpha always sums
+				// to the same budget.  Overlapping spans never stack opaque.
+				// The split may not cross the 8-byte group boundary.
+				size_t segment_last = segment_first;
+				while (segment_last < group_end &&
+					overlap[segment_last + 1] == overlap[segment_first])
+					++segment_last;
+				const int stack = std::max(1, overlap[segment_first]);
+				const float alpha = tint.fill.w / static_cast<float>(stack);
+				ImVec4 fill = tint.fill;
+				fill.w = alpha;
+				const ImU32 fill_u32 = ImGui::ColorConvertFloat4ToU32(fill);
 				const float x0 = cell_x(segment_first);
 				const float x1 = cell_x(segment_last) + s.HexCellWidth - trailing;
 				draw_list->AddRectFilled(ImVec2(x0, line_min.y + 1.0f),
-					ImVec2(x1, line_min.y + s.LineHeight - 1.0f), span_color, 3.0f);
+					ImVec2(x1, line_min.y + s.LineHeight - 1.0f), fill_u32, 3.0f);
+				if (tint.add_border) {
+					ImVec4 border = tint.border;
+					border.w /= static_cast<float>(stack);
+					draw_list->AddRect(ImVec2(x0 + 0.5f, line_min.y + 1.5f),
+						ImVec2(x1 - 0.5f, line_min.y + s.LineHeight - 1.5f),
+						ImGui::ColorConvertFloat4ToU32(border), 3.0f, 0, 1.0f);
+				}
 				if (std::getenv("CASIOEMU_HEX_SPAN_REPORT")) {
 					std::fprintf(stderr,
 						"[span] row=%zu span=%zu cols=%d first=%zu last=%zu seg_first=%zu seg_last=%zu "
-						"x0=%.2f x1=%.2f hex_origin=%.2f cell_w=%.2f group=%.2f text_w=%.2f mid=%d y=%.2f h=%.2f\n",
-						line_i, span_index, Cols, first, last, segment_first, segment_last, x0, x1,
-						hex_origin, s.HexCellWidth, group, ImGui::CalcTextSize("00").x, mid,
-						line_min.y + 1.0f, s.LineHeight - 2.0f);
+						"x0=%.2f x1=%.2f hex_origin=%.2f cell_w=%.2f group=%.2f text_w=%.2f mid=%d "
+						"y=%.2f h=%.2f bytes=%zu alpha=%.3f normal_contrast=%.2f dim_contrast=%.2f "
+						"base_dim_contrast=%.2f\n",
+						line_i, intersection.span, Cols, intersection.first, intersection.last,
+						segment_first, segment_last, x0, x1, hex_origin, s.HexCellWidth, group,
+						ImGui::CalcTextSize("00").x, mid, line_min.y + 1.0f,
+						s.LineHeight - 2.0f, segment_last - segment_first + 1, alpha,
+						tint.normal_contrast, tint.dim_contrast, tint.base_dim_contrast);
 				}
-				if (segment_last >= last)
+				if (segment_last >= intersection.last)
 					break;
 				segment_first = segment_last + 1;
 			}
@@ -554,7 +718,7 @@ struct MemoryEditor {
 			return 0.0f;
 		ImGuiStyle& style = ImGui::GetStyle();
 		return style.ItemSpacing.y + ImGui::GetTextLineHeightWithSpacing() +
-			style.ItemSpacing.y + 54.0f + style.ItemSpacing.y;
+			style.ItemSpacing.y + 60.0f + style.ItemSpacing.y;
 	}
 
 	void RenderSelectionInline(const ImU8* mem_data, size_t mem_size, size_t base_display_addr,
@@ -578,23 +742,36 @@ struct MemoryEditor {
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
-		ImGui::BeginChild("##sel_inline", ImVec2(0.0f, 54.0f),
+		ImGui::BeginChild("##sel_inline", ImVec2(0.0f, 60.0f),
 			ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding);
 		if (ShowSpansPanel && spans_allowed && spans) {
 			bool any = false;
-			std::string listing;
+			ImGui::TextUnformatted("Spans:");
+			ImDrawList* swatch_list = ImGui::GetWindowDrawList();
 			for (const auto& span : *spans) {
 				if (span.length == 0)
 					continue;
 				const size_t span_last = span.start + span.length - 1;
-				if (span.start <= absolute_last && span_last >= absolute_first) {
-					if (!listing.empty())
-						listing += ", ";
-					listing += span.desc ? span.desc : "(unnamed span)";
-					any = true;
+				if (span.start > absolute_last || span_last < absolute_first)
+					continue;
+				any = true;
+				ImGui::SameLine();
+				const SpanTintInfo tint = SpanTint(static_cast<ImU32>(span.color));
+				const ImVec2 swatch = ImGui::GetCursorScreenPos();
+				swatch_list->AddRectFilled(ImVec2(swatch.x, swatch.y + 3.0f),
+					ImVec2(swatch.x + 9.0f, swatch.y + 12.0f), tint.fill_u32, 2.0f);
+				if (tint.add_border) {
+					swatch_list->AddRect(ImVec2(swatch.x, swatch.y + 3.0f),
+						ImVec2(swatch.x + 9.0f, swatch.y + 12.0f), tint.border_u32, 2.0f, 0, 1.0f);
 				}
+				ImGui::Dummy(ImVec2(11.0f, 10.0f));
+				ImGui::SameLine();
+				ImGui::TextUnformatted(span.desc ? span.desc : "(unnamed span)");
 			}
-			ImGui::TextWrapped("Spans: %s", any ? listing.c_str() : "(none)");
+			if (!any) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("(none)");
+			}
 		}
 		if (ShowTextPanel) {
 			const bool blank = decoded.find_first_not_of(" \t\r\n") == std::string::npos;
@@ -688,7 +865,8 @@ struct MemoryEditor {
 			draw_list->AddLine(ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y), ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y + 9999), ImGui::GetColorU32(ImGuiCol_Border));
 
 		const ImU32 color_text = ImGui::GetColorU32(ImGuiCol_Text);
-		const ImU32 color_disabled = OptGreyOutZeroes ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : color_text;
+		const ImU32 color_disabled = OptGreyOutZeroes
+			? ImGui::ColorConvertFloat4ToU32(DimTextColor()) : color_text;
 
 		const char* format_address = OptUpperCaseHex ? "%0*" _PRISizeT "X: " : "%0*" _PRISizeT "x: ";
 		const char* format_data = OptUpperCaseHex ? "%0*" _PRISizeT "X" : "%0*" _PRISizeT "x";
@@ -1343,7 +1521,8 @@ struct MemoryEditor {
 			draw_list->AddLine(ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y), ImVec2(window_pos.x + s.PosAsciiStart - s.GlyphWidth, window_pos.y + 9999), ImGui::GetColorU32(ImGuiCol_Border));
 
 		const ImU32 color_text = ImGui::GetColorU32(ImGuiCol_Text);
-		const ImU32 color_disabled = OptGreyOutZeroes ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : color_text;
+		const ImU32 color_disabled = OptGreyOutZeroes
+			? ImGui::ColorConvertFloat4ToU32(DimTextColor()) : color_text;
 
 		const char* format_address = OptUpperCaseHex ? "%0*" _PRISizeT "X: " : "%0*" _PRISizeT "x: ";
 		const char* format_data = OptUpperCaseHex ? "%0*" _PRISizeT "X" : "%0*" _PRISizeT "x";
