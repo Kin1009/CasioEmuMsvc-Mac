@@ -131,6 +131,21 @@ Notes and limits:
 - Programs here have been exercised in the simulator and in this emulator; they have **not**
   been run on a physical calculator.
 
+### ROP payloads
+
+A `#rop` source takes a different path: after compiling, `Build & Run` pauses the model,
+writes the payload at `#org` (`E9E0`/`E330`) and the launcher at its launcher address
+(`D180`/`9268`), verifies both blocks, and resumes. A launcher in the program input area is
+firmware data interpreted by the calculator, not CPU code, so it is started with **EXE**;
+setting PC there would execute the ROM at the same address. Launchers placed in free RAM are
+transferred to with PC instead.
+
+When the optional external [RAC-Compiler](https://github.com/luongvantam/RAC-Compiler) is
+available (`$RAC_COMPILER`, or `tools/rac-compiler/rac.py` relative to the working directory),
+the build goes through it and also writes `<name>.rsc`; otherwise the built-in backend is used.
+RAC is GPL-3.0 and is never linked into the app; the payload it produces can differ from the
+direct backend in the two class bytes of each gadget word (the build log reports the count).
+
 ## Calculator tab
 
 The calculator is rendered inside the debugger: the **Calculator** tab shows the complete

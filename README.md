@@ -125,15 +125,27 @@ How a ROP program runs:
 2. **Launcher** — a small chain is written to the calculator's program input area
    (`D180` on the 580, `9268` on the 880). The launcher copies the payload to the execution area
    and jumps into it.
-3. **Run** — in the calculator's **Program mode**, press **LEFT** then **EXE**.
+3. **Run** — in the calculator's **Program mode**, press **EXE**.
+
+When the optional [RAC-Compiler](https://github.com/luongvantam/RAC-Compiler) checkout is
+available (`$RAC_COMPILER`, or `tools/rac-compiler/rac.py` relative to the working directory),
+**Build & Run** compiles through it and also writes `<name>.rsc`; otherwise it uses the built-in
+backend. RAC is GPL-3.0 and is never linked into the app. The two backends can differ in the class
+bytes of each gadget call word (documented in the CWiz `docs/ROP.md`); the app reports the
+difference in its build log.
 
 The app verifies both blocks after writing them and says so:
 
 ```
 payload verified @ E9E0 (53 bytes)
 launcher verified @ D180 (26 bytes)
-press LEFT then EXE
+launcher staged in the program input area @ D180
+start it with EXE (=)
 ```
+
+The launcher in the input area is firmware data, not CPU code, so setting PC there would execute
+the ROM at that address; the app does not do that. Launchers placed in free RAM are transferred to
+with PC instead.
 
 The exact gadget ABI (register layout, `printline` / `smallprint` / `line_draw` /
 `render_bitmap` conventions, chain encoding, launcher bytes) is documented in the

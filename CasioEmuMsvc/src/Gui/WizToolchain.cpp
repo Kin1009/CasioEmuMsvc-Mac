@@ -769,7 +769,69 @@ private:
 				effective.push_back('\n');
 			}
 		}
-		wiz::RopResult rop = wiz::build_rop(effective, model, EffectiveLang());
+		// Prefer the optional external RAC backend when it is available; the
+		// direct backend is also the fallback.  RAC is a separate GPL-3.0 tool:
+		// the app only runs rac.py as a process, it never links its code.
+		std::string directory;
+		if (m_emu)
+			directory = m_emu->GetModelFilePath("wiz");
+		if (directory.empty())
+			directory = "wiz";
+		std::error_code ec;
+		std::filesystem::create_directories(directory, ec);
+		bin_path_ = (std::filesystem::path(directory) / (Stem() + ".bin")).string();
+		rsc_path_ = std::filesystem::path(bin_path_).replace_extension(".rsc").string();
+
+		auto hex_bytes = [](const std::vector<uint8_t>& bytes) {
+			std::string out;
+			for (size_t i = 0; i < bytes.size(); ++i)
+				out += wiz::fmt(i ? " %02X" : "%02X", bytes[i]);
+			return out;
+		};
+
+		wiz::RopResult rop;
+		std::vector<uint8_t> payload, launcher;
+		uint32_t payload_base = 0, launcher_base = 0;
+		bool used_rac = false;
+		const std::string rac_path = wiz::default_rac_path();
+		if (wiz::rac_available(rac_path)) {
+			wiz::RacRopResult rac =
+				wiz::build_rop_rac(effective, model, EffectiveLang(), rsc_path_, rac_path, false);
+			if (rac.ok) {
+				used_rac = true;
+				rop = rac.direct;
+				payload = rac.payload;
+				launcher = rac.launcher;
+				payload_base = rac.payload_base;
+				launcher_base = rac.launcher_base;
+				AddLog(Sev::Note, wiz::fmt("RAC backend: %s -> %s", rac.rac_path.c_str(),
+										   rac.rsc_path.c_str()));
+				AddLog(Sev::Note, wiz::fmt("launcher: %s (%zu bytes @ %04X)",
+										   rac.launcher_from_rac ? "RAC @section.launcher"
+																 : "compiler default",
+										   launcher.size(), launcher_base));
+				if (rac.payload_diff)
+					AddLog(Sev::Warning,
+						   wiz::fmt("RAC payload differs from the direct backend in %zu byte(s)",
+									rac.payload_diff));
+				else
+					AddLog(Sev::Note, "RAC payload matches the direct backend byte for byte");
+			} else {
+				AddLog(Sev::Warning,
+					   "RAC backend unavailable: " + rac.error + "; using the direct backend");
+				rop = rac.direct.ok ? rac.direct : wiz::build_rop(effective, model, EffectiveLang());
+			}
+		} else {
+			AddLog(Sev::Note, wiz::fmt("RAC backend not found at %s; using the direct backend",
+									   rac_path.c_str()));
+			rop = wiz::build_rop(effective, model, EffectiveLang());
+		}
+		if (!used_rac) {
+			payload = rop.bytes;
+			launcher = rop.launcher;
+			payload_base = rop.base;
+			launcher_base = rop.launcher_base;
+		}
 		std::istringstream lines(rop.log);
 		std::string line;
 		while (std::getline(lines, line)) {
@@ -788,34 +850,28 @@ private:
 			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
-		if (rop.bytes.empty()) {
+		if (payload.empty()) {
 			AddLog(Sev::Error, "the payload is empty");
 			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
 
 		built_ok_ = true;
-		rop_bytes_ = std::move(rop.bytes);
-		rop_base_ = rop.base;
-		rop_launcher_ = std::move(rop.launcher);
-		rop_launcher_base_ = rop.launcher_base;
-		rop_launcher_hex_ = rop.launcher_hex;
+		rop_bytes_ = std::move(payload);
+		rop_base_ = payload_base;
+		rop_launcher_ = std::move(launcher);
+		rop_launcher_base_ = launcher_base;
+		rop_launcher_hex_ = hex_bytes(rop_launcher_);
 		AddLog(Sev::Note, wiz::fmt("00 padding: %d byte(s)", std::max(0, rop_pad_)));
 		AddLog(Sev::Note, wiz::fmt("payload %zu bytes @ %04X, launcher %zu bytes @ %04X",
 								   rop_bytes_.size(), rop_base_, rop_launcher_.size(),
 								   rop_launcher_base_));
 		AddLog(Sev::Note, "launcher: " + rop_launcher_hex_);
 
-		std::string directory;
-		if (m_emu)
-			directory = m_emu->GetModelFilePath("wiz");
-		if (directory.empty())
-			directory = "wiz";
-		std::error_code ec;
-		std::filesystem::create_directories(directory, ec);
-		bin_path_ = (std::filesystem::path(directory) / (Stem() + ".bin")).string();
 		WriteFile(bin_path_, std::string(rop_bytes_.begin(), rop_bytes_.end()));
 		AddLog(Sev::Note, wiz::fmt("wrote %s", bin_path_.c_str()));
+		if (used_rac)
+			AddLog(Sev::Note, wiz::fmt("wrote %s", rsc_path_.c_str()));
 
 		// Also write the assembly listing next to the .bin, like wizc does.
 		// The compiler writes it in the community ROP source style (`lbl`,
@@ -840,6 +896,10 @@ private:
 			AddLog(Sev::Error, "the debugger is not attached");
 			return;
 		}
+		// Injecting while the calculator is running races the firmware's own
+		// writes, so pause, write, then resume.
+		const bool was_paused = m_emu->GetPaused();
+		m_emu->SetPaused(true);
 		// Clear the injection area first (flappy-bird / repeated-run fix)
 		for (uint32_t z = rop_base_; z < rop_base_ + 256; ++z) me_mmu->WriteData(z, 0, 0);
 		for (uint32_t z = rop_launcher_base_; z < rop_launcher_base_ + 32; ++z) me_mmu->WriteData(z, 0, 0);
@@ -858,12 +918,31 @@ private:
 			AddLog(Sev::Note, wiz::fmt("%s verified @ %04X (%zu bytes)", what, base, bytes.size()));
 			return true;
 		};
-		if (!write_block(rop_base_, rop_bytes_, "payload"))
+		if (!write_block(rop_base_, rop_bytes_, "payload")) {
+			m_emu->SetPaused(was_paused);
 			return;
-		if (!write_block(rop_launcher_base_, rop_launcher_, "launcher"))
+		}
+		if (!write_block(rop_launcher_base_, rop_launcher_, "launcher")) {
+			m_emu->SetPaused(was_paused);
 			return;
-		if (rop_launcher_base_ == 0xD180 || rop_launcher_base_ == 0x9268)
-			AddLog(Sev::Note, "press LEFT then EXE");
+		}
+
+		// A launcher in the program input area is firmware data, not CPU code:
+		// the calculator starts it through its program/expression interpreter
+		// with EXE.  Setting PC there would execute the ROM at the same address
+		// instead (verified in the headless build), so only launchers placed in
+		// free RAM get a direct PC transfer.
+		const bool input_area = rop_launcher_base_ == 0xD180 || rop_launcher_base_ == 0x9268;
+		if (input_area) {
+			AddLog(Sev::Note, wiz::fmt("launcher staged in the program input area @ %04X",
+									   rop_launcher_base_));
+			AddLog(Sev::Note, "start it with EXE (=); the calculator interprets the "
+							  "launcher bytes with its program interpreter");
+		} else if (auto* cpu = m_emu->chipset.epscpu) {
+			cpu->SetPC(rop_launcher_base_ / 2);   // SetPC takes a word address
+			AddLog(Sev::Note, wiz::fmt("PC -> launcher @ %04X; running", rop_launcher_base_));
+		}
+		m_emu->SetPaused(was_paused);
 	}
 
 	// The linter is the same engine as the `wizlint` command-line tool: the
@@ -2090,6 +2169,7 @@ private:
 	std::string working_dir_;
 	std::string bin_path_;
 	std::string asm_path_;
+	std::string rsc_path_;   // RAC source written by the optional backend
 	std::string last_asm_listing_;
 	std::string src_path_;
 };

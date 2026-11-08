@@ -33,6 +33,7 @@
 
 #include "rop.hpp"
 #include "asm.hpp"
+#include "build.hpp"
 #include "directives.hpp"
 #include "rop_data.hpp"
 #include "vn_f4.hpp"
@@ -41,11 +42,16 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 #include "targets.hpp"
 
@@ -784,6 +790,9 @@ struct Emitter {
     // the getkey() slots.  The offset is relative to the payload.
     std::map<size_t, std::string> data_labels;
     std::map<size_t, std::string> data_comments;
+    // Annotations for --emit-rsc: labels, label-relative address words and
+    // string literals that can be expressed in RAC syntax.
+    std::vector<RopRscItem> rsc_items;
     size_t str_start = 0;    // first string-pool byte
     size_t pad_start = 0;    // first null-buffer byte
     int slot_count = 0;
@@ -801,6 +810,34 @@ struct Emitter {
         failed = true;
         if (first_error.empty()) first_error = message;
         log += "  ; error [" + code + "]: " + message + "\n";
+    }
+
+    // ------------------------------------------------------------ RAC source
+    void rsc_item(RopRscItem::Kind kind, size_t offset, const std::string& text,
+                  size_t length = 0) {
+        RopRscItem item;
+        item.kind = kind;
+        item.offset = offset;
+        item.text = text;
+        item.length = length;
+        rsc_items.push_back(std::move(item));
+    }
+    // A string literal is only re-emitted as `"..."` when every character maps
+    // to the same byte through both charsets.  Anything else stays `hex`, which
+    // is always byte-exact.
+    bool rsc_literal_ok(const std::string& text) const {
+        if (text.empty()) return false;
+        for (char c : text) {
+            const unsigned char uc = (unsigned char)c;
+            if (uc < 0x20 || uc > 0x7E) return false;
+            if (c == '"' || c == '\\') return false;
+            std::vector<uint8_t> enc;
+            std::string err;
+            if (!charmap().encode(std::string(1, c), enc, err)) return false;
+            const uint8_t expected = c == ' ' ? 0x20 : uc;
+            if (enc.size() != 1 || enc[0] != expected) return false;
+        }
+        return true;
     }
 
     uint32_t alloc_var(const std::string& n) {
@@ -852,6 +889,10 @@ struct Emitter {
         row.kind = kind;
         row.name = (kind == GKind::Pop) ? pop_register(found) : found;
         rows.push_back(row);
+        // RAC's `call <hex>` produces exactly the same four-byte chain word
+        // (address, 0x30 | segment, 0x30) when the gadget address is spelled
+        // out, so the emitted .rsc stays byte-identical.
+        rsc_item(RopRscItem::Kind::Call, row.offset, hex5(addr));
     }
     uint32_t eval(const ExprP& e, std::string& err) {
         switch (e->k) {
@@ -1059,6 +1100,41 @@ struct Emitter {
     //
     // The final pop reads the value, not the address.  ER0 is left holding the
     // KI/KO word for keytable().
+    bool is_blocking_key_call(const StmtP& s) const {
+        if (!s) return false;
+        if (s->k == Stmt::Call || s->key_assign) {
+            const std::string n = lower(s->name);
+            return n == "getscancode" || n == "getscankey";
+        }
+        return false;
+    }
+    bool body_has_blocking_key(const std::vector<StmtP>& body) const {
+        for (const auto& st : body) {
+            if (is_blocking_key_call(st)) return true;
+            if (body_has_blocking_key(st->body)) return true;
+            if (body_has_blocking_key(st->then_b)) return true;
+            if (body_has_blocking_key(st->else_b)) return true;
+            if (st->init && is_blocking_key_call(st->init)) return true;
+            if (st->step && is_blocking_key_call(st->step)) return true;
+        }
+        return false;
+    }
+    void emit_restore_to(size_t loop_offset) {
+        call("pop xr0");
+        out.push_back((uint8_t)(home & 0xFF));
+        out.push_back((uint8_t)((home >> 8) & 0xFF));
+        out.push_back((uint8_t)(data_home & 0xFF));
+        out.push_back((uint8_t)((data_home >> 8) & 0xFF));
+        emit_gadget(out, 0x09451);
+        out.push_back(0xFE);
+        out.push_back(0x02);
+        emit_gadget(out, 0x10742);
+        const uint32_t target = home + (uint32_t)loop_offset - 2;
+        out.push_back((uint8_t)(target & 0xFF));
+        out.push_back((uint8_t)((target >> 8) & 0xFF));
+        call("sp = er14,pop er14");
+        log += "  ; restore payload and loop to " + hex4(target) + "\n";
+    }
     void emit_print_addr(const StmtP& s) {
         if (s->args.size() != 3) {
             report_error("print_addr expects (x, y, address)", "E101");
@@ -1449,7 +1525,10 @@ struct Emitter {
                     return;
                 }
                 for (auto& x : s->body) stmt(x);
-                jump_label(lp, "goto " + lp);
+                if (body_has_blocking_key(s->body))
+                    emit_restore_to(labels[lp]);
+                else
+                    jump_label(lp, "goto " + lp);
                 labels[en] = out.size();
                 log += "; " + en + "\n";
                 return;
@@ -1467,7 +1546,10 @@ struct Emitter {
                 if (c != 0) {
                     for (auto& x : s->body) stmt(x);
                     if (s->step) stmt(s->step);
-                    jump_label(lp, "goto " + lp);
+                    if (body_has_blocking_key(s->body))
+                        emit_restore_to(labels[lp]);
+                    else
+                        jump_label(lp, "goto " + lp);
                 }
                 labels[en] = out.size();
                 return;
@@ -1747,6 +1829,8 @@ struct Emitter {
             out[t.addr_pos + 1] = (uint8_t)((base >> 8) & 0xFF);
             log += "  ; keytable @ [" + hex4(base) + "]\n";
             data_labels[out.size()] = "keytable_" + std::to_string(ti + 1);
+            rsc_item(RopRscItem::Kind::Word, t.addr_pos,
+                     "adr(keytable_" + std::to_string(ti + 1) + ")");
             for (const auto& e : t.entries) {
                 key_words[out.size()] = e.key;
                 emit_le(e.key, 2);
@@ -1767,8 +1851,17 @@ struct Emitter {
             out[sp.first + 1] = (uint8_t)((target >> 8) & 0xFF);
             log += "  ; str pool -> [" + hex4(target) + "] " + std::to_string(sp.second.size()) + " bytes\n";
             data_labels[off] = "str_" + std::to_string(si + 1);
+            rsc_item(RopRscItem::Kind::Word, sp.first,
+                     "eval(adr(str_" + std::to_string(si + 1) + ")+dist.main)");
             auto txt = str_text.find(sp.first);
-            if (txt != str_text.end()) data_comments[off] = " \"" + txt->second + "\"";
+            if (txt != str_text.end()) {
+                data_comments[off] = " \"" + txt->second + "\"";
+                // The trailing NUL is a separate `hex 00`; `length` is the
+                // encoded text length, not including it.
+                if (rsc_literal_ok(txt->second))
+                    rsc_item(RopRscItem::Kind::Literal, off, txt->second,
+                             sp.second.size() - 1);
+            }
         }
         // patch gotos
         for (auto& p : patches) {
@@ -1786,6 +1879,8 @@ struct Emitter {
             target -= 2;
             out[p.first] = (uint8_t)(target & 0xFF);
             out[p.first + 1] = (uint8_t)((target >> 8) & 0xFF);
+            rsc_item(RopRscItem::Kind::Word, p.first,
+                     "eval(adr(" + lower(p.second) + ") - 2)");
             log += "  ; patch " + p.second + " -> [" + hex4(target) + "]\n";
         }
         if (!key_call_sites.empty()) {
@@ -1803,7 +1898,9 @@ struct Emitter {
                 out[pos + 1] = (uint8_t)((addr >> 8) & 0xFF);
                 out[pos + 2] = chain_segment(addr);
                 out[pos + 3] = kChainVariantCall;
+                rsc_item(RopRscItem::Kind::Word, pos, "adr(__rop_key)");
             }
+            rsc_item(RopRscItem::Kind::Label, (size_t)key_routine_offset, "__rop_key");
             log += "  ; __rop_key matrix scan @ " + hex4(addr) + "\n";
         }
         if (prog.funcs.empty()) report_error("no function found in ROP source", "E106");
@@ -1820,11 +1917,32 @@ struct Emitter {
         }
         r.ok = !failed;
         if (failed) r.error = first_error.empty() ? "ROP compilation failed" : first_error;
+        // Labels for the RAC source.  Every known label is emitted (RAC labels
+        // do not add bytes), so a hand-edited .rsc keeps the same names.
+        {
+            std::set<std::string> seen;
+            for (const auto& it : rsc_items)
+                if (it.kind == RopRscItem::Kind::Label) seen.insert(it.text);
+            auto add_label = [&](size_t off, const std::string& name) {
+                const std::string n = lower(name);
+                if (off > out.size() || n.empty() || !seen.insert(n).second) return;
+                rsc_item(RopRscItem::Kind::Label, off, n);
+            };
+            for (const auto& kv : labels) add_label(kv.second, kv.first);
+            for (const auto& kv : data_labels) add_label(kv.first, kv.second);
+        }
+        std::stable_sort(rsc_items.begin(), rsc_items.end(),
+                         [](const RopRscItem& a, const RopRscItem& b) {
+                             if (a.offset != b.offset) return a.offset < b.offset;
+                             return (int)a.kind < (int)b.kind;
+                         });
         // The source-style listing comes first, the notes follow.  It has to
         // be built before `out` is moved into the result.
         const std::string listing = asm_listing();
         r.bytes = std::move(out);
         r.base = home;
+        r.exec = home;
+        r.rsc = std::move(rsc_items);
         r.log = listing;
         if (!log.empty()) {
             // The notes are comments in the same source: `#`, not `;`.
@@ -2224,6 +2342,7 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
         // `base` is where the debugger writes the payload.  It is not
         // necessarily the address used for absolute pointers inside it.
         r.base = common ? backup : org;
+        r.exec = execution_org;
 
         auto emit16 = [](std::vector<uint8_t>& out, uint32_t v) {
             out.push_back((uint8_t)(v & 0xFF));
@@ -2337,6 +2456,375 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
         bad.model = r.model;
         return bad;
     }
+}
+
+// ---------------------------------------------------------------- RAC source
+namespace {
+
+std::string rsc_hex4(uint32_t v) {
+    char b[16];
+    std::snprintf(b, sizeof b, "%04x", v & 0xFFFF);
+    return b;
+}
+
+std::string rsc_bytes(const uint8_t* data, size_t count) {
+    static const char* kDigits = "0123456789abcdef";
+    std::string out;
+    for (size_t i = 0; i < count; ++i) {
+        out.push_back(' ');
+        out.push_back(kDigits[data[i] >> 4]);
+        out.push_back(kDigits[data[i] & 0x0F]);
+    }
+    return out;
+}
+
+std::string rsc_literal_text(const std::string& text) {
+    std::string out;
+    for (char c : text) out.push_back(c == ' ' ? '~' : c);
+    return out;
+}
+
+std::string lowercase_ascii(std::string s) {
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+} // namespace
+
+std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& error) {
+    error.clear();
+    if (!rop.ok) {
+        error = "cannot emit RAC source for a failed ROP build";
+        return std::string();
+    }
+    if (rac_launcher && rop.model != "580") {
+        error = "the RAC launcher section is only available for the 580";
+        return std::string();
+    }
+    const uint32_t exec = rop.exec ? rop.exec : rop.base;
+    const std::string model_dir = rop.model == "880" ? "880btg" : "580vnx";
+
+    // Annotated items by offset.
+    std::map<size_t, std::vector<std::string>> labels;
+    std::map<size_t, std::string> words, literals, calls;
+    std::map<size_t, size_t> literal_len;
+    for (const auto& item : rop.rsc) {
+        switch (item.kind) {
+            case RopRscItem::Kind::Label:
+                labels[item.offset].push_back(lowercase_ascii(item.text));
+                break;
+            case RopRscItem::Kind::Word: words[item.offset] = item.text; break;
+            case RopRscItem::Kind::Call: calls[item.offset] = item.text; break;
+            case RopRscItem::Kind::Literal:
+                literals[item.offset] = item.text;
+                literal_len[item.offset] = item.length;
+                break;
+        }
+    }
+
+    std::ostringstream s;
+    s << "# RAC source emitted by wizc --emit-rsc.\n";
+    s << "# RAC-Compiler is an optional, external GPL-3.0 backend; its code is\n";
+    s << "# not linked into wizc.  Build with:\n";
+    s << "#     python3 rac.py " << model_dir << " this-file.rsc\n";
+    s << "# payload " << rop.bytes.size() << " bytes, injected @ 0x" << rsc_hex4(rop.base)
+      << ", executed @ 0x" << rsc_hex4(exec) << "\n\n";
+    s << "@section.main at 0x" << rsc_hex4(exec) << " backup 0x" << rsc_hex4(rop.base)
+      << "\n\n";
+
+    const std::vector<uint8_t>& bytes = rop.bytes;
+    size_t i = 0;
+    while (i < bytes.size()) {
+        auto la = labels.find(i);
+        if (la != labels.end()) {
+            for (const std::string& name : la->second) s << "lbl " << name << "\n";
+        }
+        auto wi = words.find(i);
+        if (wi != words.end()) {
+            s << "    " << wi->second << "   # " << rsc_hex4((uint32_t)i) << "\n";
+            i += 2;
+            continue;
+        }
+        auto ci = calls.find(i);
+        if (ci != calls.end()) {
+            s << "    call " << lowercase_ascii(ci->second) << "\n";
+            i += 4;
+            continue;
+        }
+        auto li = literals.find(i);
+        if (li != literals.end()) {
+            s << "    \"" << rsc_literal_text(li->second) << "\"\n";
+            i += std::max<size_t>(1, literal_len[i]);
+            continue;
+        }
+        // A hex run, stopped by the next annotated item or label and capped at
+        // eight bytes per line.
+        size_t end = std::min(i + 8, bytes.size());
+        auto nw = words.lower_bound(i + 1);
+        if (nw != words.end()) end = std::min(end, nw->first);
+        auto nc = calls.lower_bound(i + 1);
+        if (nc != calls.end()) end = std::min(end, nc->first);
+        auto nl = literals.lower_bound(i + 1);
+        if (nl != literals.end()) end = std::min(end, nl->first);
+        auto lb = labels.upper_bound(i);
+        if (lb != labels.end()) end = std::min(end, lb->first);
+        if (end <= i) end = i + 1;
+        s << "    hex" << rsc_bytes(bytes.data() + i, end - i) << "\n";
+        i = end;
+    }
+    // Labels that point one past the last payload byte.
+    for (auto it = labels.lower_bound(i); it != labels.end(); ++it)
+        for (const std::string& name : it->second) s << "lbl " << name << "\n";
+
+    if (rop.launcher.empty() && !rac_launcher) return s.str();
+
+    s << "\n@section.launcher at 0x" << rsc_hex4(rop.launcher_base) << "\n\n";
+    if (!rac_launcher) {
+        for (size_t k = 0; k < rop.launcher.size(); k += 8)
+            s << "    hex" << rsc_bytes(rop.launcher.data() + k,
+                                        std::min<size_t>(8, rop.launcher.size() - k))
+              << "\n";
+        return s.str();
+    }
+
+    // The RAC launcher: the same shape as the community/RAC examples
+    // (basic_draw.rsc, key_switch.rsc).  The addresses come from the emitted
+    // section, so the RAC compiler resolves them; the memcpy gadget is RAC's
+    // own 0x09451 entry point.
+    const size_t payload = rop.bytes.size();
+    const unsigned code = payload <= 0x1FE ? 1u : (payload <= 0x2FE ? 2u : 3u);
+    s << "    hex fd 24 30 30\n";
+    s << "    setlr_pc\n";
+    s << "    xr0 = pr_org(main), pr_backup(main)\n";
+    s << "    call 09451\n";
+    s << "    hex fe 0" << code << "\n";
+    s << "    er14 = eval(pr_org(main) - 2)\n";
+    s << "    sp = er14, pop er14\n";
+    return s.str();
+}
+
+std::string default_rac_path() {
+    if (const char* env = std::getenv("RAC_COMPILER"); env && *env) return env;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<fs::path> candidates;
+    candidates.push_back("tools/rac-compiler/rac.py");
+    fs::path cwd = fs::current_path(ec);
+    if (!ec) {
+        candidates.push_back(cwd / "tools" / "rac-compiler" / "rac.py");
+        candidates.push_back(cwd / ".." / "tools" / "rac-compiler" / "rac.py");
+        candidates.push_back(cwd / ".." / ".." / "tools" / "rac-compiler" / "rac.py");
+    }
+    if (!data_dir().empty()) {
+        const fs::path data = fs::path(data_dir());
+        // compiler/ and CasioEmuMsvc/third_party/wiz/data are both a few
+        // levels below the repository root.
+        candidates.push_back(data / ".." / "tools" / "rac-compiler" / "rac.py");
+        candidates.push_back(data / ".." / ".." / ".." / "tools" / "rac-compiler" / "rac.py");
+        candidates.push_back(data / ".." / ".." / ".." / ".." / "tools" / "rac-compiler" / "rac.py");
+    }
+    for (const auto& candidate : candidates) {
+        if (fs::is_regular_file(candidate, ec)) return candidate.string();
+    }
+    return "tools/rac-compiler/rac.py";
+}
+
+bool rac_available(const std::string& path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec);
+}
+
+namespace {
+
+std::string shell_quote(const std::string& text) {
+    std::string out = "'";
+    for (char c : text) {
+        if (c == '\'') out += "'\\''";
+        else out.push_back(c);
+    }
+    out += "'";
+    return out;
+}
+
+// Run a command and capture stdout+stderr.  Returns the process exit status
+// (0 = success) or -1 when the shell could not be started.
+int run_capture(const std::string& command, std::string& output) {
+    output.clear();
+    FILE* pipe = nullptr;
+#ifdef _WIN32
+    pipe = _popen(command.c_str(), "r");
+#else
+    pipe = popen(command.c_str(), "r");
+#endif
+    if (!pipe) return -1;
+    char buffer[4096];
+    while (std::fgets(buffer, sizeof buffer, pipe)) output += buffer;
+#ifdef _WIN32
+    const int status = _pclose(pipe);
+#else
+    const int status = pclose(pipe);
+#endif
+    if (status == -1) return -1;
+#ifdef _WIN32
+    return status;
+#else
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return status;
+#endif
+}
+
+struct RacSection {
+    std::string name;
+    uint32_t org = 0;
+    uint32_t backup = 0;
+    bool has_backup = false;
+    std::vector<uint8_t> bytes;
+};
+
+// Parse the RAC compiler's `=== section @name ===` / `=== 0x... ===` report.
+std::vector<RacSection> parse_rac_output(const std::string& text) {
+    std::vector<RacSection> sections;
+    std::istringstream in(text);
+    std::string line;
+    std::string pending;
+    RacSection* current = nullptr;
+    auto read_hex = [](const std::string& l, std::vector<uint8_t>& out) {
+        std::istringstream hs(l);
+        std::string token;
+        while (hs >> token) {
+            if (token.size() != 2) return;
+            char* end = nullptr;
+            const long v = std::strtol(token.c_str(), &end, 16);
+            if (!end || *end) return;
+            out.push_back((uint8_t)v);
+        }
+    };
+    while (std::getline(in, line)) {
+        size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos) continue;
+        std::string t = line.substr(first);
+        if (t.rfind("=== section @", 0) == 0) {
+            pending = t.substr(13);
+            while (!pending.empty() && (pending.back() == ' ' || pending.back() == '='))
+                pending.pop_back();
+            current = nullptr;
+            continue;
+        }
+        if (t.rfind("=== 0x", 0) == 0) {
+            // === 0xd730 -> 0xd7ea (0xe9e0 -> 0xea9a) (186 bytes) ===
+            unsigned long org = 0, backup = 0;
+            int have = std::sscanf(t.c_str(), "=== 0x%lx -> 0x%*x (0x%lx -> 0x%*x)",
+                                   &org, &backup);
+            RacSection section;
+            section.name = pending;
+            section.org = (uint32_t)org;
+            section.has_backup = have == 2;
+            section.backup = have == 2 ? (uint32_t)backup : (uint32_t)org;
+            sections.push_back(std::move(section));
+            current = &sections.back();
+            continue;
+        }
+        if (t.rfind("======", 0) == 0) {
+            current = nullptr;
+            pending.clear();
+            continue;
+        }
+        if (current) read_hex(t, current->bytes);
+    }
+    return sections;
+}
+
+} // namespace
+
+RacRopResult build_rop_rac(const std::string& source, const std::string& model,
+                           const std::string& language, const std::string& rsc_path,
+                           const std::string& rac_path, bool rac_launcher) {
+    RacRopResult rr;
+    rr.direct = build_rop(source, model, language);
+    if (!rr.direct.ok) {
+        rr.error = rr.direct.error.empty() ? "ROP compilation failed" : rr.direct.error;
+        return rr;
+    }
+    const std::string chosen = rac_path.empty() ? default_rac_path() : rac_path;
+    rr.rac_path = chosen;
+    if (!rac_available(chosen)) {
+        rr.error = "RAC compiler not found at " + chosen +
+                   " (set RAC_COMPILER or run tools/fetch_rac.sh)";
+        return rr;
+    }
+    std::string rsc_error;
+    const std::string rsc = rop_to_rsc(rr.direct, rac_launcher, rsc_error);
+    if (rsc.empty()) {
+        rr.error = rsc_error.empty() ? "cannot emit RAC source" : rsc_error;
+        return rr;
+    }
+    rr.rsc_path = rsc_path;
+    if (rsc_path.empty() || !write_text_file(rsc_path, rsc)) {
+        rr.error = "cannot write the RAC source: " + rsc_path;
+        return rr;
+    }
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path rac_file = fs::absolute(chosen, ec);
+    const fs::path rac_dir = rac_file.parent_path();
+    const fs::path rsc_file = fs::absolute(rsc_path, ec);
+    const std::string model_dir = rr.direct.model == "880" ? "880btg" : "580vnx";
+    const char* python = std::getenv("RAC_PYTHON");
+    const std::string py = (python && *python) ? python : "python3";
+
+    const std::string command = "cd " + shell_quote(rac_dir.string()) + " && " +
+                                shell_quote(py) + " " + shell_quote(rac_file.filename().string()) +
+                                " " + shell_quote(model_dir) + " " +
+                                shell_quote(rsc_file.string()) + " 2>&1";
+    std::string output;
+    const int status = run_capture(command, output);
+    rr.log = output;
+    if (status != 0) {
+        rr.error = "the RAC compiler failed (exit " + std::to_string(status) + ")";
+        if (!output.empty()) rr.error += ": " + output;
+        return rr;
+    }
+    const std::vector<RacSection> sections = parse_rac_output(output);
+    const RacSection* main = nullptr;
+    const RacSection* launcher = nullptr;
+    for (const auto& section : sections) {
+        const std::string name = lowercase_ascii(section.name);
+        if ((name == "main" || name.empty()) && !main) main = &section;
+        if (name == "launcher" && !launcher) launcher = &section;
+    }
+    if (!main || main->bytes.empty()) {
+        rr.error = "the RAC compiler produced no main section";
+        return rr;
+    }
+    rr.ran = true;
+    rr.payload = main->bytes;
+    rr.payload_base = main->has_backup ? main->backup : main->org;
+
+    // The direct launcher is the compiler's default.  --rac-launcher keeps the
+    // launcher section RAC compiled instead; say so explicitly.
+    rr.launcher = rr.direct.launcher;
+    rr.launcher_base = rr.direct.launcher_base;
+    if (rac_launcher) {
+        if (!launcher || launcher->bytes.empty()) {
+            rr.error = "the RAC compiler produced no launcher section";
+            return rr;
+        }
+        rr.launcher = launcher->bytes;
+        rr.launcher_base = launcher->org;
+        rr.launcher_from_rac = true;
+    }
+    // Direct vs RAC payload differences are reported, never hidden.
+    const size_t common = std::min(rr.payload.size(), rr.direct.bytes.size());
+    for (size_t k = 0; k < common; ++k)
+        if (rr.payload[k] != rr.direct.bytes[k]) rr.payload_diff++;
+    if (rr.payload.size() > rr.direct.bytes.size())
+        rr.payload_diff += rr.payload.size() - rr.direct.bytes.size();
+    else if (rr.direct.bytes.size() > rr.payload.size())
+        rr.payload_diff += rr.direct.bytes.size() - rr.payload.size();
+    rr.ok = true;
+    return rr;
 }
 
 } // namespace wiz
