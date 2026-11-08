@@ -137,8 +137,9 @@ A `#rop` source is compiled to RAC source and then through the external
 [RAC-Compiler](https://github.com/luongvantam/RAC-Compiler), which is **required**
 for ROP. RAC is GPL-3.0 and is never linked into the app; the app only runs
 `rac.py` as a process. The app finds it through `$RAC_COMPILER`, a
-`tools/rac-compiler/rac.py` checkout (working directory/parents, or
-`$WIZ_ROOT`), or a bundle copy under `<Wiz data>/tools/rac-compiler/rac.py`.
+`tools/rac-compiler/rac.py` checkout (working directory/parents, `$WIZ_ROOT`,
+or the repository root next to the model directory), or a bundle copy under
+`<Wiz data>/tools/rac-compiler/rac.py`.
 Without it, Build & Run shows an actionable error pointing at
 `tools/fetch_rac.sh`.
 

@@ -788,7 +788,19 @@ private:
 			return out;
 		};
 
-		const std::string rac_path = wiz::default_rac_path();
+		std::string rac_path = wiz::default_rac_path();
+		// A development build often sits in CasioEmuMsvc-Mac/build-* while the
+		// RAC checkout is in the repository root.  The model's session image
+		// lives at <model>/wiz, so <model>/../../tools is the repo root.
+		if (!wiz::rac_available(rac_path) && m_emu) {
+			std::error_code rec;
+			const std::filesystem::path session = m_emu->GetModelFilePath("wiz");
+			const std::filesystem::path candidate =
+				session.parent_path().parent_path().parent_path() / "tools" /
+				"rac-compiler" / "rac.py";
+			if (std::filesystem::is_regular_file(candidate, rec))
+				rac_path = candidate.string();
+		}
 		if (!wiz::rac_available(rac_path)) {
 			const std::string message =
 				"RAC-Compiler is required for ROP builds (not found at " + rac_path +
