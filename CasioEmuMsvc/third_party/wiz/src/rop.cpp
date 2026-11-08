@@ -226,6 +226,7 @@ struct Stmt;
 using StmtP = std::shared_ptr<Stmt>;
 struct Stmt {
     enum Kind { Assign, Call, If, While, For, Goto, Label, Asm, Return } k = Assign;
+    bool key_assign = false;
     std::string lhs;
     ExprP rhs;
     std::vector<StmtP> then_b, else_b, body;
@@ -416,6 +417,17 @@ private:
             s->lhs = next().s;
             std::string op = next().s;
             s->rhs = expr();
+            if (s->rhs && s->rhs->k == Expr::Call) {
+                const std::string fn = s->rhs->s;
+                if (fn == "getkey" || fn == "get_key" || fn == "getkeycode" ||
+                    fn == "get_keycode" || fn == "getscancode" ||
+                    fn == "getscankey" || fn == "getscancode_nodelay") {
+                    s->key_assign = true;
+                    s->name = s->rhs->s;
+                    s->args = s->rhs->args;
+                    s->rhs = nullptr;
+                }
+            }
             if (op == "+=" || op == "-=") {
                 auto v = std::make_shared<Expr>(); v->k = Expr::Var; v->s = s->lhs;
                 auto b = std::make_shared<Expr>(); b->k = Expr::Bin; b->s = op == "+=" ? "+" : "-";
@@ -1047,6 +1059,28 @@ struct Emitter {
     //
     // The final pop reads the value, not the address.  ER0 is left holding the
     // KI/KO word for keytable().
+    void emit_print_addr(const StmtP& s) {
+        if (s->args.size() != 3) {
+            report_error("print_addr expects (x, y, address)", "E101");
+            return;
+        }
+        const uint32_t x = eval(s->args[0], log);
+        const uint32_t y = eval(s->args[1], log);
+        const uint32_t a = eval(s->args[2], log);
+        uint32_t addr = 0; std::string found;
+        if (!find_addr("line_print", addr, found)) {
+            log += "  ; error [E100]: line_print gadget not found\n";
+            return;
+        }
+        call("pop xr0");
+        out.push_back((uint8_t)(x & 0xFF));
+        out.push_back((uint8_t)(y & 0xFF));
+        out.push_back((uint8_t)(a & 0xFF));
+        out.push_back((uint8_t)((a >> 8) & 0xFF));
+        call("line_print");
+        log += "  ; print_addr " + hex4(a) + " at (" + std::to_string(x) + "," +
+               std::to_string(y) + ")\n";
+    }
     void emit_getkey(const StmtP& s) {
         if (!s->args.empty()) {
             report_error(s->name + " takes no arguments", "E101");
@@ -1068,7 +1102,8 @@ struct Emitter {
             //     pop er0                 ; load the word just written
             //     slot: 00 00
             const std::string name = lower(s->name);
-            const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
+            const std::string gc = (name == "getscancode" || name == "getscankey")
+                ? "getscancode" : "getkey";
             call("setlr");
             call("pop xr0");
             const size_t zero_pos = out.size();
@@ -1112,7 +1147,8 @@ struct Emitter {
         out.push_back(0);
         out.push_back(0);
         const std::string name = lower(s->name);
-        const std::string gc = name == "getscancode" ? "getscancode" : "getkey";
+        const std::string gc = (name == "getscancode" || name == "getscankey")
+                ? "getscancode" : "getkey";
         call(gc);
         call("setlr");
         call("pop er0");
@@ -1340,6 +1376,15 @@ struct Emitter {
     void stmt(const StmtP& s) {
         switch (s->k) {
             case Stmt::Assign: {
+                if (s->key_assign) {
+                    auto call = std::make_shared<Stmt>();
+                    call->name = s->name;
+                    call->args = s->args;
+                    emit_getkey(call);
+                    alloc[s->lhs] = key_slot;
+                    log += "  ; " + s->lhs + " -> key slot " + hex4(key_slot) + "\n";
+                    return;
+                }
                 if (is_register(s->lhs)) {
                     call("pop " + lower(s->lhs));
                     emit_le(eval(s->rhs, log), reg_size(s->lhs));
@@ -1357,6 +1402,7 @@ struct Emitter {
                 // are emitted by hand; everything else goes through the
                 // generic "call then arguments" path.
                 if (key == "print" || key == "print_line") { emit_print(s, false); return; }
+                if (key == "print_addr" || key == "line_print") { emit_print_addr(s); return; }
                 if (key == "print_small") { emit_print(s, true); return; }
                 if (key == "line" || key == "draw_line") {
                     emit_line(s);
@@ -1367,7 +1413,8 @@ struct Emitter {
                 if (key == "key" || key == "key_scan" || key == "read_key") { emit_key(s); return; }
                 if (key == "getkey" || key == "get_key" ||
                     key == "getkeycode" || key == "get_keycode" ||
-                    key == "getscancode_nodelay" || key == "getscancode") { emit_getkey(s); return; }
+                    key == "getscancode_nodelay" || key == "getscancode" ||
+                    key == "getscankey") { emit_getkey(s); return; }
                 if (key == "keytable" || key == "table") { emit_keytable(s); return; }
                 if (key == "delay" || key == "sleep") { emit_delay(s); return; }
                 if (key == "calc_func" || key == "calc") { emit_calc(s); return; }
