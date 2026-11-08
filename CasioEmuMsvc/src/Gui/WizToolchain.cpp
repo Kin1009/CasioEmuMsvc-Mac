@@ -769,9 +769,8 @@ private:
 				effective.push_back('\n');
 			}
 		}
-		// Prefer the optional external RAC backend when it is available; the
-		// direct backend is also the fallback.  RAC is a separate GPL-3.0 tool:
-		// the app only runs rac.py as a process, it never links its code.
+		// RAC is required for ROP now.  It is a separate GPL-3.0 tool: the app
+		// runs rac.py as a process, it never links its code.
 		std::string directory;
 		if (m_emu)
 			directory = m_emu->GetModelFilePath("wiz");
@@ -789,67 +788,40 @@ private:
 			return out;
 		};
 
-		wiz::RopResult rop;
-		std::vector<uint8_t> payload, launcher;
-		uint32_t payload_base = 0, launcher_base = 0;
-		bool used_rac = false;
 		const std::string rac_path = wiz::default_rac_path();
-		if (wiz::rac_available(rac_path)) {
-			wiz::RacRopResult rac =
-				wiz::build_rop_rac(effective, model, EffectiveLang(), rsc_path_, rac_path, false);
-			if (rac.ok) {
-				used_rac = true;
-				rop = rac.direct;
-				payload = rac.payload;
-				launcher = rac.launcher;
-				payload_base = rac.payload_base;
-				launcher_base = rac.launcher_base;
-				AddLog(Sev::Note, wiz::fmt("RAC backend: %s -> %s", rac.rac_path.c_str(),
-										   rac.rsc_path.c_str()));
-				AddLog(Sev::Note, wiz::fmt("launcher: %s (%zu bytes @ %04X)",
-										   rac.launcher_from_rac ? "RAC @section.launcher"
-																 : "compiler default",
-										   launcher.size(), launcher_base));
-				if (rac.payload_diff)
-					AddLog(Sev::Warning,
-						   wiz::fmt("RAC payload differs from the direct backend in %zu byte(s)",
-									rac.payload_diff));
-				else
-					AddLog(Sev::Note, "RAC payload matches the direct backend byte for byte");
-			} else {
-				AddLog(Sev::Warning,
-					   "RAC backend unavailable: " + rac.error + "; using the direct backend");
-				rop = rac.direct.ok ? rac.direct : wiz::build_rop(effective, model, EffectiveLang());
-			}
-		} else {
-			AddLog(Sev::Note, wiz::fmt("RAC backend not found at %s; using the direct backend",
-									   rac_path.c_str()));
-			rop = wiz::build_rop(effective, model, EffectiveLang());
-		}
-		if (!used_rac) {
-			payload = rop.bytes;
-			launcher = rop.launcher;
-			payload_base = rop.base;
-			launcher_base = rop.launcher_base;
-		}
-		std::istringstream lines(rop.log);
-		std::string line;
-		while (std::getline(lines, line)) {
-			const size_t start = line.find_first_not_of(" \t;");
-			if (start == std::string::npos)
-				continue;
-			const std::string text = line.substr(start);
-			if (text.rfind("error", 0) == 0)
-				AddLog(Sev::Error, text);
-			else if (text.rfind("warning", 0) == 0)
-				AddLog(Sev::Warning, text);
-		}
-		if (!rop.ok) {
-			AddLog(Sev::Error, rop.error);
-			diags_.push_back({Sev::Error, -1, -1, rop.error});
+		if (!wiz::rac_available(rac_path)) {
+			const std::string message =
+				"RAC-Compiler is required for ROP builds (not found at " + rac_path +
+				"). Run tools/fetch_rac.sh in the Wiz checkout, or set RAC_COMPILER "
+				"to its rac.py.";
+			AddLog(Sev::Error, message);
+			diags_.push_back({Sev::Error, -1, -1, message});
 			casioemu::shell::NotifyBuildFinished(false);
 			return;
 		}
+		wiz::RacRopResult rac;
+		try {
+			rac = wiz::build_rop_rac(effective, model, EffectiveLang(), rsc_path_, rac_path);
+		} catch (const std::exception& e) {
+			AddLog(Sev::Error, e.what());
+			diags_.push_back({Sev::Error, -1, -1, e.what()});
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+		if (!rac.ok) {
+			AddLog(Sev::Error, rac.error);
+			diags_.push_back({Sev::Error, -1, -1, rac.error});
+			casioemu::shell::NotifyBuildFinished(false);
+			return;
+		}
+		std::vector<uint8_t> payload = rac.payload;
+		std::vector<uint8_t> launcher = rac.launcher;
+		const uint32_t payload_base = rac.payload_base;
+		const uint32_t launcher_base = rac.launcher_base;
+		AddLog(Sev::Note, wiz::fmt("RAC backend: %s -> %s", rac.rac_path.c_str(),
+								   rac.rsc_path.c_str()));
+		AddLog(Sev::Note, wiz::fmt("launcher: RAC @section.launcher (%zu bytes @ %04X)",
+								   launcher.size(), launcher_base));
 		if (payload.empty()) {
 			AddLog(Sev::Error, "the payload is empty");
 			casioemu::shell::NotifyBuildFinished(false);
@@ -870,8 +842,7 @@ private:
 
 		WriteFile(bin_path_, std::string(rop_bytes_.begin(), rop_bytes_.end()));
 		AddLog(Sev::Note, wiz::fmt("wrote %s", bin_path_.c_str()));
-		if (used_rac)
-			AddLog(Sev::Note, wiz::fmt("wrote %s", rsc_path_.c_str()));
+		AddLog(Sev::Note, wiz::fmt("wrote %s", rsc_path_.c_str()));
 
 		// Also write the assembly listing next to the .bin, like wizc does.
 		// The compiler writes it in the community ROP source style (`lbl`,
@@ -880,7 +851,10 @@ private:
 		asm_path_ = (std::filesystem::path(directory) / (Stem() + ".asm")).string();
 		std::string listing = wiz::fmt("# ROP payload @ %04X (%zu bytes)\n# launcher @ %04X (%zu bytes)\n",
 									   rop_base_, rop_bytes_.size(), rop_launcher_base_, rop_launcher_.size());
-		listing += "# launcher: " + rop_launcher_hex_ + "\n" + rop.log;
+		listing += "# launcher: " + rop_launcher_hex_ + "\n";
+		listing += "# built by RAC from " + rsc_path_ + "\n";
+		if (!rac.log.empty())
+			listing += "\n# ---- RAC ----\n" + rac.log;
 		last_asm_listing_ = listing;
 		WriteFile(asm_path_, listing);
 		PublishBuildSummary(casioemu::wizui::BuildMode::Rop, rop_bytes_.size(),

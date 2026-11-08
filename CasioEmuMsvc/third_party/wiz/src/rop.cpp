@@ -869,11 +869,8 @@ struct Emitter {
         return false;
     }
     void call(const std::string& name) {
-        // Keep old Wiz examples source-compatible, but compile the historical
-        // setlr_pc spelling as RAC's working setlr gadget.
-        const std::string lookup_name = lower(name) == "setlr_pc" ? "setlr" : name;
         uint32_t addr = 0; std::string found;
-        if (!find_addr(lookup_name, addr, found)) {
+        if (!find_addr(name, addr, found)) {
             report_error("gadget/label " + name + " not found (aliases tried)");
             return;
         }
@@ -892,7 +889,12 @@ struct Emitter {
         // RAC's `call <hex>` produces exactly the same four-byte chain word
         // (address, 0x30 | segment, 0x30) when the gadget address is spelled
         // out, so the emitted .rsc stays byte-identical.
-        rsc_item(RopRscItem::Kind::Call, row.offset, hex5(addr));
+        RopRscItem item;
+        item.kind = RopRscItem::Kind::Call;
+        item.offset = row.offset;
+        item.text = hex5(addr);
+        item.name = found;
+        rsc_items.push_back(std::move(item));
     }
     uint32_t eval(const ExprP& e, std::string& err) {
         switch (e->k) {
@@ -2355,6 +2357,7 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
             r.launcher_base = lopts.base;
         else
             r.launcher_base = (r.model == "880" ? 0x9268u : 0xD180u);
+        r.launcher_simple = lopts.kind == LauncherKind::Simple;
         const uint32_t length = lopts.length;
         // RAC length codes: 01 -> 0x01FE (510) bytes, 02 -> 0x02FE (766),
         // 03 -> 0x03FE (1022) bytes.
@@ -2489,16 +2492,62 @@ std::string lowercase_ascii(std::string s) {
     return s;
 }
 
+// Preferred RAC spelling for a gadget we know.  RAC resolves these names from
+// the model's labels/gadgets tables (`line_print` includes the +2 entry fixup,
+// which is exactly what the community sources rely on).  An empty result means
+// "emit `call <address>` instead".
+std::string rac_mnemonic(const std::string& gadget, const std::string& model) {
+    const std::string k = lowercase_ascii(gadget);
+    const bool m880 = model == "880";
+    if (k == "render" || k == "render.ddd4" || k == "render.ca54")
+        return m880 ? "render.ca54" : "render.ddd4";
+    if (k.rfind("buffer_clear", 0) == 0 || k == "screen_del" || k == "cls")
+        return m880 ? "buffer_clear.ca54" : "buffer_clear";
+    if (k == "printline" || k == "print_line" || k == "line_print")
+        return k == "line_print" ? "line_print" : (m880 ? "print_line" : "printline");
+    static const std::map<std::string, std::string> names = {
+        {"setlr", "setlr"},
+        {"setlr_pc", "setlr_pc"},
+        {"setsfr", "setsfr"},
+        {"buffer_clear", "buffer_clear"},
+        {"printline", "printline"},
+        {"smallprint", "smallprint"},
+        {"line_print", "line_print"},
+        {"render", "render.ddd4"},
+        {"render.ddd4", "render.ddd4"},
+        {"line_draw", "line_draw"},
+        {"pixel_draw", "pixel_draw"},
+        {"render_bitmap", "render_bitmap"},
+        {"delay", "delay"},
+        {"getkey", "getkey"},
+        {"getkeycode", "getkeycode"},
+        {"getscancode", "getscancode"},
+        {"cmp_ea", "cmp_ea"},
+        {"ea_switchcase", "cmp_ea"},
+        {"er6 = [ea]", "er6 = [ea]"},
+        {"er6 = [ea+]", "er6 = [ea+]"},
+        {"sp=er6,pop er8", "sp = er6,pop er8"},
+        {"sp = er6, pop er8", "sp = er6,pop er8"},
+        {"sp = er6,pop er8", "sp = er6,pop er8"},
+        {"bl_strcpy", "BL strcpy"},
+        {"bl_strcat", "BL strcat"},
+        {"bl_strlen", "BL strlen"},
+        {"[er0]=er2,rt", "[er0]=er2,rt"},
+        {"[er0] = er2,rt", "[er0]=er2,rt"},
+    };
+    auto it = names.find(k);
+    if (it != names.end()) return it->second;
+    // Plain register pops: `pop er0`, `pop xr0`, `pop qr8`, `pop ea`, ...
+    if (k.rfind("pop ", 0) == 0 && k.find(',') == std::string::npos) return k;
+    return std::string();
+}
+
 } // namespace
 
-std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& error) {
+std::string rop_to_rsc(const RopResult& rop, std::string& error) {
     error.clear();
     if (!rop.ok) {
         error = "cannot emit RAC source for a failed ROP build";
-        return std::string();
-    }
-    if (rac_launcher && rop.model != "580") {
-        error = "the RAC launcher section is only available for the 580";
         return std::string();
     }
     const uint32_t exec = rop.exec ? rop.exec : rop.base;
@@ -2506,7 +2555,8 @@ std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& err
 
     // Annotated items by offset.
     std::map<size_t, std::vector<std::string>> labels;
-    std::map<size_t, std::string> words, literals, calls;
+    std::map<size_t, std::string> words, literals;
+    std::map<size_t, const RopRscItem*> calls;
     std::map<size_t, size_t> literal_len;
     for (const auto& item : rop.rsc) {
         switch (item.kind) {
@@ -2514,7 +2564,7 @@ std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& err
                 labels[item.offset].push_back(lowercase_ascii(item.text));
                 break;
             case RopRscItem::Kind::Word: words[item.offset] = item.text; break;
-            case RopRscItem::Kind::Call: calls[item.offset] = item.text; break;
+            case RopRscItem::Kind::Call: calls[item.offset] = &item; break;
             case RopRscItem::Kind::Literal:
                 literals[item.offset] = item.text;
                 literal_len[item.offset] = item.length;
@@ -2523,9 +2573,9 @@ std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& err
     }
 
     std::ostringstream s;
-    s << "# RAC source emitted by wizc --emit-rsc.\n";
-    s << "# RAC-Compiler is an optional, external GPL-3.0 backend; its code is\n";
-    s << "# not linked into wizc.  Build with:\n";
+    s << "# RAC source emitted by wizc.\n";
+    s << "# RAC-Compiler is a separate GPL-3.0 program (not linked into wizc);\n";
+    s << "# it is required for #rop sources.  Build with:\n";
     s << "#     python3 rac.py " << model_dir << " this-file.rsc\n";
     s << "# payload " << rop.bytes.size() << " bytes, injected @ 0x" << rsc_hex4(rop.base)
       << ", executed @ 0x" << rsc_hex4(exec) << "\n\n";
@@ -2547,7 +2597,12 @@ std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& err
         }
         auto ci = calls.find(i);
         if (ci != calls.end()) {
-            s << "    call " << lowercase_ascii(ci->second) << "\n";
+            const std::string mnemonic =
+                ci->second ? rac_mnemonic(ci->second->name, rop.model) : std::string();
+            if (!mnemonic.empty())
+                s << "    " << mnemonic << "   # " << rsc_hex4((uint32_t)i) << "\n";
+            else
+                s << "    call " << lowercase_ascii(ci->second ? ci->second->text : "") << "\n";
             i += 4;
             continue;
         }
@@ -2576,25 +2631,31 @@ std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& err
     for (auto it = labels.lower_bound(i); it != labels.end(); ++it)
         for (const std::string& name : it->second) s << "lbl " << name << "\n";
 
-    if (rop.launcher.empty() && !rac_launcher) return s.str();
-
-    s << "\n@section.launcher at 0x" << rsc_hex4(rop.launcher_base) << "\n\n";
-    if (!rac_launcher) {
-        for (size_t k = 0; k < rop.launcher.size(); k += 8)
-            s << "    hex" << rsc_bytes(rop.launcher.data() + k,
-                                        std::min<size_t>(8, rop.launcher.size() - k))
-              << "\n";
-        return s.str();
-    }
-
-    // The RAC launcher: the same shape as the community/RAC examples
-    // (basic_draw.rsc, key_switch.rsc).  The addresses come from the emitted
-    // section, so the RAC compiler resolves them; the memcpy gadget is RAC's
-    // own 0x09451 entry point.
+    // The launcher always comes from RAC.  `#launcher common` is the community
+    // "launcher chung" shape: trigger, setlr/setsfr, xr0 = main/backup, the
+    // 0x09451 memcpy, the RAC length code, then `sp = er14, pop er14` into the
+    // payload.  `#launcher simple` (or an explicit stub address) is the
+    // pop-er14 stub.  The addresses are section symbols, so RAC resolves them.
     const size_t payload = rop.bytes.size();
     const unsigned code = payload <= 0x1FE ? 1u : (payload <= 0x2FE ? 2u : 3u);
+    s << "\n@section.launcher at 0x" << rsc_hex4(rop.launcher_base) << "\n\n";
+    if (rop.model == "880") {
+        // The 880 payload executes in place, so the common launcher is the
+        // historical 8-byte stub: trigger, backup - 2, sp gadget.
+        s << "    hex fd 26\n";
+        s << "    eval(pr_backup(main) - 2)\n";
+        s << "    call 3275C0\n";
+        return s.str();
+    }
+    if (rop.launcher_simple) {
+        s << "    pop er14\n";
+        s << "    eval(pr_org(main) - 2)\n";
+        s << "    sp = er14, pop er14\n";
+        return s.str();
+    }
     s << "    hex fd 24 30 30\n";
-    s << "    setlr_pc\n";
+    s << "    setlr\n";
+    s << "    setsfr\n";
     s << "    xr0 = pr_org(main), pr_backup(main)\n";
     s << "    call 09451\n";
     s << "    hex fe 0" << code << "\n";
@@ -2619,9 +2680,13 @@ std::string default_rac_path() {
         const fs::path data = fs::path(data_dir());
         // compiler/ and CasioEmuMsvc/third_party/wiz/data are both a few
         // levels below the repository root.
+        candidates.push_back(data / "tools" / "rac-compiler" / "rac.py");
         candidates.push_back(data / ".." / "tools" / "rac-compiler" / "rac.py");
         candidates.push_back(data / ".." / ".." / ".." / "tools" / "rac-compiler" / "rac.py");
         candidates.push_back(data / ".." / ".." / ".." / ".." / "tools" / "rac-compiler" / "rac.py");
+    }
+    if (const char* root = std::getenv("WIZ_ROOT"); root && *root) {
+        candidates.push_back(fs::path(root) / "tools" / "rac-compiler" / "rac.py");
     }
     for (const auto& candidate : candidates) {
         if (fs::is_regular_file(candidate, ec)) return candidate.string();
@@ -2737,28 +2802,183 @@ std::vector<RacSection> parse_rac_output(const std::string& text) {
 
 } // namespace
 
+bool extract_raw_rsc(const std::string& source, std::string& out, std::string& error) {
+    out.clear();
+    error.clear();
+    std::istringstream in(source);
+    std::string line;
+    std::ostringstream body;
+    bool inside = false;
+    while (std::getline(in, line)) {
+        const std::string t = strip(line);
+        if (!inside) {
+            if (t.rfind("#raw-rsc", 0) == 0) {
+                const std::string rest = strip(t.substr(8));
+                if (rest.empty() || rest[0] != '{') {
+                    error = "#raw-rsc must be followed by '{'";
+                    return false;
+                }
+                inside = true;
+            }
+            continue;
+        }
+        if (t == "}") {
+            inside = false;
+            continue;
+        }
+        body << line << "\n";
+    }
+    if (inside) {
+        error = "#raw-rsc block is not closed with '}'";
+        return false;
+    }
+    out = body.str();
+    return !out.empty();
+}
+
+namespace {
+
+// Remove the #raw-rsc block (if any) from `source`, leaving blank lines so the
+// line numbers of the remaining directives stay useful.
+std::string strip_raw_rsc_block(const std::string& source) {
+    std::istringstream in(source);
+    std::ostringstream out;
+    std::string line;
+    bool inside = false;
+    while (std::getline(in, line)) {
+        const std::string t = strip(line);
+        if (!inside) {
+            if (t.rfind("#raw-rsc", 0) == 0) {
+                inside = true;
+                out << "\n";
+                continue;
+            }
+            out << line << "\n";
+            continue;
+        }
+        if (t == "}") inside = false;
+        out << "\n";
+    }
+    return out.str();
+}
+
+bool rsc_has_launcher_at(const std::string& rsc, uint32_t base) {
+    const std::string text = lowercase_ascii(rsc);
+    const std::string needle = "@section.launcher at";
+    size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        pos += needle.size();
+        while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) ++pos;
+        if (pos + 2 < text.size() && text[pos] == '0' && text[pos + 1] == 'x') {
+            size_t end = pos + 2;
+            while (end < text.size() && std::isxdigit((unsigned char)text[end])) ++end;
+            const unsigned long value =
+                std::strtoul(text.substr(pos + 2, end - pos - 2).c_str(), nullptr, 16);
+            if ((uint32_t)value == base) return true;
+        }
+    }
+    return false;
+}
+
+bool rsc_has_main_backup(const std::string& rsc, uint32_t backup) {
+    const std::string text = lowercase_ascii(rsc);
+    const std::string needle = "@section.main";
+    const size_t pos = text.find(needle);
+    if (pos == std::string::npos) return false;
+    static const std::string kBackup = "backup";
+    const size_t b = text.find(kBackup, pos);
+    if (b == std::string::npos) return false;
+    size_t i = b + kBackup.size();
+    while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+    if (i + 2 >= text.size() || text[i] != '0' || text[i + 1] != 'x') return false;
+    size_t end = i + 2;
+    while (end < text.size() && std::isxdigit((unsigned char)text[end])) ++end;
+    const unsigned long value =
+        std::strtoul(text.substr(i + 2, end - i - 2).c_str(), nullptr, 16);
+    return (uint32_t)value == backup;
+}
+
+} // namespace
+
+std::string rop_source_to_rsc(const std::string& source, const std::string& model,
+                             const std::string& language, std::string& error) {
+    error.clear();
+    const std::string m = (model == "880" || lower(model) == "880btg") ? "880" : "580";
+    std::string selected;
+    try {
+        selected = select_sections(source, get_target(m));
+    } catch (const std::exception& e) {
+        error = e.what();
+        return std::string();
+    }
+
+    std::string raw, raw_error;
+    if (extract_raw_rsc(selected, raw, raw_error)) {
+        uint32_t org = 0;
+        bool has_org = false;
+        LauncherOpts lopts;
+        int pad = 256;
+        std::string directive_model = m;
+        const std::string without_raw = strip_raw_rsc_block(selected);
+        try {
+            strip_directives(without_raw, directive_model, org, has_org, lopts, pad);
+        } catch (const std::exception& e) {
+            error = e.what();
+            return std::string();
+        }
+        const uint32_t expected = lopts.has_base ? lopts.base
+                                                 : (m == "880" ? 0x9268u : 0xD180u);
+        const uint32_t expected_org = has_org ? org : (m == "880" ? 0xE330u : 0xE9E0u);
+        if (raw.find("@section.main") == std::string::npos) {
+            error = "#raw-rsc must contain an @section.main section";
+            return std::string();
+        }
+        if (!rsc_has_main_backup(raw, expected_org)) {
+            error = fmt("#raw-rsc must declare '@section.main at ... backup 0x%04X' "
+                        "for #org 0x%04X",
+                        expected_org, expected_org);
+            return std::string();
+        }
+        if (!rsc_has_launcher_at(raw, expected)) {
+            error = fmt("#raw-rsc must contain '@section.launcher at 0x%04X' for "
+                        "#launcher%s",
+                        expected, lopts.kind == LauncherKind::Simple ? " simple" : " common");
+            return std::string();
+        }
+        return raw;
+    }
+    if (!raw_error.empty()) {
+        error = raw_error;
+        return std::string();
+    }
+
+    RopResult rop = build_rop(selected, m, language);
+    if (!rop.ok) {
+        error = rop.error.empty() ? "ROP compilation failed" : rop.error;
+        return std::string();
+    }
+    return rop_to_rsc(rop, error);
+}
+
 RacRopResult build_rop_rac(const std::string& source, const std::string& model,
                            const std::string& language, const std::string& rsc_path,
-                           const std::string& rac_path, bool rac_launcher) {
+                           const std::string& rac_path) {
     RacRopResult rr;
-    rr.direct = build_rop(source, model, language);
-    if (!rr.direct.ok) {
-        rr.error = rr.direct.error.empty() ? "ROP compilation failed" : rr.direct.error;
-        return rr;
-    }
+    const std::string m = (model == "880" || lower(model) == "880btg") ? "880" : "580";
     const std::string chosen = rac_path.empty() ? default_rac_path() : rac_path;
     rr.rac_path = chosen;
     if (!rac_available(chosen)) {
         rr.error = "RAC compiler not found at " + chosen +
-                   " (set RAC_COMPILER or run tools/fetch_rac.sh)";
+                   " (run tools/fetch_rac.sh or set RAC_COMPILER / --rac PATH)";
         return rr;
     }
     std::string rsc_error;
-    const std::string rsc = rop_to_rsc(rr.direct, rac_launcher, rsc_error);
+    const std::string rsc = rop_source_to_rsc(source, m, language, rsc_error);
     if (rsc.empty()) {
         rr.error = rsc_error.empty() ? "cannot emit RAC source" : rsc_error;
         return rr;
     }
+    rr.rsc_text = rsc;
     rr.rsc_path = rsc_path;
     if (rsc_path.empty() || !write_text_file(rsc_path, rsc)) {
         rr.error = "cannot write the RAC source: " + rsc_path;
@@ -2770,7 +2990,7 @@ RacRopResult build_rop_rac(const std::string& source, const std::string& model,
     const fs::path rac_file = fs::absolute(chosen, ec);
     const fs::path rac_dir = rac_file.parent_path();
     const fs::path rsc_file = fs::absolute(rsc_path, ec);
-    const std::string model_dir = rr.direct.model == "880" ? "880btg" : "580vnx";
+    const std::string model_dir = m == "880" ? "880btg" : "580vnx";
     const char* python = std::getenv("RAC_PYTHON");
     const std::string py = (python && *python) ? python : "python3";
 
@@ -2798,31 +3018,15 @@ RacRopResult build_rop_rac(const std::string& source, const std::string& model,
         rr.error = "the RAC compiler produced no main section";
         return rr;
     }
+    if (!launcher || launcher->bytes.empty()) {
+        rr.error = "the RAC compiler produced no @section.launcher; ROP needs one";
+        return rr;
+    }
     rr.ran = true;
     rr.payload = main->bytes;
     rr.payload_base = main->has_backup ? main->backup : main->org;
-
-    // The direct launcher is the compiler's default.  --rac-launcher keeps the
-    // launcher section RAC compiled instead; say so explicitly.
-    rr.launcher = rr.direct.launcher;
-    rr.launcher_base = rr.direct.launcher_base;
-    if (rac_launcher) {
-        if (!launcher || launcher->bytes.empty()) {
-            rr.error = "the RAC compiler produced no launcher section";
-            return rr;
-        }
-        rr.launcher = launcher->bytes;
-        rr.launcher_base = launcher->org;
-        rr.launcher_from_rac = true;
-    }
-    // Direct vs RAC payload differences are reported, never hidden.
-    const size_t common = std::min(rr.payload.size(), rr.direct.bytes.size());
-    for (size_t k = 0; k < common; ++k)
-        if (rr.payload[k] != rr.direct.bytes[k]) rr.payload_diff++;
-    if (rr.payload.size() > rr.direct.bytes.size())
-        rr.payload_diff += rr.payload.size() - rr.direct.bytes.size();
-    else if (rr.direct.bytes.size() > rr.payload.size())
-        rr.payload_diff += rr.direct.bytes.size() - rr.payload.size();
+    rr.launcher = launcher->bytes;
+    rr.launcher_base = launcher->org;
     rr.ok = true;
     return rr;
 }

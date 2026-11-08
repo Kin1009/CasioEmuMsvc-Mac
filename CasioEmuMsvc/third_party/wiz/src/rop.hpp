@@ -13,6 +13,7 @@ struct RopRscItem {
     Kind kind = Kind::Label;
     size_t offset = 0;
     std::string text;   // label name, RAC expression, call address, or source text
+    std::string name;   // Call: gadget name (for the RAC mnemonic)
     size_t length = 0;  // Literal: encoded byte length (0 = NUL terminated text)
 };
 
@@ -30,6 +31,7 @@ struct RopResult {
     // sets SP to the payload and lets the gadget chain continue there.
     std::vector<uint8_t> launcher;
     uint32_t launcher_base = 0x8154;
+    bool launcher_simple = false;   // #launcher simple / explicit stub address
     std::string launcher_hex;   // space-separated bytes, for pasting into a program
     std::string model;   // "580" or "880"
     // Labels, label-relative address words and string literals, for --emit-rsc.
@@ -48,41 +50,48 @@ bool source_is_rop(const std::string& source);
 std::string rop_key_routine_asm();
 
 // Re-emit a compiled payload as RAC-Compiler source (.rsc).  The output uses
-// real RAC syntax where it is byte-safe (`@section.main`, `lbl`, `hex`,
-// `"..."`, `eval(adr(...))`) and hex blocks everywhere else.  `rac_launcher`
-// asks for the launcher section to be emitted in RAC source form (the RAC
-// launcher) instead of the compiler's default launcher bytes; it is only
-// available on the 580.  On failure `error` is set and the result is empty.
-std::string rop_to_rsc(const RopResult& rop, bool rac_launcher, std::string& error);
+// real RAC syntax where possible (`@section.main`, `lbl`, `call`, `hex`,
+// `"..."`, `eval(adr(...))`) and always derives the launcher from the RAC
+// `@section.launcher` shape.  On failure `error` is set and the result is empty.
+std::string rop_to_rsc(const RopResult& rop, std::string& error);
+
+// Generate the RAC source for a #rop source without running RAC (used by
+// --emit-rsc).  Handles `#raw-rsc` and the high-level emitter.
+std::string rop_source_to_rsc(const std::string& source, const std::string& model,
+                              const std::string& language, std::string& error);
+
+// Extract a verbatim `#raw-rsc { ... }` block from a #rop source.  The returned
+// text is used as the complete RAC source, unchanged.  Returns false when the
+// source has no such block; on a malformed block `error` is set.
+bool extract_raw_rsc(const std::string& source, std::string& out, std::string& error);
 
 // RAC-Compiler location: $RAC_COMPILER, else tools/rac-compiler/rac.py.
 std::string default_rac_path();
 bool rac_available(const std::string& path);
 
-// Result of the optional external RAC backend.
+// Result of the RAC compiler (the only production ROP backend).  The direct
+// `RopResult` is kept for diagnostics and for the RAC-source metadata; the
+// payload and launcher in this structure are the bytes RAC produced.
 struct RacRopResult {
     bool ok = false;
     bool ran = false;              // the RAC compiler was invoked successfully
-    bool launcher_from_rac = false;
     std::string error;
     std::string log;
-    RopResult direct;              // the direct build (also the fallback path)
+    RopResult direct;              // parsed metadata (not an output path)
     std::vector<uint8_t> payload;
     uint32_t payload_base = 0;
     std::vector<uint8_t> launcher;
     uint32_t launcher_base = 0;
     std::string rsc_path;
+    std::string rsc_text;
     std::string rac_path;
-    size_t payload_diff = 0;       // bytes that differ from the direct payload
 };
 
 // Build a ROP source through the external RAC compiler.  `rsc_path` is where
-// the emitted .rsc is written (no temporary directory is used).  The direct
-// compiler remains the fallback: when RAC is missing or fails, `ok` is false
-// but `direct` holds a complete direct build.
+// the emitted .rsc is written (no temporary directory is used).  RAC is
+// mandatory: when it is missing or fails, `ok` is false and no image exists.
 RacRopResult build_rop_rac(const std::string& source, const std::string& model,
                            const std::string& language, const std::string& rsc_path,
-                           const std::string& rac_path = std::string(),
-                           bool rac_launcher = false);
+                           const std::string& rac_path = std::string());
 
 } // namespace wiz

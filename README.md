@@ -127,12 +127,11 @@ How a ROP program runs:
    and jumps into it.
 3. **Run** — in the calculator's **Program mode**, press **EXE**.
 
-When the optional [RAC-Compiler](https://github.com/luongvantam/RAC-Compiler) checkout is
-available (`$RAC_COMPILER`, or `tools/rac-compiler/rac.py` relative to the working directory),
-**Build & Run** compiles through it and also writes `<name>.rsc`; otherwise it uses the built-in
-backend. RAC is GPL-3.0 and is never linked into the app. The two backends can differ in the class
-bytes of each gadget call word (documented in the CWiz `docs/ROP.md`); the app reports the
-difference in its build log.
+When the RAC-Compiler checkout is available (`$RAC_COMPILER`,
+`tools/rac-compiler/rac.py`, or a bundle copy), **Build & Run** compiles the
+`.rsc` through it and writes `<name>.rsc`; RAC is required for ROP, so a
+missing checkout is reported with `tools/fetch_rac.sh` guidance. RAC is
+GPL-3.0 and is never linked into the app.
 
 The app verifies both blocks after writing them and says so:
 

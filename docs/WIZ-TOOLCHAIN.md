@@ -133,18 +133,21 @@ Notes and limits:
 
 ### ROP payloads
 
-A `#rop` source takes a different path: after compiling, `Build & Run` pauses the model,
-writes the payload at `#org` (`E9E0`/`E330`) and the launcher at its launcher address
-(`D180`/`9268`), verifies both blocks, and resumes. A launcher in the program input area is
-firmware data interpreted by the calculator, not CPU code, so it is started with **EXE**;
-setting PC there would execute the ROM at the same address. Launchers placed in free RAM are
-transferred to with PC instead.
+A `#rop` source is compiled to RAC source and then through the external
+[RAC-Compiler](https://github.com/luongvantam/RAC-Compiler), which is **required**
+for ROP. RAC is GPL-3.0 and is never linked into the app; the app only runs
+`rac.py` as a process. The app finds it through `$RAC_COMPILER`, a
+`tools/rac-compiler/rac.py` checkout (working directory/parents, or
+`$WIZ_ROOT`), or a bundle copy under `<Wiz data>/tools/rac-compiler/rac.py`.
+Without it, Build & Run shows an actionable error pointing at
+`tools/fetch_rac.sh`.
 
-When the optional external [RAC-Compiler](https://github.com/luongvantam/RAC-Compiler) is
-available (`$RAC_COMPILER`, or `tools/rac-compiler/rac.py` relative to the working directory),
-the build goes through it and also writes `<name>.rsc`; otherwise the built-in backend is used.
-RAC is GPL-3.0 and is never linked into the app; the payload it produces can differ from the
-direct backend in the two class bytes of each gadget word (the build log reports the count).
+After compiling, `Build & Run` pauses the model, writes the payload at `#org`
+(`E9E0`/`E330`) and the RAC `@section.launcher` at its address
+(`D180`/`9268`), verifies both blocks, and resumes. A launcher in the program
+input area is firmware data interpreted by the calculator, not CPU code, so it
+is started with **EXE**; setting PC there would execute the ROM at the same
+address. Launchers placed in free RAM are transferred to with PC instead.
 
 ## Calculator tab
 
