@@ -780,6 +780,7 @@ struct Emitter {
     std::set<std::string> explicit_labels;  // source labels, for duplicate detection
     std::vector<std::pair<size_t, std::string>> patches;
     std::vector<size_t> key_call_sites;      // chain words to patch with __rop_key
+    std::vector<size_t> restore_len_pos;     // FE <code> bytes in restore blocks
     int key_routine_offset = -1;
     std::vector<std::pair<size_t, std::vector<uint8_t>>> str_pool;
     std::map<size_t, std::string> str_text;   // pointer position -> source text
@@ -1128,8 +1129,9 @@ struct Emitter {
         out.push_back((uint8_t)(data_home & 0xFF));
         out.push_back((uint8_t)((data_home >> 8) & 0xFF));
         emit_gadget(out, 0x09451);
+        restore_len_pos.push_back(out.size());
         out.push_back(0xFE);
-        out.push_back(0x02);
+        out.push_back(0x01);
         emit_gadget(out, 0x10742);
         const uint32_t target = home + (uint32_t)loop_offset - 2;
         out.push_back((uint8_t)(target & 0xFF));
@@ -1195,7 +1197,7 @@ struct Emitter {
             out.push_back(0);
             out.push_back(0);
             call(gc);
-            call("setlr");
+            call(gc == "getscancode" ? "setlr_pc" : "setlr");
             call("pop er0");
             const size_t slot_pos = out.size();
             out.push_back(0x00);
@@ -1917,6 +1919,12 @@ struct Emitter {
             out.insert(out.end(), (size_t)pad_size, (uint8_t)0);
             log += "  ; null buffer: " + std::to_string(pad_size) + " bytes\n";
         }
+        {
+            const uint32_t restore_code = out.size() <= 0x1FEu ? 1u
+                : (out.size() <= 0x2FEu ? 2u : 3u);
+            for (size_t pos : restore_len_pos)
+                if (pos + 1 < out.size()) out[pos + 1] = (uint8_t)restore_code;
+        }
         r.ok = !failed;
         if (failed) r.error = first_error.empty() ? "ROP compilation failed" : first_error;
         // Labels for the RAC source.  Every known label is emitted (RAC labels
@@ -2461,6 +2469,659 @@ RopResult build_rop(const std::string& source, const std::string& model, const s
     }
 }
 
+
+// ---------------------------------------------------------------- RAC generator
+// The high-level CWiz ROP emitter.  It writes RAC source in the style of the
+// community examples (arrow_keys.rsc, key_switch.rsc): `lbl start`,
+// `setlr_pc`/`setsfr`, `er0 = adr(key); getscancode; setlr_pc`, an
+// `ea = adr(table); pop er0` dispatch with the inline `lbl key / hex 00 00`
+// slot, handlers that pivot through a shared `restore` block, explicitly
+// terminated strings, key tables and a final `lbl end / hex 00 00 00 00`.
+namespace {
+std::string lowercase_ascii(std::string s);
+}
+namespace {
+
+struct RacGenerator {
+    const Program& prog;
+    std::string model;
+    uint32_t main_org = 0xD730;
+    uint32_t backup = 0xE9E0;
+    uint32_t launcher_base = 0xD180;
+    bool simple_launcher = false;
+    int pad = 4;
+    unsigned copy_code = 1;
+    const Db& db;
+
+    std::ostringstream out;
+    std::vector<std::pair<std::string, std::string>> strings;   // label, text
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> blobs;  // label, bytes
+    std::vector<std::string> tables;
+    std::map<std::string, uint32_t> globals;
+    uint32_t next_global = 0xE800;
+    size_t str_count = 0;
+    size_t blob_count = 0;
+    size_t table_count = 0;
+    size_t key_count = 0;
+    std::string key_label;
+    std::string last_label;
+    std::string read_label;
+    bool restore_used = false;
+    bool failed = false;
+    std::string error;
+
+    RacGenerator(const Program& p, const Db& d) : prog(p), db(d) {}
+
+    void line(const std::string& text) { out << "    " << text << "\n"; }
+    void label(const std::string& name) {
+        out << "lbl " << lowercase_ascii(name) << "\n";
+        last_label = lowercase_ascii(name);
+    }
+    void fail(const std::string& message) {
+        if (!failed) error = message;
+        failed = true;
+    }
+
+    static std::string h2(uint32_t v) {
+        char b[8];
+        std::snprintf(b, sizeof b, "%02x", v & 0xFF);
+        return b;
+    }
+    static std::string h4(uint32_t v) {
+        char b[8];
+        std::snprintf(b, sizeof b, "%04x", v & 0xFFFF);
+        return b;
+    }
+    static std::string hex_bytes(const std::vector<uint8_t>& bytes) {
+        std::string s;
+        for (uint8_t b : bytes) s += " " + h2(b);
+        return s;
+    }
+    static std::string literal_text(const std::string& text) {
+        std::string s;
+        for (char c : text) s.push_back(c == ' ' ? '~' : c);
+        return s;
+    }
+    static bool literal_safe(const std::string& text) {
+        if (text.empty()) return false;
+        for (char c : text) {
+            const unsigned char u = (unsigned char)c;
+            if (u < 0x20 || u > 0x7E || c == '"' || c == '\\') return false;
+            if (c == ' ') continue;
+            std::vector<uint8_t> bytes;
+            std::string err;
+            if (!charmap().encode(std::string(1, c), bytes, err)) return false;
+            if (bytes.size() != 1 || bytes[0] != u) return false;
+        }
+        return true;
+    }
+
+    bool const_value(const ExprP& e, uint32_t& value) {
+        if (!e) return false;
+        switch (e->k) {
+            case Expr::Num:
+            case Expr::Addr: value = e->n; return true;
+            case Expr::Var: {
+                auto it = globals.find(e->s);
+                if (it == globals.end()) return false;
+                value = it->second;
+                return true;
+            }
+            case Expr::Unary: {
+                uint32_t a = 0;
+                if (!const_value(e->a, a)) return false;
+                value = e->s == "!" ? (a == 0 ? 1u : 0u) : a;
+                return true;
+            }
+            case Expr::Bin: {
+                uint32_t a = 0, b = 0;
+                if (!const_value(e->a, a) || !const_value(e->b, b)) return false;
+                const std::string& o = e->s;
+                if (o == "+") value = a + b; else if (o == "-") value = a - b;
+                else if (o == "*") value = a * b; else if (o == "/") value = b ? a / b : 0;
+                else if (o == "%") value = b ? a % b : 0; else if (o == "&") value = a & b;
+                else if (o == "|") value = a | b; else if (o == "^") value = a ^ b;
+                else if (o == "<<") value = a << (b & 31); else if (o == ">>") value = a >> (b & 31);
+                else if (o == "==") value = a == b; else if (o == "!=") value = a != b;
+                else if (o == "<") value = a < b; else if (o == ">") value = a > b;
+                else if (o == "<=") value = a <= b; else if (o == ">=") value = a >= b;
+                else if (o == "&&") value = a && b; else if (o == "||") value = a || b;
+                else return false;
+                return true;
+            }
+            default: return false;
+        }
+    }
+    std::string expr_text(const ExprP& e) {
+        if (!e) return "0";
+        switch (e->k) {
+            case Expr::Num: return "0x" + h4(e->n);
+            case Expr::Addr: return "0x" + h4(e->n);
+            case Expr::Var: {
+                auto it = globals.find(e->s);
+                if (it != globals.end()) return "0x" + h4(it->second);
+                return "adr(" + lowercase_ascii(e->s) + ")";
+            }
+            case Expr::Bin:
+                return "(" + expr_text(e->a) + " " + e->s + " " + expr_text(e->b) + ")";
+            case Expr::Unary: return std::string(e->s == "!" ? "!" : "") + "(" + expr_text(e->a) + ")";
+            default: return "0";
+        }
+    }
+    std::string word_expr(const ExprP& e) {
+        uint32_t v = 0;
+        if (const_value(e, v)) return "eval(" + std::to_string(v) + ")";
+        return "eval(" + expr_text(e) + ")";
+    }
+    std::string reg_assignment(const std::string& lhs, const ExprP& rhs) {
+        const std::string reg = lowercase_ascii(lhs);
+        const int size = reg_size(reg);
+        uint32_t v = 0;
+        if (const_value(rhs, v)) {
+            if (size == 1) return reg + " = 0x" + h2(v);
+            if (size == 2) return reg + " = eval(" + std::to_string(v) + ")";
+            std::string bytes;
+            for (int i = 0; i < size; ++i) bytes += " " + h2(v >> (i * 8));
+            return reg + " = hex" + bytes;
+        }
+        if (size <= 2) return reg + " = " + expr_text(rhs);
+        if (rhs->k == Expr::Var) return reg + " = adr(" + lowercase_ascii(rhs->s) + ")";
+        return reg + " = eval(" + expr_text(rhs) + ")";
+    }
+
+    std::string string_label(const std::string& text) {
+        for (auto& s : strings)
+            if (s.second == text) return s.first;
+        const std::string name = "str_" + std::to_string(++str_count);
+        strings.push_back({name, text});
+        return name;
+    }
+    std::string blob_label(const std::vector<uint8_t>& bytes) {
+        for (auto& b : blobs)
+            if (b.second == bytes) return b.first;
+        const std::string name = "data_" + std::to_string(++blob_count);
+        blobs.push_back({name, bytes});
+        return name;
+    }
+    static std::string key_name(uint32_t key) {
+        switch (key) {
+            case 0x0480: return "key_up";
+            case 0x0840: return "key_down";
+            case 0x0440: return "key_left";
+            case 0x0880: return "key_right";
+            case 0x1004: return "key_ac";
+            default: return std::string();
+        }
+    }
+
+    bool body_has_key(const std::vector<StmtP>& body) {
+        for (const auto& s : body) {
+            if (s->k == Stmt::Call &&
+                (lowercase_ascii(s->name) == "getkey" ||
+                 lowercase_ascii(s->name) == "getkeycode" ||
+                 lowercase_ascii(s->name) == "getscancode" ||
+                 lowercase_ascii(s->name) == "getscankey"))
+                return true;
+            if (s->k == Stmt::Assign && s->key_assign) return true;
+            if (body_has_key(s->body) || body_has_key(s->then_b) || body_has_key(s->else_b))
+                return true;
+        }
+        return false;
+    }
+
+    void emit_key_read(const StmtP& s) {
+        if (key_label.empty()) key_label = (key_count == 0) ? "key" : "key_" + std::to_string(key_count + 1);
+        ++key_count;
+        line("er0 = adr(" + key_label + ")");
+        const std::string gc = lowercase_ascii(s->name);
+        line((gc == "getscancode" || gc == "getscankey") ? "getscancode" : "getkey");
+        line("setlr_pc");
+        read_label = last_label;
+    }
+
+    bool emit_switch_call(const StmtP& s) {
+        const std::string key = lowercase_ascii(s->name);
+        auto arg = [&](size_t i) -> uint32_t {
+            uint32_t v = 0;
+            if (i < s->args.size() && const_value(s->args[i], v)) return v;
+            fail("non-constant argument to " + s->name);
+            return 0;
+        };
+        if (key == "setlr" || key == "setsfr" || key == "setlr_pc") {
+            line(key);
+            return true;
+        }
+        if (key == "screen_del" || key == "screen_clear" || key == "cls") {
+            line(model == "880" ? "buffer_clear.ca54" : "buffer_clear");
+            return true;
+        }
+        if (key == "render" || key == "flush" || key == "flip") {
+            line(model == "880" ? "render.ca54" : "render.ddd4");
+            return true;
+        }
+        if (key == "print" || key == "print_line") {
+            int ti = -1;
+            for (size_t i = 0; i < s->args.size(); ++i)
+                if (s->args[i]->k == Expr::Str) ti = (int)i;
+            if (ti < 0 || s->args.size() != 3) {
+                fail("print expects (pad, line, \"text\")");
+                return true;
+            }
+            const ExprP& a = s->args[(ti + 1) % 3];
+            const ExprP& b = s->args[(ti + 2) % 3];
+            uint32_t pad_v = 0, line_v = 0;
+            if (!const_value(a, pad_v) || !const_value(b, line_v)) {
+                fail("print coordinates must be constant");
+                return true;
+            }
+            line("xr0 = hex " + h2(pad_v) + " " + h2(line_v) + ", adr(" +
+                 string_label(s->args[ti]->s) + ")");
+            line("line_print");
+            return true;
+        }
+        if (key == "print_small") {
+            int ti = -1;
+            for (size_t i = 0; i < s->args.size(); ++i)
+                if (s->args[i]->k == Expr::Str) ti = (int)i;
+            if (ti < 0 || s->args.size() != 3) {
+                fail("print_small expects (font, line, \"text\")");
+                return true;
+            }
+            const ExprP& a = s->args[(ti + 1) % 3];
+            const ExprP& b = s->args[(ti + 2) % 3];
+            uint32_t font = 0, line_v = 0;
+            if (!const_value(a, font) || !const_value(b, line_v)) {
+                fail("print_small coordinates must be constant");
+                return true;
+            }
+            line("xr0 = hex " + h2(font) + " " + h2(line_v) + ", adr(" +
+                 string_label(s->args[ti]->s) + ")");
+            line("smallprint");
+            return true;
+        }
+        if (key == "print_addr" || key == "line_print") {
+            if (s->args.size() != 3) {
+                fail("print_addr expects (x, y, address)");
+                return true;
+            }
+            line("xr0 = hex " + h2(arg(0)) + " " + h2(arg(1)) + ", 0x" + h4(arg(2)));
+            line("line_print");
+            return true;
+        }
+        if (key == "line" || key == "draw_line") {
+            if (s->args.size() != 4) { fail("line expects four coordinates"); return true; }
+            line("xr0 = hex " + h2(arg(0)) + " " + h2(arg(1)) + " " + h2(arg(2)) + " " +
+                 h2(arg(3)));
+            line("line_draw");
+            return true;
+        }
+        if (key == "rect" || key == "draw_rect") {
+            if (s->args.size() != 4) { fail("rect expects x, y, w, h"); return true; }
+            const uint32_t x = arg(0), y = arg(1), w = arg(2), h = arg(3);
+            const std::string edges[4][4] = {
+                {h2(x), h2(y), h2(x + w), h2(y)},
+                {h2(x), h2(y + h), h2(x + w), h2(y + h)},
+                {h2(x), h2(y), h2(x), h2(y + h)},
+                {h2(x + w), h2(y), h2(x + w), h2(y + h)},
+            };
+            for (const auto& e : edges) {
+                line("xr0 = hex " + e[0] + " " + e[1] + " " + e[2] + " " + e[3]);
+                line("line_draw");
+            }
+            return true;
+        }
+        if (key == "pixel" || key == "draw_pixel") {
+            if (s->args.size() != 3) { fail("pixel expects x, y, color"); return true; }
+            line("xr0 = hex " + h2(arg(0)) + " " + h2(arg(1)) + " " + h2(arg(2)) + " 00");
+            line("pixel_draw");
+            return true;
+        }
+        if (key == "bitmap" || key == "draw_bitmap") {
+            if (s->args.size() != 5 || s->args[4]->k != Expr::Str) {
+                fail("bitmap expects x, y, w, h, \"hex\"");
+                return true;
+            }
+            std::vector<uint8_t> data;
+            const std::string& text = s->args[4]->s;
+            for (size_t i = 0; i + 1 < text.size(); i += 2) {
+                if (!std::isxdigit((unsigned char)text[i]) ||
+                    !std::isxdigit((unsigned char)text[i + 1]))
+                    continue;
+                data.push_back((uint8_t)std::strtoul(text.substr(i, 2).c_str(), nullptr, 16));
+            }
+            line("xr0 = hex " + h2(arg(0)) + " " + h2(arg(1)) + " " + h2(arg(2)) + " " +
+                 h2(arg(3)));
+            line("render_bitmap");
+            line("er0 = adr(" + blob_label(data) + ")");
+            line("render.ddd4");
+            return true;
+        }
+        if (key == "getkey" || key == "getkeycode" || key == "getscancode" ||
+            key == "getscankey" || key == "getscancode_nodelay") {
+            Stmt copy;
+            copy.name = s->name;
+            emit_key_read(std::make_shared<Stmt>(copy));
+            return true;
+        }
+        if (key == "delay" || key == "sleep") {
+            if (s->args.size() != 1) { fail("delay expects one tick count"); return true; }
+            line("er0 = " + word_expr(s->args[0]));
+            line("delay");
+            return true;
+        }
+        if (key == "brk" || key == "halt") {
+            line("brk");
+            return true;
+        }
+        if (key == "restore") {
+            restore_used = true;
+            line("di, rt");
+            line("xr0 = pr_org(main), pr_backup(main)");
+            line("call 09451");
+            line("hex fe 0" + std::to_string(copy_code));
+            line("er14 = eval(adr(" + (read_label.empty() ? "start" : read_label) + ") - 0x2)");
+            line("sp = er14, pop er14");
+            return true;
+        }
+        if (key == "strcpy" || key == "str_copy") {
+            if (s->args.size() != 2) { fail("strcpy expects dst, src"); return true; }
+            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)));
+            line("BL strcpy");
+            return true;
+        }
+        if (key == "strcat" || key == "str_cat") {
+            if (s->args.size() != 2) { fail("strcat expects dst, src"); return true; }
+            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)));
+            line("BL strcat");
+            return true;
+        }
+        if (key == "strlen" || key == "str_len") {
+            if (s->args.size() != 1) { fail("strlen expects a string address"); return true; }
+            line("setlr");
+            line("er0 = 0x" + h4(arg(0)));
+            line("strlen");
+            return true;
+        }
+        if (key == "memcpy" || key == "mem_copy") {
+            if (s->args.size() != 3) { fail("memcpy expects dst, src, len"); return true; }
+            line("qr8 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)) + ", " +
+                 word_expr(s->args[2]) + ", eval(0)");
+            line("call 10f20");
+            return true;
+        }
+        if (key == "set_byte" || key == "poke") {
+            if (s->args.size() != 2) { fail("set_byte expects address, value"); return true; }
+            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h2(arg(1)));
+            line("call 203d2");
+            return true;
+        }
+        if (key == "set_word" || key == "poke_word") {
+            if (s->args.size() != 2) { fail("set_word expects address, value"); return true; }
+            line("setlr");
+            line("xr0 = 0x" + h4(arg(0)) + ", " + word_expr(s->args[1]));
+            line("[er0]=er2,rt");
+            return true;
+        }
+        if (key == "add_word" || key == "add16") {
+            if (s->args.size() != 2) { fail("add_word expects address, delta"); return true; }
+            line("er2 = " + word_expr(s->args[1]));
+            line("er8 = 0x" + h4(arg(0)));
+            line("[er8] += er2,pop xr8");
+            line("hex 00 00 00 00");
+            return true;
+        }
+        if (key == "calc_func" || key == "calc") {
+            if (s->args.size() != 2) { fail("calc_func expects pointer, result"); return true; }
+            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)));
+            line("calc_func");
+            return true;
+        }
+        if (key == "num_to_str") {
+            if (s->args.size() != 2) { fail("num_to_str expects num, text"); return true; }
+            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)));
+            line("num_to_str");
+            return true;
+        }
+        if (key == "key" || key == "key_scan" || key == "read_key") {
+            fail("key() has no RAC source spelling; use getscankey() + keytable()");
+            return true;
+        }
+        // Unknown call: use the gadget database address, which RAC accepts as
+        // `call <hex>`, so user asm/gadget calls still work.
+        uint32_t addr = 0;
+        std::string found;
+        if (db.find_gadget(key) != 0xFFFFFFFFu) addr = db.find_gadget(key);
+        else {
+            for (const auto& candidate : stdlib_candidates(key)) {
+                const std::string k = Db::key(candidate);
+                auto g = db.labels.find(k);
+                if (g != db.labels.end()) { addr = g->second; found = candidate; break; }
+                auto d = db.data.find(k);
+                if (d != db.data.end()) { addr = d->second; found = candidate; break; }
+            }
+        }
+        if (addr == 0) { fail("function '" + s->name + "' has no RAC spelling"); return true; }
+        line("call " + h4(addr));
+        return true;
+    }
+
+    void emit_keytable(const StmtP& s) {
+        if (s->args.size() < 2 || s->args.size() % 2 != 0) {
+            fail("keytable needs (key, label) pairs");
+            return;
+        }
+        const std::string table = (table_count == 0) ? "table"
+                                                      : "table_" + std::to_string(table_count + 1);
+        ++table_count;
+        if (key_label.empty()) key_label = "key";
+        line("ea = adr(" + table + ")");
+        line("pop er0");
+        line("lbl " + key_label);
+        line("hex 00 00");
+        line("call 09C20");
+        line("call 1C64A");
+        line("sp = er6, pop er8");
+        std::ostringstream t;
+        t << "lbl " << table << "\n";
+        for (size_t i = 0; i < s->args.size(); i += 2) {
+            uint32_t key = 0;
+            if (!const_value(s->args[i], key)) {
+                fail("keytable key is not constant");
+                return;
+            }
+            if (s->args[i + 1]->k != Expr::Var) {
+                fail("keytable target must be a label");
+                return;
+            }
+            const std::string target = lowercase_ascii(s->args[i + 1]->s);
+            const std::string name = key_name(key);
+            t << "    " << (name.empty() ? "hex " + h2(key) + " " + h2(key >> 8) : name)
+              << "\n";
+            t << "    eval(adr(" << target << ") - 0x2)\n";
+        }
+        tables.push_back(t.str());
+    }
+
+    void stmt(const StmtP& s) {
+        switch (s->k) {
+            case Stmt::Assign: {
+                if (s->key_assign) {
+                    Stmt copy;
+                    copy.name = s->name;
+                    emit_key_read(std::make_shared<Stmt>(copy));
+                    return;
+                }
+                const std::string lhs = lowercase_ascii(s->lhs);
+                if (lhs == "ea" && s->rhs && (s->rhs->k == Expr::Var || s->rhs->k == Expr::Addr)) {
+                    line("ea = " + expr_text(s->rhs));
+                    return;
+                }
+                if (is_register(lhs)) {
+                    line(reg_assignment(lhs, s->rhs));
+                    return;
+                }
+                uint32_t value = 0;
+                if (!const_value(s->rhs, value)) {
+                    fail("global initializer must be constant");
+                    return;
+                }
+                auto it = globals.find(lhs);
+                const uint32_t addr = it == globals.end() ? next_global : it->second;
+                if (it == globals.end()) { globals[lhs] = addr; next_global += 2; }
+                line("setlr");
+                line("xr0 = 0x" + h4(addr) + ", " + word_expr(s->rhs));
+                line("[er0]=er2,rt");
+                return;
+            }
+            case Stmt::Call: {
+                const std::string key = lowercase_ascii(s->name);
+                if (key == "keytable" || key == "table") emit_keytable(s);
+                else emit_switch_call(s);
+                return;
+            }
+            case Stmt::Goto: {
+                line("er14 = eval(adr(" + lowercase_ascii(s->name) + ") - 0x2)");
+                line("sp = er14, pop er14");
+                return;
+            }
+            case Stmt::Label:
+                label(s->name);
+                return;
+            case Stmt::Asm:
+                for (const auto& raw : s->asm_lines) {
+                    std::string text = strip(raw);
+                    if (text.empty()) continue;
+                    line(text);
+                }
+                return;
+            case Stmt::Return:
+                line("rt");
+                return;
+            case Stmt::If: {
+                uint32_t c = 0;
+                const bool known = const_value(s->cond, c);
+                if (!known) { fail("dynamic if is not supported by the ROP backend"); return; }
+                if (c) for (const auto& x : s->then_b) stmt(x);
+                else for (const auto& x : s->else_b) stmt(x);
+                return;
+            }
+            case Stmt::While: {
+                const std::string loop = "loop_" + std::to_string(++table_count);
+                label(loop);
+                uint32_t c = 1;
+                if (s->cond && const_value(s->cond, c) && !c) return;
+                for (const auto& x : s->body) stmt(x);
+                line("er14 = eval(adr(" + loop + ") - 0x2)");
+                line("sp = er14, pop er14");
+                return;
+            }
+            case Stmt::For: {
+                if (s->init) stmt(s->init);
+                const std::string loop = "loop_" + std::to_string(++table_count);
+                label(loop);
+                uint32_t c = 1;
+                if (s->cond && const_value(s->cond, c) && !c) return;
+                for (const auto& x : s->body) stmt(x);
+                if (s->step) stmt(s->step);
+                line("er14 = eval(adr(" + loop + ") - 0x2)");
+                line("sp = er14, pop er14");
+                return;
+            }
+        }
+    }
+
+    std::string run(unsigned code) {
+        copy_code = code;
+        for (const auto& g : prog.globals) {
+            const uint32_t addr = g.has_addr ? g.addr : next_global;
+            globals[g.name] = addr;
+            if (!g.has_addr) next_global += 2;
+        }
+        out << "# RAC source emitted by wizc.\n";
+        out << "# RAC-Compiler is a separate GPL-3.0 program (not linked into wizc);\n";
+        out << "# it is required for #rop sources.\n\n";
+        out << "@section.main at 0x" << h4(main_org) << " backup 0x" << h4(backup)
+            << "\n\n";
+        for (const auto& g : prog.globals) {
+            if (!g.has_init) continue;
+            const uint32_t addr = globals[g.name];
+            line("setlr");
+            line("xr0 = 0x" + h4(addr) + ", eval(" + std::to_string(g.init) + ")");
+            line("[er0]=er2,rt");
+        }
+        for (const auto& f : prog.funcs) {
+            label(f.name.empty() ? "main" : f.name);
+            for (const auto& s : f.body) stmt(s);
+        }
+        // String pool (first-use order), then bitmap blobs, then the key
+        // tables.  This is the community layout: handlers, restore, text,
+        // table, end.
+        for (const auto& s : strings) {
+            out << "lbl " << s.first << "\n";
+            if (literal_safe(s.second)) {
+                out << "    \"" << literal_text(s.second) << "\"\n";
+                std::vector<uint8_t> bytes;
+                std::string err;
+                charmap().encode(s.second, bytes, err);
+                const size_t total = ((bytes.size() + 1) + 1) & ~static_cast<size_t>(1);
+                std::string pad_bytes;
+                for (size_t i = bytes.size(); i < total; ++i) pad_bytes += " 00";
+                out << "    hex" << pad_bytes << "\n";
+            } else {
+                std::vector<uint8_t> bytes;
+                std::string err;
+                charmap().encode(s.second, bytes, err);
+                bytes.push_back(0);
+                while (bytes.size() % 2 != 0) bytes.push_back(0);
+                out << "    hex" << hex_bytes(bytes) << "\n";
+            }
+        }
+        for (const auto& b : blobs) {
+            out << "lbl " << b.first << "\n";
+            for (size_t i = 0; i < b.second.size(); i += 8) {
+                std::vector<uint8_t> chunk(b.second.begin() + i,
+                                           b.second.begin() + std::min(i + 8, b.second.size()));
+                out << "    hex" << hex_bytes(chunk) << "\n";
+            }
+        }
+        for (const auto& t : tables) out << t;
+        out << "lbl end\n";
+        if (pad > 0) {
+            for (int i = 0; i < pad; i += 8) {
+                out << "    hex";
+                for (int k = 0; k < std::min(8, pad - i); ++k)
+                    out << " 00";
+                out << "\n";
+            }
+        }
+        out << "\n@section.launcher at 0x" << h4(launcher_base) << "\n\n";
+        if (model == "880") {
+            out << "    hex fd 26\n";
+            out << "    eval(pr_backup(main) - 2)\n";
+            out << "    call 3275C0\n";
+            return out.str();
+        }
+        if (simple_launcher) {
+            out << "    pop er14\n";
+            out << "    eval(pr_org(main) - 2)\n";
+            out << "    sp = er14, pop er14\n";
+            return out.str();
+        }
+        out << "    hex fd 24 30 30\n";
+        out << "    setlr\n";
+        out << "    setsfr\n";
+        out << "    xr0 = pr_org(main), pr_backup(main)\n";
+        out << "    call 09451\n";
+        out << "    hex fe 0" << code << "\n";
+        out << "    er14 = eval(pr_org(main) - 2)\n";
+        out << "    sp = er14, pop er14\n";
+        return out.str();
+    }
+};
+
+} // namespace
+
+
 // ---------------------------------------------------------------- RAC source
 namespace {
 
@@ -2898,10 +3559,66 @@ bool rsc_has_main_backup(const std::string& rsc, uint32_t backup) {
     return (uint32_t)value == backup;
 }
 
-} // namespace
+
+std::string generate_rsc_impl(const std::string& selected, const std::string& m,
+                              const std::string& language, unsigned copy_code,
+                              std::string& error) {
+    error.clear();
+    uint32_t org = 0;
+    bool has_org = false;
+    LauncherOpts lopts;
+    int pad = 256;
+    std::string directive_model = m;
+    const std::string normalized =
+        lower(language) == "wiz" ? wiz_rop_to_cwiz(selected) : selected;
+    std::string body;
+    try {
+        body = strip_directives(normalized, directive_model, org, has_org, lopts, pad);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return std::string();
+    }
+    if (!has_org) org = (m == "880") ? 0xE330u : 0xE9E0u;
+    Program prog;
+    try {
+        prog = Parser(lex(body)).parse();
+    } catch (const std::exception& e) {
+        error = e.what();
+        return std::string();
+    }
+    if (prog.model.empty()) prog.model = m;
+    const uint32_t backup = lopts.has_backup ? lopts.backup : org;
+    const uint32_t main = lopts.has_main ? lopts.main : 0xD730u;
+    const bool common = lopts.kind == LauncherKind::Common;
+    const uint32_t exec = (common && m == "580") ? main : (common ? backup : org);
+    prog.org = exec;
+    prog.has_org = true;
+
+    Db db;
+    db.model = m;
+    db.load(m == "880" ? ROP_DB_880 : ROP_DB_580);
+    RacGenerator gen(prog, db);
+    gen.model = m;
+    gen.main_org = exec;
+    gen.backup = backup;
+    gen.launcher_base = lopts.has_base ? lopts.base : (m == "880" ? 0x9268u : 0xD180u);
+    gen.simple_launcher = lopts.kind == LauncherKind::Simple;
+    gen.pad = pad;
+    const std::string rsc = gen.run(copy_code);
+    if (gen.failed) {
+        error = gen.error.empty() ? "ROP source emission failed" : gen.error;
+        return std::string();
+    }
+    return rsc;
+}
+
+}
 
 std::string rop_source_to_rsc(const std::string& source, const std::string& model,
-                             const std::string& language, std::string& error) {
+                             const std::string& language, std::string& error);
+static std::string make_rsc(const std::string& source, const std::string& model,
+                            const std::string& language, unsigned copy_code,
+                            std::string& error) {
     error.clear();
     const std::string m = (model == "880" || lower(model) == "880btg") ? "880" : "580";
     std::string selected;
@@ -2952,12 +3669,12 @@ std::string rop_source_to_rsc(const std::string& source, const std::string& mode
         return std::string();
     }
 
-    RopResult rop = build_rop(selected, m, language);
-    if (!rop.ok) {
-        error = rop.error.empty() ? "ROP compilation failed" : rop.error;
-        return std::string();
-    }
-    return rop_to_rsc(rop, error);
+    return generate_rsc_impl(selected, m, language, copy_code, error);
+}
+
+std::string rop_source_to_rsc(const std::string& source, const std::string& model,
+                             const std::string& language, std::string& error) {
+    return make_rsc(source, model, language, 1, error);
 }
 
 RacRopResult build_rop_rac(const std::string& source, const std::string& model,
@@ -2972,62 +3689,73 @@ RacRopResult build_rop_rac(const std::string& source, const std::string& model,
                    " (run tools/fetch_rac.sh or set RAC_COMPILER / --rac PATH)";
         return rr;
     }
-    std::string rsc_error;
-    const std::string rsc = rop_source_to_rsc(source, m, language, rsc_error);
-    if (rsc.empty()) {
-        rr.error = rsc_error.empty() ? "cannot emit RAC source" : rsc_error;
-        return rr;
-    }
-    rr.rsc_text = rsc;
-    rr.rsc_path = rsc_path;
-    if (rsc_path.empty() || !write_text_file(rsc_path, rsc)) {
-        rr.error = "cannot write the RAC source: " + rsc_path;
-        return rr;
-    }
 
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path rac_file = fs::absolute(chosen, ec);
     const fs::path rac_dir = rac_file.parent_path();
-    const fs::path rsc_file = fs::absolute(rsc_path, ec);
     const std::string model_dir = m == "880" ? "880btg" : "580vnx";
     const char* python = std::getenv("RAC_PYTHON");
     const std::string py = (python && *python) ? python : "python3";
 
-    const std::string command = "cd " + shell_quote(rac_dir.string()) + " && " +
-                                shell_quote(py) + " " + shell_quote(rac_file.filename().string()) +
-                                " " + shell_quote(model_dir) + " " +
-                                shell_quote(rsc_file.string()) + " 2>&1";
-    std::string output;
-    const int status = run_capture(command, output);
-    rr.log = output;
-    if (status != 0) {
-        rr.error = "the RAC compiler failed (exit " + std::to_string(status) + ")";
-        if (!output.empty()) rr.error += ": " + output;
+    // The launcher copy length codes are 510/766/1022 bytes.  Try the smallest
+    // code first and recompile if the RAC main section does not fit; this also
+    // keeps the emitted source stable for small payloads (FE 01).
+    for (unsigned code = 1; code <= 3; ++code) {
+        std::string rsc_error;
+        const std::string rsc = make_rsc(source, m, language, code, rsc_error);
+        if (rsc.empty()) {
+            rr.error = rsc_error.empty() ? "cannot emit RAC source" : rsc_error;
+            return rr;
+        }
+        rr.rsc_text = rsc;
+        rr.rsc_path = rsc_path;
+        if (rsc_path.empty() || !write_text_file(rsc_path, rsc)) {
+            rr.error = "cannot write the RAC source: " + rsc_path;
+            return rr;
+        }
+
+        const fs::path rsc_file = fs::absolute(rsc_path, ec);
+        const std::string command = "cd " + shell_quote(rac_dir.string()) + " && " +
+                                    shell_quote(py) + " " +
+                                    shell_quote(rac_file.filename().string()) + " " +
+                                    shell_quote(model_dir) + " " +
+                                    shell_quote(rsc_file.string()) + " 2>&1";
+        std::string output;
+        const int status = run_capture(command, output);
+        rr.log = output;
+        if (status != 0) {
+            rr.error = "the RAC compiler failed (exit " + std::to_string(status) + ")";
+            if (!output.empty()) rr.error += ": " + output;
+            return rr;
+        }
+        const std::vector<RacSection> sections = parse_rac_output(output);
+        const RacSection* main = nullptr;
+        const RacSection* launcher = nullptr;
+        for (const auto& section : sections) {
+            const std::string name = lowercase_ascii(section.name);
+            if ((name == "main" || name.empty()) && !main) main = &section;
+            if (name == "launcher" && !launcher) launcher = &section;
+        }
+        if (!main || main->bytes.empty()) {
+            rr.error = "the RAC compiler produced no main section";
+            return rr;
+        }
+        const size_t limit = code == 1 ? 0x1FEu : (code == 2 ? 0x2FEu : 0x3FEu);
+        if (main->bytes.size() > limit && code < 3) continue;
+        if (!launcher || launcher->bytes.empty()) {
+            rr.error = "the RAC compiler produced no @section.launcher; ROP needs one";
+            return rr;
+        }
+        rr.ran = true;
+        rr.payload = main->bytes;
+        rr.payload_base = main->has_backup ? main->backup : main->org;
+        rr.launcher = launcher->bytes;
+        rr.launcher_base = launcher->org;
+        rr.ok = true;
         return rr;
     }
-    const std::vector<RacSection> sections = parse_rac_output(output);
-    const RacSection* main = nullptr;
-    const RacSection* launcher = nullptr;
-    for (const auto& section : sections) {
-        const std::string name = lowercase_ascii(section.name);
-        if ((name == "main" || name.empty()) && !main) main = &section;
-        if (name == "launcher" && !launcher) launcher = &section;
-    }
-    if (!main || main->bytes.empty()) {
-        rr.error = "the RAC compiler produced no main section";
-        return rr;
-    }
-    if (!launcher || launcher->bytes.empty()) {
-        rr.error = "the RAC compiler produced no @section.launcher; ROP needs one";
-        return rr;
-    }
-    rr.ran = true;
-    rr.payload = main->bytes;
-    rr.payload_base = main->has_backup ? main->backup : main->org;
-    rr.launcher = launcher->bytes;
-    rr.launcher_base = launcher->org;
-    rr.ok = true;
+    rr.error = "the RAC compiler produced no usable sections";
     return rr;
 }
 
