@@ -19,10 +19,15 @@ namespace casioemu {
 #include <vector>
 #include "DebuggerTypes.h"
 #include "PluginVersion.h"
+// Architecture provider extension point (additive; does not change existing
+// PluginApi vtable slots except one method appended at the END).
+#include "IArchitectureProvider.h"
 
 // Host API version comes from PluginVersion.h (one constant shared with the
 // manifest loader); the value is also reported by PluginApi::GetVersion().
 inline constexpr int PLUGIN_API_VERSION = casioemu::plugin::kPluginHostApiVersion;
+// Alias used by architecture-provider plugins (casioemu namespace).
+using IArchitectureProviderRegistry = casioemu::IArchitectureRegistry;
 // Bumped whenever the layout or vtable of UIWindow below changes.  Native
 // plugins can export fPluginAbiSignature() (see PLUGIN_EXPORT_ABI) and the
 // loader rejects mismatches with native.api instead of crashing later.
@@ -307,6 +312,11 @@ public:
 	}
 	virtual void* GetImGuiContext() = 0;
 	[[nodiscard]] virtual bool RegisterPlugin(const char* id, const char* name, const char* version, const char* author = nullptr, const char* desc = nullptr) = 0;
+
+	// --- Appended at END of vtable. Do not insert above this line. ---
+	/// Convenience wrapper around
+	/// QueryInterface(CASIOEMU_ARCH_REGISTRY_NAME)->RegisterProvider().
+	[[nodiscard]] virtual bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) = 0;
 };
 
 #define PLUGINASSERTSTL(x) x->AssertFundamentalSTL(sizeof(std::string), sizeof(std::vector<int>), sizeof(std::map<int, int>), sizeof(std::mutex))
@@ -315,6 +325,10 @@ public:
 /// The plugin DLL's entry point.
 /// </summary>
 using PluginLoad = void (*)(PluginApi* api);
+
+/// Optional architecture-only entry point, called during the early load pass
+/// before the Emulator object exists. Must only register architecture providers.
+using PluginLoadArch = void (*)(PluginApi* api);
 
 /// <summary>
 /// Optional unload callback, looked up with dlsym("fPluginUnload") and called

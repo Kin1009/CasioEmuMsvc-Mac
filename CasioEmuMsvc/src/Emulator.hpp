@@ -17,6 +17,7 @@
 #include "ModelInfo.h"
 #include "ModelResourceStore.h"
 #include "QrCode.h"
+#include "Plugin/IArchitectureProvider.h"
 
 namespace casioemu {
 	class Chipset;
@@ -104,6 +105,23 @@ namespace casioemu {
 
 		SpriteInfo interface_background;
 		SDL_Rect emu_rect{};
+
+		// Optional plugin-provided architecture core (e.g. SH4 / CG100).
+		// When set, Frame()/Tick()/UIEvent() delegate to this core while the
+		// normal single-window IDE skin, ImGui debugger tabs and the Calculator
+		// dock panel remain fully intact. The core's framebuffer is composited
+		// into the LCD rectangle of the model skin.
+		std::atomic<IEmulatorCore*> arch_core{nullptr};
+		SDL_Texture* arch_lcd_texture = nullptr;
+		int arch_lcd_tex_w = 0;
+		int arch_lcd_tex_h = 0;
+		Uint32 last_arch_tick_ms = 0;
+		using ArchFramebufferFn = int (*)(void*, unsigned char*, int);
+		using ArchKeyMatrixFn = void (*)(void*, int, int);
+		ArchFramebufferFn arch_framebuffer_fn = nullptr;
+		ArchKeyMatrixFn arch_key_matrix_fn = nullptr;
+
+		void SetArchitectureCore(IEmulatorCore* core);
 
 		/**
 		 * A bunch of internally used methods for encapsulation purposes.

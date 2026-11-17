@@ -37,7 +37,11 @@ namespace casioemu {
 		HW_EPS9500 = 11,
 		HW_EPS6800_W192 = 12,
 		HW_TI_MULTI_VIEW = 13,
-		HW_MAX = HW_TI_MULTI_VIEW,
+		// Plugin-provided SH4 architecture (fx-CG100). The shipped pack still
+		// carries hardware_id 10, so v53 board models are remapped to this
+		// dedicated id in ModelInfo::Read() to keep them out of every EPS path.
+		HW_CG100 = 14,
+		HW_MAX = HW_CG100,
 	};
 
 	enum class EpsDisplayKind : unsigned char {
@@ -66,7 +70,7 @@ namespace casioemu {
 		size_t eps_status_size;
 	};
 
-	inline constexpr std::array<HardwareDescriptor, 11> HARDWARE_DESCRIPTORS{{
+	inline constexpr std::array<HardwareDescriptor, 12> HARDWARE_DESCRIPTORS{{
 		{HW_ES_PLUS, "ES(P)", "ESP", EpsVariant::None, EpsDisplayKind::None,
 			EpsPowerKeyBehavior::None, 20, 25, 0},
 		{HW_CLASSWIZ, "CWX", "CWX", EpsVariant::None, EpsDisplayKind::None,
@@ -88,6 +92,8 @@ namespace casioemu {
 		{HW_EPS6800_W192, "EPS6800_W192", "EPS6800_W192", EpsVariant::Eps6800W192, EpsDisplayKind::DotMatrix6800W192,
 			EpsPowerKeyBehavior::HostCpuReset, 40, 60, 24},
 		{HW_TI_MULTI_VIEW, "TI MultiView", "TI MV", EpsVariant::None, EpsDisplayKind::None,
+			EpsPowerKeyBehavior::None, 20, 25, 0},
+		{HW_CG100, "CG100", "CG100", EpsVariant::None, EpsDisplayKind::None,
 			EpsPowerKeyBehavior::None, 20, 25, 0},
 	}};
 	static_assert(HARDWARE_DESCRIPTORS.size() == static_cast<size_t>(HW_MAX - HW_MIN + 1));
@@ -339,6 +345,12 @@ namespace casioemu {
 					if (has_status_indicators && is.peek() != std::char_traits<char>::eof())
 						Binary::Read(is, status_indicators);
 				}
+				// The CG100 pack was authored against the stable tree where
+				// hardware_id 10 == HW_CG100. In the preview tree 10 is EPS6009;
+				// remap v53 board models to the dedicated SH4 id so no EPS
+				// peripheral code path ever sees them.
+				if (hardware_id == HW_EPS6009 && !board_path.empty())
+					hardware_id = HW_CG100;
 			}
 		}
 	};

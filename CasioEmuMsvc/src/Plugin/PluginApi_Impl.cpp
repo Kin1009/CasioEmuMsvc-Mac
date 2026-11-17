@@ -1043,6 +1043,12 @@ class PluginApi_Impl : public PluginApi {
 			return &keyboard_impl;
 		if (strcmp(name, typeid(IDebugger).name()) == 0)
 			return &debugger_impl;
+		if (strcmp(name, CASIOEMU_ARCH_REGISTRY_NAME) == 0)
+			return GetArchitectureRegistry();
+		if (strcmp(name, typeid(casioemu::IArchitectureRegistry).name()) == 0)
+			return GetArchitectureRegistry();
+		if (!m_emu)
+			return nullptr;
 		return m_emu->chipset.QueryInterface(name);
 	}
 	void* GetImGuiContext() override {
@@ -1064,6 +1070,9 @@ class PluginApi_Impl : public PluginApi {
     });
     return true;
   }
+	bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) override {
+		return GetArchitectureRegistry()->RegisterProvider(provider);
+	}
 };
 
 // ---------------------------------------------------------------------------
@@ -1628,6 +1637,10 @@ public:
 			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IDebugger>");
 			return nullptr;
 		}
+		if (name && std::strcmp(name, CASIOEMU_ARCH_REGISTRY_NAME) == 0)
+			return backend_->QueryInterface(name);
+		if (matches(typeid(casioemu::IArchitectureRegistry)))
+			return backend_->QueryInterface(name);
 		// Chipset-specific peripheral interfaces are opaque to the facade.  They
 		// are reachable only with emulator access.
 		if (permissions_.Allows(Capability::EmulatorRead) ||
@@ -1647,6 +1660,9 @@ public:
 	bool RegisterPlugin(const char* id, const char* name, const char* version, const char* author,
 		const char* desc) override {
 		return backend_->RegisterPlugin(id, name, version, author, desc);
+	}
+	bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) override {
+		return backend_->RegisterArchitectureProvider(provider);
 	}
 
 private:

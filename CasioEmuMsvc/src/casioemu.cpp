@@ -52,6 +52,7 @@
 #include <Gui.h>
 #include <Plugin/PluginMan.h>
 #include <ThemeManager.h>
+#include <Binary.h>
 #include "DiscordRPC.h"
 #include "Gui/Shell/Shell.h"
 #include "Gui/Shell/SessionHost.h"
@@ -303,6 +304,21 @@ int main(int argc, char* argv[]) {
 for (;;) {
 	std::shared_ptr<casioemu::ModelResourceStore> startup_resources;
 	if (argv_map["model"].empty()) {
+		// Prefer a bundled fx-CG100 model so launching the .app directly (Finder /
+		// `open -a`) opens the CG100 IDE without the startup picker.
+		char* base_path = SDL_GetBasePath();
+		if (base_path) {
+			for (const char* rel : {"models/fx-CG100", "../Resources/models/fx-CG100"}) {
+				const std::string candidate = std::string(base_path) + rel;
+				if (std::filesystem::exists(std::filesystem::path(candidate) / "config.bin")) {
+					argv_map["model"] = candidate;
+					break;
+				}
+			}
+			SDL_free(base_path);
+		}
+	}
+	if (argv_map["model"].empty()) {
 		auto selection = sui_loop();
 		argv_map["model"] = std::move(selection.model_path);
 		startup_resources = std::move(selection.resources);
@@ -321,8 +337,78 @@ for (;;) {
 
 	bool no_dbg = !argv_map["no_dbg"].empty();
 	low_perf_ext = !argv_map["low_perf_ext"].empty();
+
+	// --- Plugin-provided architecture dispatch ---
+	// The registry is consulted BEFORE Emulator construction. A board model
+	// (config.bin board_path non-empty, hardware_id 10 / HW_CG100) is driven by
+	// the SH4 plugin core, but the core is attached to a NORMAL Emulator: the
+	// single-window IDE, debugger tabs, Calculator dock panel, SDL_RenderPresent
+	// and casioctl all keep working unchanged. No separate SDL window is made.
+	LoadArchitecturePlugins();
+	casioemu::IEmulatorCore* plugin_core = nullptr;
+	casioemu::IArchitectureProvider* arch_provider = nullptr;
+	casioemu::ModelInfo plugin_model{};
+	{
+		const std::string model_dir = argv_map["model"];
+		std::ifstream config_stream(std::filesystem::path(model_dir) / "config.bin", std::ios::binary);
+		if (config_stream) {
+			try {
+				Binary::Read(config_stream, plugin_model);
+				// Only board models (CG100 packs carry board.svg + board_path)
+				// are dispatched. Ordinary EPS6009 packs keep their built-in core.
+				if (!plugin_model.board_path.empty() && plugin_model.hardware_id == casioemu::HW_CG100) {
+					arch_provider = GetArchitectureRegistry()->FindProvider(plugin_model.hardware_id);
+					if (arch_provider) {
+						plugin_core = arch_provider->CreateCore();
+						if (!plugin_core) arch_provider = nullptr;
+					}
+				}
+			}
+			catch (const std::exception& e) {
+				std::cerr << "[ArchProvider] Failed to read config.bin: " << e.what() << "\n";
+			}
+		}
+	}
+
 	Emulator emulator(argv_map, false, std::move(startup_resources));
 	m_emu = &emulator;
+
+	// Attach the plugin architecture core to the fully-constructed Emulator.
+	// Rendering now flows through Emulator::Frame() -> composite texture ->
+	// the Calculator dock panel of the single main IDE window.
+	if (plugin_core) {
+		casioemu::ArchInitInfo info{};
+		const std::string model_dir = argv_map["model"];
+		const std::string flash_path = plugin_model.flash_path.empty()
+			? std::string() : emulator.GetModelFilePath(plugin_model.flash_path);
+		const std::string rom_path = plugin_model.rom_path.empty()
+			? std::string() : emulator.GetModelFilePath(plugin_model.rom_path);
+		info.model_path = model_dir.c_str();
+		info.flash_path = flash_path.empty() ? nullptr : flash_path.c_str();
+		info.rom_path = rom_path.empty() ? nullptr : rom_path.c_str();
+		info.hardware_id = plugin_model.hardware_id;
+		auto lcd = emulator.ModelDefinition.sprites.find("rsd_pixel");
+		if (lcd != emulator.ModelDefinition.sprites.end()) {
+			info.lcd_x = lcd->second.dest.x;
+			info.lcd_y = lcd->second.dest.y;
+			info.lcd_w = lcd->second.dest.w;
+			info.lcd_h = lcd->second.dest.h;
+		}
+		if (plugin_core->Initialize(info)) {
+			plugin_core->Reset();
+			emulator.SetArchitectureCore(plugin_core);
+			std::cout << "[ArchCore] " << (arch_provider && arch_provider->GetName()
+				? arch_provider->GetName() : "plugin")
+				<< " attached to Emulator; LCD rect = (" << info.lcd_x << ","
+				<< info.lcd_y << "," << info.lcd_w << "," << info.lcd_h << ")\n";
+		}
+		else {
+			std::cerr << "[ArchCore] core Initialize() failed; using built-in core.\n";
+			arch_provider->DestroyCore(plugin_core);
+			plugin_core = nullptr;
+			arch_provider = nullptr;
+		}
+	}
 
 	// static std::atomic<bool> running(true);
 	
@@ -634,6 +720,14 @@ for (;;) {
 		const double close_ms = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - close_test_closed_at).count();
 		std::fprintf(stderr, "[close-test] close_to_loop_exit_ms=%.1f\n", close_ms);
+	}
+	if (plugin_core) {
+		emulator.SetArchitectureCore(nullptr);
+		plugin_core->ReleaseAll();
+		if (arch_provider)
+			arch_provider->DestroyCore(plugin_core);
+		plugin_core = nullptr;
+		arch_provider = nullptr;
 	}
 	if (bg_txt) {
 		SDL_DestroyTexture(bg_txt);

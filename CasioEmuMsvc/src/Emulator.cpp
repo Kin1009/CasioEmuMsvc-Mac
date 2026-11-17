@@ -2,6 +2,7 @@
 #include "Ctl/CtlServer.hpp"
 #include "Chipset/T4xCore.hpp"
 #include "Chipset/Chipset.hpp"
+#include "Chipset/MMU.hpp"
 #include "Logger.hpp"
 #include "ModelConfig.h"
 #include "ModelInfo.h"
@@ -23,9 +24,69 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
+#if defined(__APPLE__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 namespace casioemu {
 	namespace {
+		// Map host SDL key codes to the plugin's architecture keys.
+		static ArchKey ArchKeyFromSdl(SDL_Keycode key) {
+			switch (key) {
+			case SDLK_UP: return ArchKey::Up;
+			case SDLK_DOWN: return ArchKey::Down;
+			case SDLK_LEFT: return ArchKey::Left;
+			case SDLK_RIGHT: return ArchKey::Right;
+			case SDLK_RETURN: case SDLK_KP_ENTER: return ArchKey::EXE;
+			case SDLK_ESCAPE: return ArchKey::EXIT;
+			case SDLK_F1: return ArchKey::F1;
+			case SDLK_F2: return ArchKey::F2;
+			case SDLK_F3: return ArchKey::F3;
+			case SDLK_F4: return ArchKey::F4;
+			case SDLK_F5: return ArchKey::F5;
+			case SDLK_F6: return ArchKey::F6;
+			case SDLK_LSHIFT: case SDLK_RSHIFT: return ArchKey::Shift;
+			case SDLK_LALT: case SDLK_RALT: return ArchKey::Alpha;
+			case SDLK_HOME: return ArchKey::Home;
+			case SDLK_AC_HOME: return ArchKey::ON;
+			case SDLK_BACKSPACE: return ArchKey::AC;
+			case SDLK_PERIOD: case SDLK_KP_DECIMAL: return ArchKey::Dot;
+			case SDLK_PLUS: case SDLK_KP_PLUS: return ArchKey::Plus;
+			case SDLK_MINUS: case SDLK_KP_MINUS: return ArchKey::Minus;
+			case SDLK_ASTERISK: case SDLK_KP_MULTIPLY: return ArchKey::Multiply;
+			case SDLK_SLASH: case SDLK_KP_DIVIDE: return ArchKey::Divide;
+			case SDLK_0: case SDLK_KP_0: return ArchKey::D0;
+			case SDLK_1: case SDLK_KP_1: return ArchKey::D1;
+			case SDLK_2: case SDLK_KP_2: return ArchKey::D2;
+			case SDLK_3: case SDLK_KP_3: return ArchKey::D3;
+			case SDLK_4: case SDLK_KP_4: return ArchKey::D4;
+			case SDLK_5: case SDLK_KP_5: return ArchKey::D5;
+			case SDLK_6: case SDLK_KP_6: return ArchKey::D6;
+			case SDLK_7: case SDLK_KP_7: return ArchKey::D7;
+			case SDLK_8: case SDLK_KP_8: return ArchKey::D8;
+			case SDLK_9: case SDLK_KP_9: return ArchKey::D9;
+			default: return ArchKey::None;
+			}
+		}
+
+		// Route a point in model skin coordinates to the CG100 KEYSC matrix using
+		// the v53 button hitboxes (kiko = (row << 4) | col). All on-screen keys
+		// declared in config.bin become clickable - no hardcoded key list.
+		static bool ArchHitButton(const casioemu::ModelInfo& model, int mx, int my, int& row, int& col) {
+			for (const auto& btn : model.buttons) {
+				if (btn.rect.w <= 0 || btn.rect.h <= 0)
+					continue;
+				if (mx >= btn.rect.x && mx < btn.rect.x + btn.rect.w &&
+					my >= btn.rect.y && my < btn.rect.y + btn.rect.h) {
+					row = btn.kiko >> 4;
+					col = btn.kiko & 0xF;
+					return true;
+				}
+			}
+			return false;
+		}
+
 		// Process-wide, intentionally never reset: a quit request means the whole
 		// application is leaving, not just one of the multi-session emulators.
 		// Trivially destructible, so workers may read it during static teardown.
@@ -336,7 +397,10 @@ namespace casioemu {
 			timer_interval = SliceTimerInterval(timer_interval);
 
 		cycles.Setup(cycles_per_second, timer_interval);
-		chipset.Setup();
+		// Board models (e.g. the SH4 CG100 pack) are driven by a plugin
+		// architecture core; leave the built-in chipset completely idle.
+		if (ModelDefinition.board_path.empty())
+			chipset.Setup();
 
 		BatteryVoltage = 1.5;
 		SolarPanelVoltage = 1.5;
@@ -404,7 +468,7 @@ namespace casioemu {
 		cycles.Reset();
 		// EPS reset clears CPU/SFR state but preserves its RAM image. Do this before
 		// the worker starts so firmware sees a clean reset with the restored RAM.
-		if (IsEpsFamily(hardware_id) || hardware_id == HW_TI_MULTI_VIEW)
+		if ((IsEpsFamily(hardware_id) || hardware_id == HW_TI_MULTI_VIEW) && ModelDefinition.board_path.empty())
 			chipset.Reset();
 		if ((IsEpsFamily(hardware_id) || hardware_id == HW_TI_MULTI_VIEW) && argv_map.find("paused") != argv_map.end())
 			SetPaused(true);
@@ -469,7 +533,7 @@ namespace casioemu {
 
 		RunStartupScript();
 
-		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
+		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW && ModelDefinition.board_path.empty())
 			chipset.Reset();
 
 		if (argv_map.find("paused") != argv_map.end())
@@ -505,7 +569,10 @@ namespace casioemu {
 			timer_interval = SliceTimerInterval(timer_interval);
 
 		cycles.Setup(cycles_per_second, timer_interval);
-		chipset.Setup();
+		// Board models (e.g. the SH4 CG100 pack) are driven by a plugin
+		// architecture core; leave the built-in chipset completely idle.
+		if (ModelDefinition.board_path.empty())
+			chipset.Setup();
 
 		BatteryVoltage = 1.5;
 		SolarPanelVoltage = 1.5;
@@ -565,7 +632,7 @@ namespace casioemu {
 		cycles.Reset();
 		// EPS reset clears CPU/SFR state but preserves its RAM image. Do this before
 		// the worker starts so firmware sees a clean reset with the restored RAM.
-		if (IsEpsFamily(hardware_id) || hardware_id == HW_TI_MULTI_VIEW)
+		if ((IsEpsFamily(hardware_id) || hardware_id == HW_TI_MULTI_VIEW) && ModelDefinition.board_path.empty())
 			chipset.Reset();
 		if (!headless) {
 		#ifdef __EMSCRIPTEN__
@@ -630,11 +697,31 @@ namespace casioemu {
 			RunStartupScript();
 		}
 
-		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
+		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW && ModelDefinition.board_path.empty())
 			chipset.Reset();
 	}
 
+	void Emulator::SetArchitectureCore(IEmulatorCore* core) {
+		arch_core.store(core);
+		last_arch_tick_ms = SDL_GetTicks();
+#if defined(__APPLE__) || defined(__linux__)
+		// The plugin is dlopen()ed with RTLD_GLOBAL, so its plain-C exports are
+		// visible through RTLD_DEFAULT. Prefer the direct framebuffer/key-matrix
+		// accessors over RenderFrame(): the latter resolves SDL via dlsym() inside
+		// the plugin, which is not reliable when SDL is statically linked into
+		// the host executable.
+		arch_framebuffer_fn = reinterpret_cast<ArchFramebufferFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_framebuffer"));
+		arch_key_matrix_fn = reinterpret_cast<ArchKeyMatrixFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_key_matrix"));
+#endif
+	}
+
 	Emulator::~Emulator() {
+		if (arch_lcd_texture) {
+			SDL_DestroyTexture(arch_lcd_texture);
+			arch_lcd_texture = nullptr;
+		}
 		// Deterministic teardown: stop the control channel, the CPU worker and
 		// every peripheral worker (including the LCD update thread) before the
 		// chipset or any process-wide state they touch is destroyed.
@@ -694,6 +781,35 @@ namespace casioemu {
 			}
 		}
 #endif
+		// Plugin architecture core owns the keypad. Route keyboard and on-screen
+		// clicks to it instead of the built-in nX-U16/U8 chipset. ImGui/IDE events
+		// fall through to the normal handler; only calculator input is consumed.
+		if (IEmulatorCore* core = arch_core.load()) {
+			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+				const ArchKey key = ArchKeyFromSdl(event.key.keysym.sym);
+				if (key != ArchKey::None)
+					core->Key(key, event.type == SDL_KEYDOWN);
+				return;
+			}
+			if (event.type == SDL_MOUSEBUTTONDOWN) {
+				int mx = event.button.x - emu_rect.x;
+				int my = event.button.y - emu_rect.y;
+				if (emu_rect.w > 0 && emu_rect.h > 0) {
+					mx = (int)(mx * (float)interface_background.dest.w / emu_rect.w);
+					my = (int)(my * (float)interface_background.dest.h / emu_rect.h);
+					int row = 0, col = 0;
+					if (ArchHitButton(ModelDefinition, mx, my, row, col)) {
+						if (arch_key_matrix_fn)
+							arch_key_matrix_fn(core, row, col);
+						else
+							core->Key(ArchKey::EXE, true);
+					}
+				}
+				return;
+			}
+			if (event.type == SDL_MOUSEBUTTONUP)
+				return;
+		}
 		switch (event.type) {
 		case SDL_MOUSEBUTTONDOWN:
 		case SDL_MOUSEBUTTONUP:
@@ -724,6 +840,18 @@ namespace casioemu {
 		if (headless)
 			return;
 		composite_dirty.store(true, std::memory_order_release);
+		if (IEmulatorCore* core = arch_core.load()) {
+			if (!down)
+				return;
+			int row = 0, col = 0;
+			if (ArchHitButton(ModelDefinition, model_x, model_y, row, col)) {
+				if (arch_key_matrix_fn)
+					arch_key_matrix_fn(core, row, col);
+				else
+					core->Key(ArchKey::EXE, true);
+			}
+			return;
+		}
 		SDL_Event event{};
 		event.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
 		event.button.type = event.type;
@@ -744,7 +872,12 @@ namespace casioemu {
 	}
 
 	void Emulator::SetupInternals() {
-		chipset.SetupInternals();
+		if (ModelDefinition.board_path.empty())
+			chipset.SetupInternals();
+		else
+			// Board models keep the built-in CPU idle, but the debugger GUI
+			// expects me_mmu to be initialised before it opens its windows.
+			chipset.mmu.SetupInternals();
 	}
 
 	void Emulator::LoadModelDefition() {
@@ -850,6 +983,49 @@ namespace casioemu {
 		// SDL_RenderPresent(renderer);
 	}
 	void Emulator::Frame() {
+		// Draws either the plugin architecture core's framebuffer into the LCD
+		// rectangle of the model skin, or the built-in chipset. Used at all three
+		// Frame() presentation sites so the CG100 appears in the calculator panel
+		// of the single main IDE window (no separate SDL window).
+		auto draw_core_or_chipset = [this]() {
+			if (IEmulatorCore* core = arch_core.load()) {
+				constexpr int kFbW = 396;
+				constexpr int kFbH = 224;
+				SDL_Rect lcd{89, 251, 812, 468};
+				auto it = ModelDefinition.sprites.find("rsd_pixel");
+				if (it != ModelDefinition.sprites.end())
+					lcd = it->second.dest;
+
+				if (!arch_lcd_texture || arch_lcd_tex_w != kFbW || arch_lcd_tex_h != kFbH) {
+					if (arch_lcd_texture)
+						SDL_DestroyTexture(arch_lcd_texture);
+					arch_lcd_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
+						SDL_TEXTUREACCESS_STREAMING, kFbW, kFbH);
+					arch_lcd_tex_w = kFbW;
+					arch_lcd_tex_h = kFbH;
+				}
+				if (arch_lcd_texture && arch_framebuffer_fn) {
+					static std::vector<unsigned char> fb((size_t)kFbW * kFbH * 4);
+					if (arch_framebuffer_fn(core, fb.data(), (int)fb.size())) {
+						SDL_UpdateTexture(arch_lcd_texture, nullptr, fb.data(), kFbW * 4);
+						SDL_RenderCopy(renderer, arch_lcd_texture, nullptr, &lcd);
+					}
+				}
+				else {
+					ArchFrameInfo finfo{};
+					finfo.renderer = renderer;
+					finfo.dst_x = lcd.x;
+					finfo.dst_y = lcd.y;
+					finfo.dst_w = lcd.w;
+					finfo.dst_h = lcd.h;
+					core->RenderFrame(finfo);
+				}
+			}
+			else {
+				chipset.Frame();
+			}
+		};
+
 		// Serve the casioctl control channel on the UI thread. This lazily
 		// starts the local control socket on the first frame and drains queued
 		// debugger requests here, where the debugger state is safe to touch.
@@ -916,7 +1092,7 @@ namespace casioemu {
 			SDL_RenderCopy(renderer, interface_texture, &src, nullptr);
 		}
 		// Peripherals draw in model coordinates (1 px = 1 model pixel).
-		chipset.Frame();
+		draw_core_or_chipset();
 		SDL_SetRenderTarget(renderer, nullptr);
 		SDL_RenderSetViewport(renderer, nullptr);
 		SDL_RenderSetClipRect(renderer, nullptr);
@@ -979,7 +1155,7 @@ namespace casioemu {
 				SDL_RenderGetScale(renderer, &old_scale_x, &old_scale_y);
 				SDL_RenderSetViewport(renderer, &dest);
 				SDL_RenderSetScale(renderer, static_cast<float>(uf), static_cast<float>(uf));
-				chipset.Frame();
+				draw_core_or_chipset();
 				SDL_RenderSetScale(renderer, old_scale_x, old_scale_y);
 				SDL_RenderSetViewport(renderer, &old_viewport);
 				emu_rect = dest;
@@ -1004,7 +1180,7 @@ namespace casioemu {
 		SDL_SetTextureAlphaMod(interface_texture, 255);
 		SDL_Rect tmp = interface_background.src;
 		SDL_RenderCopy(renderer, interface_texture, &tmp, nullptr);
-		chipset.Frame();
+		draw_core_or_chipset();
 
 		// resize and copy `tx` to screen
 		SDL_SetRenderTarget(renderer, nullptr);
@@ -1037,6 +1213,17 @@ namespace casioemu {
 	}
 
 	void Emulator::Tick() {
+		// A plugin architecture core must never touch the built-in chipset: its
+		// peripherals were never initialised for this model. Pace the SH4 core to
+		// ~60 slices/sec (one cg100_run() per 16 ms) like the original host loop.
+		if (IEmulatorCore* core = arch_core.load()) {
+			const Uint32 now = SDL_GetTicks();
+			if (now - last_arch_tick_ms >= 16) {
+				last_arch_tick_ms = now;
+				core->Tick();
+			}
+			return;
+		}
 		chipset.Tick();
 	}
 
