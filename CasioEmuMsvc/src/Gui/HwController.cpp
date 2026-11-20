@@ -1,6 +1,7 @@
 #include "HwController.h"
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "../Config.hpp"
+#include "Cg100CoreInfo.hpp"
 #include "ToolUi.hpp"
 #include "Ui.hpp"
 #include "imgui/imgui.h"
@@ -19,6 +20,24 @@ int screen_buffer_select = 0;
 bool audio_enable = false;
 void HwController::RenderCore() {
 	ToolUi::PageScope page("Hardware");
+	const bool cg100_arch = casioemu::cg100info::IsActive();
+
+	if (cg100_arch) {
+		ToolUi::Section("CG100 / SH4 architecture core");
+		{
+			ToolUi::PanelScope panel("##hw_cg100_core");
+			casioemu::cg100info::RenderCoreStatus();
+			ImGui::Spacing();
+			ToolUi::Field("MMIO registers");
+			ImGui::TextWrapped("PFC / KEYSC / RTC / ETMU / flash-controller registers live inside "
+				"CG100SH4.plugin. IEmulatorCore exposes no MMIO query API, so their values are "
+				"not shown instead of being guessed.");
+			ImGui::Spacing();
+			ToolUi::Field("Flash map (reference)");
+			casioemu::cg100info::RenderFlashMap();
+		}
+	}
+
 	ToolUi::Section("Capture & Display");
 
 #ifndef CASIOEMU_CORE_WEB
@@ -95,7 +114,7 @@ void HwController::RenderCore() {
 	}
 #endif
 
-	if (!casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
+	if (!cg100_arch && !casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
 		ToolUi::Section("LCD behaviour");
 		ToolUi::PanelScope panel("##hw_lcd");
 		auto gate = casioemu::screen_gate::Get();
@@ -123,19 +142,26 @@ void HwController::RenderCore() {
 	ToolUi::Section("CPU & Performance");
 	{
 		ToolUi::PanelScope panel("##hw_cpu");
-		static int cps = log(m_emu->cycles.cycles_per_second) / log(2);
-		ToolUi::Field("Clock rate");
-		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::SliderInt("##cpu_speed", &cps, 1, 28, "2^%d CPS")) {
-			m_emu->cycles.Setup((Uint64)1 << cps, m_emu->cycles.timer_interval);
+		if (cg100_arch) {
+			ToolUi::Field("Core clock budget");
+			ImGui::TextUnformatted("200 MIPS (SH4 plugin core)");
+			ToolUi::Hint("The nX clock slider is hidden: the plugin core advances itself.");
 		}
-		if (m_emu->hardware_id == casioemu::HW_TI_MULTI_VIEW)
-			ImGui::Text("Reference speed: %.3fx", (double)m_emu->cycles.cycles_per_second / 1000000.0);
-		else
-			ImGui::Text("%.6f MHz", (double)m_emu->cycles.cycles_per_second / 1024 / 1024);
+		else {
+			static int cps = log(m_emu->cycles.cycles_per_second) / log(2);
+			ToolUi::Field("Clock rate");
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::SliderInt("##cpu_speed", &cps, 1, 28, "2^%d CPS")) {
+				m_emu->cycles.Setup((Uint64)1 << cps, m_emu->cycles.timer_interval);
+			}
+			if (m_emu->hardware_id == casioemu::HW_TI_MULTI_VIEW)
+				ImGui::Text("Reference speed: %.3fx", (double)m_emu->cycles.cycles_per_second / 1000000.0);
+			else
+				ImGui::Text("%.6f MHz", (double)m_emu->cycles.cycles_per_second / 1024 / 1024);
+		}
 	}
 
-	if (!casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
+	if (!cg100_arch && !casioemu::IsEpsFamily(m_emu->hardware_id) && m_emu->hardware_id != casioemu::HW_TI_MULTI_VIEW) {
 		ToolUi::Section("PD register");
 		ToolUi::PanelScope panel("##hw_pd");
 		static bool pdx[8];
@@ -196,18 +222,24 @@ void HwController::RenderCore() {
 	ToolUi::Section("Advanced");
 	{
 		ToolUi::PanelScope panel("##hw_advanced");
-		ImGui::TextWrapped("%s", "Reload the ROM without restarting.");
-		ImGui::Spacing();
-		if (ToolUi::AccentButton("HwController.HotReload"_lc)) {
-			const bool was_paused = m_emu->GetPaused();
-			m_emu->SetPaused(true);
-			auto lg = std::lock_guard(m_emu->access_mx);
-			std::string error;
-			if (!m_emu->chipset.ReloadRom(error)) {
-				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-					"HwController.HotReload"_lc, error.c_str(), window);
+		if (cg100_arch) {
+			ImGui::TextWrapped("ROM hot reload is unavailable: the SH4 plugin owns the 32 MiB "
+				"flash image. Reset the calculator from its OS instead.");
+		}
+		else {
+			ImGui::TextWrapped("%s", "Reload the ROM without restarting.");
+			ImGui::Spacing();
+			if (ToolUi::AccentButton("HwController.HotReload"_lc)) {
+				const bool was_paused = m_emu->GetPaused();
+				m_emu->SetPaused(true);
+				auto lg = std::lock_guard(m_emu->access_mx);
+				std::string error;
+				if (!m_emu->chipset.ReloadRom(error)) {
+					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+						"HwController.HotReload"_lc, error.c_str(), window);
+				}
+				m_emu->SetPaused(was_paused);
 			}
-			m_emu->SetPaused(was_paused);
 		}
 	}
 }

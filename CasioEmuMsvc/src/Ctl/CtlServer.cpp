@@ -67,6 +67,9 @@ namespace casioemu::ctl {
 		struct HeldKey {
 			uint8_t code = 0;
 			std::chrono::steady_clock::time_point due;
+			bool arch = false;
+			int row = 0;
+			int col = 0;
 		};
 
 		enum class StepMode {
@@ -542,7 +545,7 @@ namespace casioemu::ctl {
 			emulator.SetPaused(false);
 		}
 
-		void ServiceHeldKeys(ServerState& state) {
+		void ServiceHeldKeys(ServerState& state, casioemu::Emulator& emulator) {
 			if (state.held_keys.empty())
 				return;
 			const auto now = std::chrono::steady_clock::now();
@@ -551,7 +554,9 @@ namespace casioemu::ctl {
 			remaining.reserve(state.held_keys.size());
 			for (const auto& held : state.held_keys) {
 				if (held.due <= now) {
-					if (keyboard)
+					if (held.arch)
+						emulator.ArchSetHeldKey(held.row, held.col, false);
+					else if (keyboard)
 						keyboard->PressCode(held.code, false);
 				}
 				else {
@@ -607,6 +612,9 @@ namespace casioemu::ctl {
 					held.code = outcome.release_code;
 					held.due = std::chrono::steady_clock::now() +
 						std::chrono::milliseconds(outcome.release_delay_ms);
+					held.arch = outcome.release_arch;
+					held.row = outcome.release_row;
+					held.col = outcome.release_col;
 					state.held_keys.push_back(held);
 				}
 				ReplyOk(state, inbound.client, id_value, outcome.result);
@@ -664,7 +672,7 @@ namespace casioemu::ctl {
 			g_state->windows_hidden = true;
 		}
 		ServicePendingStep(*g_state, emulator);
-		ServiceHeldKeys(*g_state);
+		ServiceHeldKeys(*g_state, emulator);
 		DrainInbound(*g_state, emulator);
 	}
 

@@ -9,12 +9,14 @@
 #include "WizToolchain.h"
 
 #include "Chipset/Chipset.hpp"
+#include "DiagScreenDetector.h"
 #include "Peripheral/Screen.hpp"
 #include "Shell/SessionHost.h"
 
 #include <SDL.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -79,7 +81,11 @@ public:
 			return;
 		}
 
-		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+		float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+		// The diag macro button adds one more controls line on arch-core
+		// sessions; reserve it so the Fit / zoom row stays inside the panel.
+		if (m_emu && m_emu->HasArchitectureCore())
+			footer += ImGui::GetFrameHeightWithSpacing();
 
 #ifdef SINGLE_WINDOW
 		// The whole calculator, as the external window used to render it.  Use
@@ -92,6 +98,7 @@ public:
 				Placement place = DrawCentred(reinterpret_cast<ImTextureID>(composite), image_w,
 											  image_h, footer, fit_, zoom_);
 				ForwardClicks(place, image_w, image_h);
+				DrawPressedKeyHighlight(place, image_w, image_h);
 				DrawControls(image_w, image_h);
 				return;
 			}
@@ -146,7 +153,86 @@ private:
 			m_emu->ModelMouseEvent(mx, my, false);
 	}
 
+	// Board models (e.g. the SH4 CG100) bypass the built-in Keyboard peripheral,
+	// so its Frame() never draws the dark pressed-key overlay that Graph Light
+	// and the other models show (Keyboard.cpp: SDL_RenderFillRect black, alpha
+	// 127). Reproduce that look here with ImGui: map each pressed button rect
+	// from face/model pixels into the placed (possibly scaled) skin texture.
+	void DrawPressedKeyHighlight(const Placement& place, int width, int height) {
+		if (!m_emu || place.w <= 0.0f || place.h <= 0.0f || width <= 0 || height <= 0)
+			return;
+		const auto rects = m_emu->GetPressedButtonRects();
+		if (rects.empty())
+			return;
+		const float sx = place.w / static_cast<float>(width);
+		const float sy = place.h / static_cast<float>(height);
+		ImDrawList* draw = ImGui::GetWindowDrawList();
+		for (const auto& r : rects) {
+			if (r.w <= 0 || r.h <= 0)
+				continue;
+			const ImVec2 p_min(place.x + r.x * sx, place.y + r.y * sy);
+			const ImVec2 p_max(place.x + (r.x + r.w) * sx, place.y + (r.y + r.h) * sy);
+			const float span = std::min(p_max.x - p_min.x, p_max.y - p_min.y);
+			const float rounding = std::min(12.0f * std::min(sx, sy), span * 0.35f);
+			draw->AddRectFilled(p_min, p_max, IM_COL32(0, 0, 0, 127), rounding);
+		}
+	}
+
+	// --- Genuine OS diag entry buttons (plugin/arch cores only) --------------
+	// These do NOT press keys. Each calls the plugin's state-configure+reboot
+	// export: the plugin patches REAL calculator state (mode 0: factory-blank
+	// flash model word 0x300 = FF FF FF FF; mode 1: exam marker erased and the
+	// boot key-combo held IN THE CORE), resets the CPU to the reset vector, and
+	// lets the OS itself enter diag on the next boot. No fake text is drawn and
+	// no diagnostic function is called from the host. The plugin holds/releases
+	// the in-core combo itself (via its normal Tick loop), so no UI key handling
+	// is involved at all.
+	void StartDiag(int mode) {
+		if (!m_emu || !m_emu->HasArchitectureCore())
+			return;
+		if (diag_cooldown_ && std::chrono::steady_clock::now() - diag_last_click_ <
+		                          std::chrono::milliseconds(1500))
+			return; // re-entry guard: do not interrupt an in-progress diag boot
+		diag_last_click_ = std::chrono::steady_clock::now();
+		diag_cooldown_ = true;
+		m_emu->ArchEnterDiag(mode);
+		diag_status_ = mode == 0
+			? "SERVICE diag: factory-blank 0x300, booting..."
+			: "FACTORY diag: combo held in-core, booting (auto-release after boot)...";
+	}
+
 	void DrawControls(int width, int height) {
+		if (m_emu && m_emu->HasArchitectureCore()) {
+			const bool diag_running = false; // calls are synchronous; guard is time-based
+			if (diag_running)
+				ImGui::BeginDisabled(); // cannot re-trigger while a diag boot is in progress
+			const bool svc_clicked = ImGui::Button("To diagnostics mode (SERVICE)");
+			const bool svc_tip = ImGui::IsItemHovered();
+			ImGui::SameLine();
+			const bool fac_clicked = ImGui::Button("To diagnostics mode (FACTORY)");
+			const bool fac_tip = ImGui::IsItemHovered();
+			if (diag_running)
+				ImGui::EndDisabled();
+			if (svc_clicked && !diag_running)
+				StartDiag(0); // factory-blank flash 0x300 -> service menu
+			if (fac_clicked && !diag_running)
+				StartDiag(1); // boot key-combo gate -> DIAGNOSTIC MODE
+			if (!diag_status_.empty()) {
+				ImGui::SameLine();
+				ImGui::TextUnformatted(diag_status_.c_str());
+			}
+			if (svc_tip)
+				ImGui::SetTooltip("Patches the factory-blank flash model word (0x300 = FF FF FF FF) and RESETs. The OS's own boot gate enters the [BaseROM MAIN] SERVICE menu (1.PATTERN 5.SERVICE / 4.VERSION ...). No keys, no fake output.");
+			if (fac_tip)
+				ImGui::SetTooltip("Erases the exam marker, RESETs, and holds AC + x10^x + ON IN THE CORE. The OS's own boot gate enters '=DIAGNOSTIC MODE= / Factory Use Only!'. The combo is released once the dialog appears; no UI keypresses or fake output.");
+			ImGui::SameLine();
+			const bool reboot_clicked = ImGui::Button("Reboot");
+			const bool reboot_tip = ImGui::IsItemHovered();
+			if (reboot_clicked)
+				m_emu->ArchReboot();
+			if (reboot_tip)
+				ImGui::SetTooltip("Physical RESET button: true CPU reset to the reset vector (0x80000000), then boot the OS fresh");
+		}
 		ImGui::Checkbox("Fit", &fit_);
 		ImGui::SameLine();
 		bool original = !fit_ && std::abs(zoom_ - 1.0f) < 0.001f;
@@ -202,6 +288,10 @@ private:
 	bool fit_ = true;
 	float zoom_ = 2.0f;
 	std::vector<uint8_t> frame_;
+
+	bool diag_cooldown_ = false;                 // re-entry guard for diag buttons
+	std::chrono::steady_clock::time_point diag_last_click_{};
+	std::string diag_status_;
 };
 
 UIWindow* CreateCalcScreenWindow() {

@@ -29,6 +29,11 @@ namespace casioctl {
 		bool schedule_release = false;
 		uint8_t release_code = 0;
 		int release_delay_ms = 0;
+		// Architecture-core held levels must be released through the same core
+		// API (not the built-in keyboard), otherwise they stay stuck down.
+		bool release_arch = false;
+		int release_row = 0;
+		int release_col = 0;
 	};
 
 	CommandOutcome ExecuteCommand(casioemu::Emulator& emulator, const std::string& command, const Json& arguments);

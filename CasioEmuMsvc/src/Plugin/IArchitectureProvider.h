@@ -36,7 +36,7 @@ namespace casioemu {
 		Up, Down, Left, Right,
 		EXE, EXIT,
 		F1, F2, F3, F4, F5, F6,
-		Shift, Alpha, Home, ON, AC,
+		Shift, Alpha, Home, ON, AC, X10X,
 		D0, D1, D2, D3, D4, D5, D6, D7, D8, D9,
 		Dot, Plus, Minus, Multiply, Divide,
 		Power, Format,

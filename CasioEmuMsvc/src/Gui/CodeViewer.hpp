@@ -46,6 +46,12 @@ private:
 	int hovered_line = 0;
 	uint32_t selected_addr = -1;
 
+	// CG100 / architecture-core inner tab set (hosted by the Code Viewer dock).
+	// These are only used when casioemu::cg100info::IsActive() is true; the
+	// legacy disassembly view below is untouched for built-in chipsets.
+	int arch_tab = 0;                          // active inner tab index
+	uint32_t arch_flash_addr = 0x00020000u;    // last browsed flash address
+
 	// Search related
 	char search_buf[256]{0};
 	int search_mode = 0; // 0: Hex, 1: Instruction
@@ -67,6 +73,8 @@ public:
 	void ExternalBP();
 	CodeElem LookUp(uint32_t offset, int* idx = 0);
 	void RenderCore() override;
+	// CG100-only: a compact tab bar of genuinely available debug views.
+	void RenderArchTabs();
 	void DrawContent();
 	void DrawMonitor();
 	void JumpTo(uint32_t offset);

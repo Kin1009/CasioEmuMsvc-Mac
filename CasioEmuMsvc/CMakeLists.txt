@@ -630,7 +630,13 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
         # The example library: prefer the checkout's examples/ directory so a
         # rebuild always ships the current library; fall back to the vendored
         # copy for the standalone repository.
-        set(WIZ_EXAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
+        # The current Wiz checkout lives beside the emulator repository.
+        # Prefer it so newly added RAC/CWiz counterparts are shipped; the
+        # vendored copy remains the standalone fallback.
+        set(WIZ_EXAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../Wiz/examples")
+        if(NOT IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
+            set(WIZ_EXAMPLES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../examples")
+        endif()
         if(NOT IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
             set(WIZ_EXAMPLES_DIR "${WIZ_TOOLCHAIN_DIR}/examples")
         endif()
@@ -656,6 +662,24 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
                         "${WIZ_EXAMPLES_DIR}"
                         "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
                     COMMENT "Copying the Wiz toolchain data and examples into the bundle")
+            endif()
+            # ROP builds invoke RAC as a separate GPL-3.0 process. Include the
+            # checkout in desktop bundles so Finder-launched builds do not
+            # depend on the user's working directory or shell environment.
+            set(WIZ_RAC_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../Wiz/tools/rac-compiler")
+            if(NOT IS_DIRECTORY "${WIZ_RAC_SOURCE}")
+                set(WIZ_RAC_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../Wiz/tools/rac-compiler")
+            endif()
+            if(IS_DIRECTORY "${WIZ_RAC_SOURCE}")
+                add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/tools/rac-compiler"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${WIZ_RAC_SOURCE}"
+                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/tools/rac-compiler"
+                    COMMENT "Copying RAC compiler into the Wiz bundle")
+            else()
+                message(WARNING "RAC checkout not found; ROP builds will require RAC_COMPILER")
             endif()
             # The models are read from "./models" next to the executable, so the
             # bundle needs them.  Replace the directory instead of merging into

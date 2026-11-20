@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -118,8 +119,44 @@ namespace casioemu {
 		Uint32 last_arch_tick_ms = 0;
 		using ArchFramebufferFn = int (*)(void*, unsigned char*, int);
 		using ArchKeyMatrixFn = void (*)(void*, int, int);
+		using ArchPowerOnFn = void (*)(void*); // physical ON: hardware wake, no getkey
+		using ArchRebootFn = void (*)(void*);  // physical RESET: CPU reset to reset vector
+		using ArchEnterDiagFn = void (*)(void*, int); // configure flash/boot state + reboot into OS diag
+		using ArchHeldKeyFn = void (*)(void*, int, int);
+		using ArchReleaseAllFn = void (*)(void*);
 		ArchFramebufferFn arch_framebuffer_fn = nullptr;
 		ArchKeyMatrixFn arch_key_matrix_fn = nullptr;
+		ArchPowerOnFn arch_power_on_fn = nullptr;
+		ArchRebootFn arch_reboot_fn = nullptr;
+		ArchEnterDiagFn arch_enter_diag_fn = nullptr;
+		// Held-key exports of the plugin C ABI. These are the same raw-matrix
+		// down/up calls the plugin's keyboard path uses; a UI macro holds real
+		// keys through power-on instead of telling the emulator "enter diag".
+		ArchHeldKeyFn arch_key_down_fn = nullptr;
+		ArchHeldKeyFn arch_key_up_fn = nullptr;
+		ArchReleaseAllFn arch_release_all_fn = nullptr;
+
+		// Idempotence at the host/plugin held-key boundary: remember which
+		// (row,col) levels we have asserted so a repeated key_down (or key_up)
+		// cannot create a second press/release edge in the plugin/core. The
+		// diag macro asserts each key once, but the guard keeps it safe if any
+		// other path re-asserts a level. A mutex keeps this correct if input
+		// ever arrives off the UI thread.
+		std::mutex arch_held_mx;
+		std::set<std::pair<int, int>> arch_held_keys;
+
+		// Board models (CG100) bypass the built-in Keyboard peripheral, so its
+		// Frame() never draws the dark pressed-key overlay that Graph Light and
+		// the other models show. Record the pressed button rects (in face/model
+		// coordinates) here instead; the Calculator dock panel renders them over
+		// the placed skin texture. Mirrors Keyboard::Frame() for built-in models.
+		mutable std::mutex pressed_rect_mx;
+		std::vector<Rect> pressed_button_rects;
+		bool mouse_highlight_active = false;
+		Rect mouse_highlight_rect{};
+
+		void AddButtonHighlight(const Rect& rect);
+		void RemoveButtonHighlight(const Rect& rect);
 
 		void SetArchitectureCore(IEmulatorCore* core);
 
@@ -206,6 +243,37 @@ namespace casioemu {
 		// Calculator debugger window uses this so clicking the on-screen keys works
 		// in single-window builds, where there is no emulator window rectangle.
 		void ModelMouseEvent(int model_x, int model_y, bool down);
+
+		// --- Plugin architecture-core UI macro helpers (CG100 diag button) -----
+		// Thin wrappers over the plugin's plain-C exports. They press real keys
+		// and read the real screen; no diagnostic mode is implemented here.
+		bool HasArchitectureCore() const { return arch_core.load(std::memory_order_acquire) != nullptr; }
+		void ArchSetHeldKey(int row, int col, bool down);
+		void ArchReleaseAllHeldKeys();
+		// Self-releasing key tap (down + deferred up) through the plugin's raw
+		// matrix bridge: the same path a mouse click on an on-screen key uses.
+		void ArchTapKey(int row, int col);
+		bool ArchReadFramebufferRGBA(unsigned char* out, int outLen);
+		void ArchPowerOn();
+		// Physical RESET button: true hardware reset of the emulated CPU to
+		// its reset vector and a fresh OS boot (not a snapshot restore).
+		void ArchReboot();
+		// Configure calculator state (flash model word / boot flags) and reset,
+		// so the OS itself enters diag on the next boot. mode 0 = service menu,
+		// mode 1 = "DIAGNOSTIC MODE / Factory Use Only!". No UI keypresses and
+		// no injected output -- the plugin patches real state and reboots.
+		void ArchEnterDiag(int mode);
+
+		// --- Board-model pressed-key highlight (CG100) -------------------------
+		// The arch/board path has no Keyboard::Frame(), so the Calculator panel
+		// draws the dark overlay itself from these accessors. All rectangles are
+		// in face/model (skin) pixel coordinates.
+		std::vector<Rect> GetPressedButtonRects() const;
+		// Resolve a kiko ((row << 4) | col) or an SDL key code to the matching
+		// button rect from ModelDefinition, then add/remove its highlight.
+		void SetButtonHighlight(int kiko, bool pressed);
+		void SetButtonHighlightBySdlKey(int sdlKey, bool pressed);
+
 		SDL_Renderer* GetRenderer();
 		SDL_Texture* GetInterfaceTexture();
 #ifdef SINGLE_WINDOW

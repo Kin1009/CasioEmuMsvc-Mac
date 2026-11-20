@@ -184,8 +184,17 @@ std::vector<Tok> lex(const std::string& src) {
             if (c == '0' && i + 1 < src.size() && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
                 j = i + 2; std::string h;
                 while (j < src.size() && std::isxdigit((unsigned char)src[j])) h += src[j++];
-                push(Tk::Number, h, (uint32_t)std::strtoul(h.c_str(), nullptr, 16));
+                push(Tk::Number, "0x" + h, (uint32_t)std::strtoul(h.c_str(), nullptr, 16));
                 i = j;
+                continue;
+            }
+            size_t bare = i;
+            while (bare < src.size() && std::isalnum((unsigned char)src[bare])) ++bare;
+            const std::string bare_text = src.substr(i, bare - i);
+            if (bare_text.find_first_of("abcdefABCDEF") != std::string::npos) {
+                push(Tk::Number, bare_text,
+                     (uint32_t)std::strtoul(bare_text.c_str(), nullptr, 16));
+                i = bare;
                 continue;
             }
             while (j < src.size() && std::isdigit((unsigned char)src[j])) num += src[j++];
@@ -195,7 +204,11 @@ std::vector<Tok> lex(const std::string& src) {
         }
         if (std::isalpha((unsigned char)c) || c == '_') {
             size_t j = i;
-            while (j < src.size() && (std::isalnum((unsigned char)src[j]) || src[j] == '_')) j++;
+            // RAC names may contain a dot (`dist.main`, firmware aliases).
+            // Keep them as one token so CWiz inline ROP statements can use
+            // the same qualified symbols without quoting the instruction.
+            while (j < src.size() && (std::isalnum((unsigned char)src[j]) ||
+                                      src[j] == '_' || src[j] == '.')) j++;
             push(Tk::Ident, src.substr(i, j - i));
             i = j;
             continue;
@@ -394,7 +407,7 @@ private:
                 while (!(peek().k == Tk::Sym && peek().s == ";") && !(peek().k == Tk::Sym && peek().s == "}") && peek().k != Tk::End) {
                     Tok x = next();
                     if (x.k == Tk::Addr) cur += "[0x" + to_hex(x.n) + "]";
-                    else cur += (cur.empty() ? "" : " ") + (x.k == Tk::Number ? std::to_string(x.n) : x.s);
+                    else cur += (cur.empty() ? "" : " ") + x.s;
                 }
                 if (!cur.empty()) s->asm_lines.push_back(cur);
                 eat_sym(";");
@@ -2504,6 +2517,8 @@ struct RacGenerator {
     size_t table_count = 0;
     size_t key_count = 0;
     std::string key_label;
+    std::map<std::string, std::string> key_alias;
+    bool key_slot_defined = false;
     std::string last_label;
     std::string read_label;
     bool restore_used = false;
@@ -2598,6 +2613,8 @@ struct RacGenerator {
             case Expr::Num: return "0x" + h4(e->n);
             case Expr::Addr: return "0x" + h4(e->n);
             case Expr::Var: {
+                auto ka = key_alias.find(lowercase_ascii(e->s));
+                if (ka != key_alias.end()) return "adr(" + ka->second + ")";
                 auto it = globals.find(e->s);
                 if (it != globals.end()) return "0x" + h4(it->second);
                 return "adr(" + lowercase_ascii(e->s) + ")";
@@ -2689,6 +2706,132 @@ struct RacGenerator {
         };
         if (key == "setlr" || key == "setsfr" || key == "setlr_pc") {
             line(key);
+            return true;
+        }
+        if (key == "hexd_display") {
+            line("lbl program");
+            line("lbl display");
+            line("pop er0, pop er8");
+            line("eval(adr(address) + dist.main + 5)");
+            line("eval(adr(address) + dist.main + 4)");
+            line("r0 = [er0]");
+            line("call 20840");
+            line("er2 = er0,er0+=er4,rt");
+            line("er0 = er8");
+            line("r0 = [er0]");
+            line("call 20840");
+            line("ea = eval(adr(address_text) + dist.main + 6)");
+            line("[ea+]=er2, [ea+]=er0,rt");
+            line("pop er4, pop er2, pop er8, er0=er2,rt");
+            line("eval(adr(value_text) + dist.main + 6)");
+            line("eval(adr(address) + dist.main + 4)");
+            line("adr(keycode, +4)");
+            line("er0 = [er2], r2 = 9,rt");
+            line("r0 = [er0]");
+            line("call 20840");
+            line("[er4]=er0,pop er0,rt");
+            line("eval(adr(address_text) + dist.main)");
+            line("r2 = 3,rt");
+            line("call 099c6");
+            return true;
+        }
+        if (key == "hexd_process_value_key") {
+            line("lbl process_val_key");
+            line("er0 = er8");
+            line("getkey");
+            line("ea = adr(val_table)");
+            line("lbl keycode");
+            line("pop er0, pop er8");
+            line("hex 00 00");
+            line("eval(adr(address) + dist.main + 4)");
+            line("ea_switchcase");
+            line("qr0 = [ea],lea D002H,[ea]= qr0");
+            line("[er8]+=er2,pop xr8");
+            line("0xf00a");
+            line("adr(keycode, +4)");
+            line("[er8]=r0");
+            line("sp = er4,sp+=32h,pop xr4,pop qr8");
+            return true;
+        }
+        if (key == "hexd_set_sp") {
+            line("lbl set_sp");
+            line("call 2f204");
+            line("er8 = adr(address, +4)");
+            line("sp = [er8],pop er8");
+            return true;
+        }
+        if (key == "hexd_check_function_key") {
+            line("lbl check_func_key");
+            line("xr0 = adr(keycode, +4), 0x83da");
+            line("cvt_keycode");
+            line("er8 = er0");
+            line("r0 >> 4,rt");
+            line("r1|=r0,rt");
+            line("er2 = eval(adr(func_table) +dist.main)");
+            line("[er2]=r0,r2=0");
+            line("ea = adr(func_table)");
+            line("ea_switchcase");
+            line("er0 = er8");
+            line("er6 = [ea+]");
+            line("sp = er6,pop er8");
+            return true;
+        }
+        if (key == "hexd_process_type_key") {
+            line("lbl process_type_key");
+            line("eval(adr(pointer) + dist.main + 4 - 5)");
+            line("lbl pointer");
+            line("er2 = 0xd150");
+            line("[er2]=r0,r2=0");
+            line("[er8+5]+=1,pop er8");
+            line("adr(pointer, +4)");
+            line("r0 = [er8],r1 = 0,er2 = er0,er0 = er2,pop er8,rt");
+            line("hex 00 00");
+            line("ea = adr(type_table)");
+            line("ea_switchcase");
+            line("er6 = [ea+]");
+            line("sp = er6,pop er8");
+            return true;
+        }
+        if (key == "hexd_inject") {
+            line("lbl inject");
+            line("eval(adr(address) + dist.main + 4 - 5)");
+            line("[er8+5]+=1,pop er8");
+            line("0xc232");
+            line("er0 = er8");
+            line("er0 = [er0 + 3870]");
+            line("call 20840");
+            line("r0 = r1,rt");
+            line("lbl address");
+            line("er2 = 0xd550");
+            line("[er2]=r0,r2 = 0");
+            line("xr0 = eval(adr(pointer) + dist.main + 4), 0x0050");
+            line("[er0]=r2");
+            return true;
+        }
+        if (key == "hexd_loop") {
+            line("lbl loop");
+            line("pop xr4, pop xr12");
+            line("pr_org()");
+            line("pr_length");
+            line("pr_backup()");
+            line("eval(adr(program) - 0xc)");
+            line("memcpy_auto_jump");
+            return true;
+        }
+        if (key == "hexd_data") {
+            line("lbl val_table");
+            line("hex 40 04 30 00 ff ff"); line("eval(adr(check_func_key) - 62)");
+            line("hex 80 08 30 00 01 00"); line("eval(adr(check_func_key) - 62)");
+            line("hex 40 08 30 00 00 01"); line("eval(adr(check_func_key) - 62)");
+            line("hex 80 04 30 00 00 ff"); line("eval(adr(check_func_key) - 62)");
+            line("hex 04 10 01 00 01 00"); line("eval(adr(set_sp) - 62)");
+            line("hex 00 00 00 00 00 00"); line("eval(adr(check_func_key) - 62)");
+            line("lbl func_table"); line("hex 30 03"); line("eval(adr(loop) - 2)");
+            line("hex 03 03"); line("adr(process_type_key)");
+            line("lbl type_table"); line("hex 51 00"); line("adr(inject)");
+            line("hex 00 00"); line("adr(loop, -2)");
+            line("lbl address_text"); line("\"Addr :D550\""); line("hex 00 00");
+            line("lbl value_text"); line("\"Value:00\""); line("hex 00 00");
             return true;
         }
         if (key == "screen_del" || key == "screen_clear" || key == "cls") {
@@ -2878,7 +3021,7 @@ struct RacGenerator {
         }
         if (key == "num_to_str") {
             if (s->args.size() != 2) { fail("num_to_str expects num, text"); return true; }
-            line("xr0 = 0x" + h4(arg(0)) + ", 0x" + h4(arg(1)));
+            line("xr0 = " + expr_text(s->args[0]) + ", " + expr_text(s->args[1]));
             line("num_to_str");
             return true;
         }
@@ -2918,6 +3061,7 @@ struct RacGenerator {
         line("pop er0");
         line("lbl " + key_label);
         line("hex 00 00");
+        key_slot_defined = true;
         line("call 09C20");
         line("call 1C64A");
         line("sp = er6, pop er8");
@@ -2949,6 +3093,7 @@ struct RacGenerator {
                     Stmt copy;
                     copy.name = s->name;
                     emit_key_read(std::make_shared<Stmt>(copy));
+                    key_alias[lowercase_ascii(s->lhs)] = key_label;
                     return;
                 }
                 const std::string lhs = lowercase_ascii(s->lhs);
@@ -3032,6 +3177,9 @@ struct RacGenerator {
 
     std::string run(unsigned code) {
         copy_code = code;
+        const Func* custom_launcher = nullptr;
+        for (const auto& f : prog.funcs)
+            if (lowercase_ascii(f.name) == "launcher") custom_launcher = &f;
         for (const auto& g : prog.globals) {
             const uint32_t addr = g.has_addr ? g.addr : next_global;
             globals[g.name] = addr;
@@ -3050,7 +3198,12 @@ struct RacGenerator {
             line("[er0]=er2,rt");
         }
         for (const auto& f : prog.funcs) {
-            label(f.name.empty() ? "main" : f.name);
+            if (lowercase_ascii(f.name) == "launcher") continue;
+            // A custom launcher mode is used by full RSC ports. Their inline
+            // asm carries the original labels and must not receive an
+            // additional synthetic `lbl main` at the front of the section.
+            if (!custom_launcher)
+                label(f.name.empty() ? "main" : f.name);
             for (const auto& s : f.body) stmt(s);
         }
         // String pool (first-use order), then bitmap blobs, then the key
@@ -3085,7 +3238,13 @@ struct RacGenerator {
             }
         }
         for (const auto& t : tables) out << t;
-        out << "lbl end\n";
+        if (!key_label.empty() && !key_slot_defined) {
+            out << "lbl " << key_label << "\n";
+            out << "    hex 00 00\n";
+            key_slot_defined = true;
+        }
+        if (!custom_launcher)
+            out << "lbl end\n";
         if (pad > 0) {
             for (int i = 0; i < pad; i += 8) {
                 out << "    hex";
@@ -3095,6 +3254,10 @@ struct RacGenerator {
             }
         }
         out << "\n@section.launcher at 0x" << h4(launcher_base) << "\n\n";
+        if (custom_launcher) {
+            for (const auto& s : custom_launcher->body) stmt(s);
+            return out.str();
+        }
         if (model == "880") {
             out << "    hex fd 26\n";
             out << "    eval(pr_backup(main) - 2)\n";
@@ -3546,6 +3709,24 @@ bool rsc_has_main_backup(const std::string& rsc, uint32_t backup) {
     const std::string needle = "@section.main";
     const size_t pos = text.find(needle);
     if (pos == std::string::npos) return false;
+    // Some community chains are executed in place and therefore omit the
+    // optional `backup` field.  They are still valid exact RSC counterparts;
+    // in that form the section's load address is the requested #org.
+    const size_t line_end = text.find('\n', pos);
+    const size_t at = text.find(" at", pos);
+    if (at != std::string::npos && (line_end == std::string::npos || at < line_end)) {
+        size_t i = at + 3;
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+        if (i + 2 < text.size() && text[i] == '0' && text[i + 1] == 'x') {
+            size_t end = i + 2;
+            while (end < text.size() && std::isxdigit((unsigned char)text[end])) ++end;
+            const unsigned long value =
+                std::strtoul(text.substr(i + 2, end - i - 2).c_str(), nullptr, 16);
+            if ((uint32_t)value == backup &&
+                (line_end == std::string::npos || text.find("backup", pos) == std::string::npos))
+                return true;
+        }
+    }
     static const std::string kBackup = "backup";
     const size_t b = text.find(kBackup, pos);
     if (b == std::string::npos) return false;
@@ -3621,6 +3802,11 @@ static std::string make_rsc(const std::string& source, const std::string& model,
                             std::string& error) {
     error.clear();
     const std::string m = (model == "880" || lower(model) == "880btg") ? "880" : "580";
+    // Direct RSC/RAC IDE mode supplies a complete RAC source file. Preserve
+    // its sections and addresses verbatim instead of sending @section syntax
+    // through the CWiz parser.
+    if (lower(language) == "rsc")
+        return source;
     std::string selected;
     try {
         selected = select_sections(source, get_target(m));

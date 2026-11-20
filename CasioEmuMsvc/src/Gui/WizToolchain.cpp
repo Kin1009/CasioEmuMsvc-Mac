@@ -186,6 +186,8 @@ std::string WizExamplesDir() {
 		std::error_code ec;
 		if (!std::filesystem::is_directory(user, ec))
 			CopyExamplesTree(bundled, user, false);
+		else
+			CopyExamplesTree(bundled, user, false);
 		if (std::filesystem::is_directory(user, ec)) {
 			resolved = user;
 			return resolved;
@@ -247,7 +249,22 @@ const TargetChoice kTargets[] = {
 	{"880 ROP (payload)", "cwiirop", "cwiz"},
 };
 
-const char* kLanguages[] = {"Auto (by file name)", "Wiz (.wz)", "CWiz (.cwiz)"};
+const char* kLanguages[] = {"Auto (by file name)", "Wiz (.wz)", "CWiz (.cwiz)", "RSC / RAC (.rsc)"};
+
+TextEditor::LanguageDefinition MakeRscLanguage() {
+	TextEditor::LanguageDefinition language;
+	language.mName = "RSC / RAC";
+	language.mCaseSensitive = false;
+	language.mSingleLineComment = "#";
+	for (const char* word : {"section", "main", "launcher", "at", "backup", "org", "lbl",
+		"hex", "call", "eval", "adr", "pr_org", "pr_backup", "pop", "sp"})
+		language.mKeywords.insert(word);
+	language.mTokenRegexStrings = {
+		{ "\\b(0[xX][0-9a-fA-F]+|[0-9]+)\\b", TextEditor::PaletteIndex::Number },
+		{ "\"([^\"\\\\]|\\\\.)*\"", TextEditor::PaletteIndex::String },
+	};
+	return language;
+}
 
 const char* kSampleCwiz =
 	"// CWiz - the C-syntax language of the Wiz toolchain. Build it here, then\n"
@@ -327,12 +344,17 @@ public:
 		std::snprintf(file_name_, sizeof(file_name_), "%s", name.c_str());
 		working_dir_ = source.parent_path().string();
 		editor_.SetText(text);
+		editor_.SetLanguageDefinition(source.extension() == ".rsc" ? MakeRscLanguage() : TextEditor::LanguageDefinition::CPlusPlus());
 		editor_.SetErrorMarkers({});
 		diags_.clear();
 		log_.clear();
 		if (wiz::is_cwapplink_path(path)) {
 			target_idx_ = 2;
 			lang_idx_ = 2;
+			picked_target_ = true;
+		} else if (source.extension() == ".rsc") {
+			target_idx_ = 3;
+			lang_idx_ = 3;
 			picked_target_ = true;
 		}
 		return true;
@@ -369,6 +391,8 @@ public:
 			lang_idx_ = 1;
 		else if (language == "cwiz")
 			lang_idx_ = 2;
+		else if (language == "rsc")
+			lang_idx_ = 3;
 		else
 			lang_idx_ = 0;
 	}
@@ -483,10 +507,14 @@ private:
 			return "wiz";
 		if (lang_idx_ == 2)
 			return "cwiz";
+		if (lang_idx_ == 3)
+			return "rsc";
 		if (wiz::ends_with(file_name_, ".cwiz"))
 			return "cwiz";
 		if (wiz::ends_with(file_name_, ".wz"))
 			return "wiz";
+		if (wiz::ends_with(file_name_, ".rsc"))
+			return "rsc";
 		// No (or an unknown) extension: follow the target's language instead of
 		// silently parsing a CWiz sample as Wiz.
 		return kTargets[target_idx_].lang;
@@ -605,7 +633,7 @@ private:
 		// A ROP target (or a `#rop` source) is a gadget-chain payload, not a ROM
 		// image: compile it with the ROP backend and hand the bytes to the
 		// debugger.
-		if (IsRopTarget() || wiz::source_is_rop(src)) {
+		if (EffectiveLang() == "rsc" || IsRopTarget() || wiz::source_is_rop(src)) {
 			DoRopBuild(src, run_after);
 			return;
 		}
@@ -751,11 +779,19 @@ private:
 		// The UI padding slider overrides any #pad/#nopad line in the source.
 		// Inject it before the first section header and drop the source's own
 		// directives, so section selection cannot hide it.
-		std::string effective = "#pad " + std::to_string(std::max(0, rop_pad_)) + "\n";
+		const bool direct_rsc = EffectiveLang() == "rsc";
+		std::string effective;
+		if (!direct_rsc)
+			effective = "#pad " + std::to_string(std::max(0, rop_pad_)) + "\n";
 		{
 			std::istringstream in(src);
 			std::string line;
 			while (std::getline(in, line)) {
+				if (direct_rsc) {
+					effective += line;
+					effective.push_back('\n');
+					continue;
+				}
 				const size_t first = line.find_first_not_of(" \t");
 				if (first != std::string::npos && line[first] == '#') {
 					std::string directive = line.substr(first + 1);
@@ -1310,6 +1346,15 @@ private:
 	void DoPreprocess() {
 		const std::string src = editor_.GetText();
 		try {
+			if (EffectiveLang() == "rsc") {
+				log_.clear();
+				AddLog(Sev::Note, "RSC/RAC source is passed to RAC unchanged");
+				AddLog(Sev::Note, "--- source sent to RAC ---");
+				int line = 0;
+				for (const std::string& item : SplitLines(src))
+					log_.push_back({Sev::Note, wiz::fmt("%4d  %s", ++line, item.c_str())});
+				return;
+			}
 			const wiz::Target& tg = wiz::get_target(TargetName());
 			std::string text = EffectiveLang() == "cwiz"
 								   ? wiz::select_sections(wiz::preprocess_cwiz(src, file_name_, tg.name), tg)
@@ -1374,6 +1419,7 @@ private:
 		}
 		std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
 		editor_.SetText(text);
+		editor_.SetLanguageDefinition(std::filesystem::path(path).extension() == ".rsc" ? MakeRscLanguage() : TextEditor::LanguageDefinition::CPlusPlus());
 		SyncPadFromSource(text);
 		src_path_ = path;
 		AddLog(Sev::Note, "loaded " + path);
@@ -1388,13 +1434,15 @@ private:
 		}
 		std::string text{std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
 		editor_.SetText(text);
+		if (path.extension() == ".rsc")
+			editor_.SetLanguageDefinition(MakeRscLanguage());
 		SyncPadFromSource(text);
 		editor_.SetCursorPosition(TextEditor::Coordinates());
 
 		const std::string name = path.filename().string();
 		std::snprintf(file_name_, sizeof file_name_, "%s", name.c_str());
 		const std::string ext = path.extension().string();
-		lang_idx_ = (ext == ".wz") ? 1 : 2;
+		lang_idx_ = (ext == ".wz") ? 1 : (ext == ".rsc" ? 3 : 2);
 		if (ext == ".cwapplink") {
 			target_idx_ = 2;
 			picked_target_ = true;
@@ -1405,7 +1453,7 @@ private:
 		                    text.find("#for") != std::string::npos;
 		if (text.find("#cwapp") != std::string::npos)
 			target_idx_ = 2;
-		else if (is_rop)
+		else if (ext == ".rsc" || is_rop)
 			target_idx_ = is_880 ? 4 : 3;
 		else
 			target_idx_ = is_880 ? 0 : 1;
@@ -1430,7 +1478,7 @@ private:
 	static std::string ExampleFileLabel(const std::filesystem::path& path) {
 		const std::string ext = path.extension().string();
 		if (ext == ".cwapplink") return path.stem().string() + "  (CWapp project)";
-		return path.stem().string() + "  (" + (ext == ".wz" ? "Wiz" : "CWiz") + ")";
+		return path.stem().string() + "  (" + (ext == ".wz" ? "Wiz" : (ext == ".rsc" ? "RSC/RAC" : "CWiz")) + ")";
 	}
 
 	static std::set<std::string> NestedExampleNames(const std::filesystem::path& root) {
@@ -1440,7 +1488,7 @@ private:
 			if (!it->is_regular_file(ec) || it->path().parent_path() == root)
 				continue;
 			const std::string ext = it->path().extension().string();
-			if (ext == ".wz" || ext == ".cwiz" || ext == ".cwapplink")
+			if (ext == ".wz" || ext == ".cwiz" || ext == ".rsc" || ext == ".cwapplink")
 				names.insert(it->path().filename().string());
 		}
 		return names;
@@ -1456,7 +1504,7 @@ private:
 				dirs.push_back(it->path());
 			} else if (it->is_regular_file(ec)) {
 				const std::string ext = it->path().extension().string();
-				if (ext != ".wz" && ext != ".cwiz" && ext != ".cwapplink")
+				if (ext != ".wz" && ext != ".cwiz" && ext != ".rsc" && ext != ".cwapplink")
 					continue;
 				if (root && nested.count(it->path().filename().string()))
 					continue;
@@ -1527,6 +1575,13 @@ private:
 				std::snprintf(file_name_, sizeof file_name_, "%s", "program.wz");
 				lang_idx_ = 1;
 				editor_.SetText(kSampleWiz);
+			}
+			if (ImGui::MenuItem("New RSC source (.rsc)", nullptr, false, true)) {
+				std::snprintf(file_name_, sizeof file_name_, "%s", "program.rsc");
+				lang_idx_ = 3;
+				target_idx_ = 3;
+				editor_.SetLanguageDefinition(MakeRscLanguage());
+				editor_.SetText("@section.main at 0xe9e0 backup 0xe9e0\n\n@section.launcher at 0xd180\n");
 			}
 			if (ImGui::MenuItem("Save", "Ctrl+S"))
 				SaveSource();

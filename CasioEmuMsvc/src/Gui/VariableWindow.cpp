@@ -1,4 +1,5 @@
 #include "VariableWindow.h"
+#include "Cg100CoreInfo.hpp"
 #include "CwiiHelp.h"
 #include "Models.h"
 #include "Settings/Settings.h"
@@ -46,6 +47,25 @@ const std::vector<casioemu::Variable>& CachedVariables(casioemu::HardwareId hard
 
 void VariableWindow::RenderCore() {
 	ToolUi::PageScope page("Variables");
+
+	// CG100 has no nX BCD variable map (n_ram_buffer is empty). Show the SH4
+	// plugin core's live status instead of the misleading "no variable map"
+	// empty state. SH4 registers are unavailable through IEmulatorCore.
+	if (casioemu::cg100info::IsActive()) {
+		ToolUi::Section("SH4 core status");
+		ToolUi::Description("The SH4 plugin core has no named-variable map. Live core state is shown below.");
+		{
+			ToolUi::PanelScope panel("##vars_cg100_core");
+			casioemu::cg100info::RenderCoreStatus();
+		}
+		ToolUi::Section("Flash / storage memory");
+		{
+			ToolUi::PanelScope panel("##vars_cg100_fs");
+			casioemu::cg100info::RenderFat12Summary();
+		}
+		return;
+	}
+
 	if (!n_ram_buffer) {
 		ToolUi::Section("Variables");
 		ToolUi::EmptyState("No known variable map for this hardware.");

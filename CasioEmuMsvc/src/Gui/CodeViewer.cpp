@@ -1,4 +1,5 @@
 #include "CodeViewer.hpp"
+#include "Cg100CoreInfo.hpp" // CG100 / SH4 architecture-core status (host side)
 #include "Chipset/CPU.hpp"
 #include "Chipset/Chipset.hpp"
 #include "Config.hpp"
@@ -20,6 +21,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ePSDisas.h>
 #include <filesystem>
@@ -956,8 +958,287 @@ static std::string GetInstructionHelp(const std::string& mnem, const std::string
 
 	return help;
 }
+
+// ---------------------------------------------------------------------------
+// CG100 / SH4 architecture-core debug tabs
+//
+// The built-in nX chipset is not created for board models, so the legacy
+// disassembly below has no ROM to decode on CG100 and the adjacent nX tools
+// (registers, breakpoints, call frames) have no backing hooks. This block
+// replaces the Code Viewer body for arch-core sessions with a small tab set
+// whose contents are limited to data the host/core actually export. Nothing
+// here changes the built-in-chipset path.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct Cg100Region {
+	uint32_t begin;
+	uint32_t end;   // exclusive, 0 = end of flash
+	const char* name;
+};
+
+const Cg100Region kCg100Regions[] = {
+	{0x00000000u, 0x00020000u, "boot code (128 KiB)"},
+	{0x00020000u, 0x000B6000u, "CASIOWIN OS"},
+	{0x00B20000u, 0x00B20004u, "state marker (4 B)"},
+	{0x00C80000u, 0x00C82000u, "Fugue metadata"},
+	{0x00C83A00u, 0x00C85000u, "fls0 FAT12 BPB/reserved"},
+	{0x00C85000u, 0x00C85800u, "fls0 FAT1"},
+	{0x00C85800u, 0x00C86000u, "fls0 FAT2"},
+	{0x00C86000u, 0x00C8A000u, "fls0 root directory"},
+	{0x00C8A000u, 0x00CCE000u, "fls0 data area"},
+};
+
+const char* Cg100RegionAt(uint32_t address) {
+	for (const auto& region : kCg100Regions) {
+		if (address >= region.begin && (region.end == 0 || address < region.end))
+			return region.name;
+	}
+	return "unmapped / erased";
+}
+
+void Cg100JumpButtons(uint32_t& address) {
+	struct Jump { const char* label; uint32_t addr; };
+	const Jump jumps[] = {
+		{"Boot", 0x00000000u}, {"OS", 0x00020000u}, {"Marker", 0x00B20000u}, {"Fugue", 0x00C80000u},
+		{"BPB", 0x00C83A00u}, {"FAT1", 0x00C85000u}, {"Root", 0x00C86000u}, {"Data", 0x00C8A000u},
+	};
+	for (size_t i = 0; i < IM_ARRAYSIZE(jumps); ++i) {
+		if (i == 4)
+			ImGui::NewLine();
+		else if (i != 0)
+			ImGui::SameLine();
+		if (ImGui::Button(jumps[i].label))
+			address = jumps[i].addr;
+	}
+}
+
+void Cg100AddressInput(uint32_t& address) {
+	ToolUi::Field("Flash address (hex)");
+	ImGui::SetNextItemWidth(ImGui::CalcTextSize("00FFFFFF").x + 24.0f);
+	ImGui::InputScalar("##cg_cv_addr", ImGuiDataType_U32, &address, nullptr, nullptr, "%06X",
+		ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase);
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s", Cg100RegionAt(address));
+}
+
+// Prefer the live core read bridge; fall back to the persistent flash image.
+// The returned string is a *static* label describing where the bytes came from.
+const char* Cg100ReadFlash(uint32_t address, uint8_t* out, int count) {
+	if (casioemu::cg100info::ReadRaw(address, out, count))
+		return "live core (cg100_usb_read_raw)";
+	if (!m_emu)
+		return nullptr;
+	static std::ifstream flash;
+	static std::string path;
+	const std::string wanted = m_emu->GetModelFilePath("flash.bin");
+	if (wanted.empty())
+		return nullptr;
+	if (path != wanted || !flash.is_open()) {
+		if (flash.is_open())
+			flash.close();
+		flash.open(wanted, std::ios::binary);
+		path = wanted;
+	}
+	if (!flash.is_open())
+		return nullptr;
+	flash.clear();
+	flash.seekg(static_cast<std::streamoff>(address), std::ios::beg);
+	flash.read(reinterpret_cast<char*>(out), count);
+	if (flash.gcount() != count)
+		return nullptr;
+	return "flash image on disk (persistent storage)";
+}
+
+void Cg100ByteRows(uint32_t base, const uint8_t* bytes, int count) {
+	char line[192];
+	for (int off = 0; off < count; off += 16) {
+		int pos = std::snprintf(line, sizeof(line), "%06X  ", base + static_cast<uint32_t>(off));
+		for (int i = 0; i < 16; ++i) {
+			const size_t room = sizeof(line) - static_cast<size_t>(pos);
+			pos += (off + i < count)
+				? std::snprintf(line + pos, room, "%02X ", bytes[off + i])
+				: std::snprintf(line + pos, room, "   ");
+		}
+		pos += std::snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), " |");
+		for (int i = 0; i < 16 && off + i < count; ++i) {
+			const uint8_t b = bytes[off + i];
+			pos += std::snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), "%c",
+				b >= 0x20 && b < 0x7f ? static_cast<char>(b) : '.');
+		}
+		std::snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), "|");
+		ImGui::TextUnformatted(line);
+	}
+}
+
+void Cg100WordRows(uint32_t base, const uint8_t* bytes, int count) {
+	char line[192];
+	for (int off = 0; off + 4 <= count; off += 16) {
+		int pos = std::snprintf(line, sizeof(line), "%06X  ", base + static_cast<uint32_t>(off));
+		for (int w = 0; w < 4; ++w) {
+			const int i = off + w * 4;
+			const uint32_t word = (static_cast<uint32_t>(bytes[i]) << 24) |
+				(static_cast<uint32_t>(bytes[i + 1]) << 16) |
+				(static_cast<uint32_t>(bytes[i + 2]) << 8) |
+				static_cast<uint32_t>(bytes[i + 3]);
+			pos += std::snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), "%08X ", word);
+		}
+		ImGui::TextUnformatted(line);
+	}
+}
+
+} // namespace
+
+void CodeViewer::RenderArchTabs() {
+	using namespace casioemu::cg100info;
+	const Info info = Read();
+
+	// Headless verification hook: pick an inner tab once, inert in normal use.
+	static bool tab_env_applied = false;
+	if (!tab_env_applied) {
+		tab_env_applied = true;
+		if (const char* requested = std::getenv("CASIOEMU_CODE_TAB")) {
+			const int index = std::atoi(requested);
+			if (index >= 0 && index <= 5)
+				arch_tab = index;
+		}
+	}
+
+	ToolUi::Section("CG100 / SH4 debug session");
+	char headline[256];
+	std::snprintf(headline, sizeof(headline), "%s  |  %s  |  %s",
+		info.core_id ? info.core_id : "unknown core",
+		info.status ? info.status : "unknown status",
+		m_emu ? m_emu->ModelDefinition.model_name.c_str() : "fx-CG100");
+	ImGui::TextUnformatted(headline);
+	ToolUi::Hint("Only data actually exported by the SH4 plugin core is shown. Values the "
+		"host cannot query (registers, MMIO, breakpoints, call frames) are labelled unavailable "
+		"rather than shown as empty tables.");
+
+	if (!ImGui::BeginTabBar("##cg100_code_tabs"))
+		return;
+
+	if (ImGui::BeginTabItem("Disassembly")) {
+		arch_tab = 0;
+		uint8_t bytes[128] = {};
+		const char* source = Cg100ReadFlash(arch_flash_addr, bytes, static_cast<int>(sizeof(bytes)));
+		ToolUi::Description("No SH4 decoder is compiled into this host build. The legacy nX/U8 "
+			"decoder cannot decode SH4 code, so raw big-endian instruction words are shown "
+			"instead of inventing mnemonics.");
+		ImGui::Spacing();
+		Cg100AddressInput(arch_flash_addr);
+		Cg100JumpButtons(arch_flash_addr);
+		ImGui::Spacing();
+		if (source) {
+			ImGui::TextDisabled("Source: %s", source);
+			Cg100WordRows(arch_flash_addr, bytes, static_cast<int>(sizeof(bytes)));
+		}
+		else {
+			ImGui::TextWrapped("Flash bytes are unavailable in this session.");
+		}
+		ImGui::EndTabItem();
+	}
+
+	if (ImGui::BeginTabItem("Memory")) {
+		arch_tab = 1;
+		uint8_t bytes[128] = {};
+		const char* source = Cg100ReadFlash(arch_flash_addr, bytes, static_cast<int>(sizeof(bytes)));
+		ToolUi::Description("Byte view of the emulated flash. Live RAM/MMIO reads are not "
+			"exported by IEmulatorCore; writes are not offered.");
+		ImGui::Spacing();
+		Cg100AddressInput(arch_flash_addr);
+		Cg100JumpButtons(arch_flash_addr);
+		ImGui::Spacing();
+		if (source) {
+			ImGui::TextDisabled("Source: %s", source);
+			Cg100ByteRows(arch_flash_addr, bytes, static_cast<int>(sizeof(bytes)));
+		}
+		else {
+			ImGui::TextWrapped("Flash bytes are unavailable in this session.");
+		}
+		ImGui::EndTabItem();
+	}
+
+	if (ImGui::BeginTabItem("Registers")) {
+		arch_tab = 2;
+		ToolUi::Section("Unavailable in this build");
+		ToolUi::Description("IEmulatorCore exposes only identity, status, keys and framebuffer - "
+			"there is no SH4 register query API (PC / SP / GBR / SR / MAC / PR). The casioctl "
+			"status reply reports sp = null and lr = null for this session, and the PC shown in "
+			"the status bar is a legacy cache, not a live SH4 PC. No values are fabricated.");
+		ImGui::EndTabItem();
+	}
+
+	if (ImGui::BeginTabItem("Breakpoints")) {
+		arch_tab = 3;
+		ToolUi::Section("Not supported by the SH4 core");
+		ToolUi::Description("The architecture-core ABI has no breakpoint export. The legacy "
+			"breakpoint map belongs to the built-in nX/eps CPU and is inert for CG100, so it is "
+			"not offered here. Use the built-in chipset models for execution breakpoints.");
+		ImGui::EndTabItem();
+	}
+
+	if (ImGui::BeginTabItem("Call stack")) {
+		arch_tab = 4;
+		ToolUi::Section("No call frames");
+		ToolUi::Description("The call-analysis hooks are fired by the built-in nX/t4x CPU only; "
+			"they never run for a plugin architecture core. There are no frames to display.");
+		ImGui::EndTabItem();
+	}
+
+	if (ImGui::BeginTabItem("Core")) {
+		arch_tab = 5;
+		ToolUi::Section("Live core counters");
+		ImGui::TextDisabled("Provider core"); ImGui::SameLine(160.0f);
+		ImGui::TextUnformatted(info.core_id ? info.core_id : "unavailable");
+		ImGui::TextDisabled("Core status"); ImGui::SameLine(160.0f);
+		ImGui::TextUnformatted(info.status ? info.status : "unavailable");
+		ImGui::TextDisabled("Model"); ImGui::SameLine(160.0f);
+		ImGui::TextUnformatted(m_emu ? m_emu->ModelDefinition.model_name.c_str() : "fx-CG100");
+		ImGui::TextDisabled("C ABI bridge"); ImGui::SameLine(160.0f);
+		ImGui::TextUnformatted(info.abi ? "live (cg100_* exports)" : "not exported by plugin build");
+		if (info.abi) {
+			char line[128];
+			std::snprintf(line, sizeof(line), "0x%llX  (%llu)",
+				static_cast<unsigned long long>(info.cycles), static_cast<unsigned long long>(info.cycles));
+			ImGui::TextDisabled("Cycles"); ImGui::SameLine(160.0f); ImGui::TextUnformatted(line);
+			std::snprintf(line, sizeof(line), "%llu", static_cast<unsigned long long>(info.pushes));
+			ImGui::TextDisabled("LCD presents"); ImGui::SameLine(160.0f); ImGui::TextUnformatted(line);
+			ImGui::TextDisabled("Fault"); ImGui::SameLine(160.0f);
+			ImGui::TextUnformatted(info.fault && *info.fault ? info.fault : "none");
+			ImGui::TextDisabled("USB state"); ImGui::SameLine(160.0f);
+			ImGui::TextUnformatted(info.usb_text && *info.usb_text ? info.usb_text : "unavailable");
+		}
+		else {
+			ToolUi::Hint("Live counters are unavailable with this plugin build.");
+		}
+		ToolUi::Section("Flash marker / image");
+		uint8_t marker[4] = {};
+		if (Cg100ReadFlash(0x00B20000u, marker, static_cast<int>(sizeof(marker)))) {
+			char line[96];
+			std::snprintf(line, sizeof(line), "%02X %02X %02X %02X  @ 0x00B20000",
+				marker[0], marker[1], marker[2], marker[3]);
+			ImGui::TextUnformatted(line);
+		}
+		else {
+			ImGui::TextDisabled("Marker bytes unavailable in this session.");
+		}
+		ToolUi::Hint("Budget: 200 MIPS (SH4 plugin core). SH4 PC/IPS are not exported; "
+			"the legacy status-bar PC is not meaningful for this session.");
+		ImGui::EndTabItem();
+	}
+
+	ImGui::EndTabBar();
+}
+
 void CodeViewer::RenderCore() {
 	ToolUi::PageScope page("Code Viewer");
+	// CG100 runs on a plugin SH4 core: the legacy disasm/step UI below is built
+	// on the absent nX chipset. Host it in the honest tab set instead.
+	if (casioemu::cg100info::IsActive()) {
+		RenderArchTabs();
+		return;
+	}
 #ifdef CASIOEMU_CORE_WEB
 	if (!disasm_requested) {
 		PrepareDisasm();

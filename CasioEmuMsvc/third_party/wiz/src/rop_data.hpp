@@ -271,7 +271,7 @@ static const char ROP_DB_580[] = R"ROPDB(
 13A20 num_randint
 139D2 num_normalize
 1DC8A num_to_byte
-279B6 num_to_str
+279B8 num_to_str
 1DCE4 num_cpy
 1D902 num_cmp
 16844 num_sin

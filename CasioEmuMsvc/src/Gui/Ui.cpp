@@ -6,10 +6,12 @@
 #include "CallAnalysis.h"
 #include "Chipset/Chipset.hpp"
 #include "Chipset/MMU.hpp"
+#include "Cg100CoreInfo.hpp"
 #include "CodeViewer.hpp"
 #include "Editors.h"
 #include "HwController.h"
 #include "Injector.hpp"
+#include "Ext/Screenshot.h"
 #include "LabelFile.h"
 #include "LabelViewer.h"
 #include "MemBreakPoint.hpp"
@@ -44,6 +46,7 @@
 #include "Shell/Shell.h"
 #include "Shell/SessionHost.h"
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -295,6 +298,15 @@ void gui_loop() {
 	// The shell still renders when every calculator tab is closed (Welcome),
 	// so do not require a running emulator here.
 
+	// Defensive guard: ImGui's global context (GImGui) can be transiently null
+	// during startup/quit or a quit->reopen re-entry (a DestroyContext on one
+	// path while the frame loop is still running on another). Calling
+	// ImGui::GetIO()/NewFrame() with a null context is an EXC_BAD_ACCESS at
+	// ImGui_ImplSDLRenderer2_NewFrame (offset 0xa0). Degrade to a skipped frame
+	// instead of crashing the whole app.
+	if (ImGui::GetCurrentContext() == nullptr)
+		return;
+
 	// Do not reset the focus flag at the top of every frame: the SDL event
 	// loop runs after gui_loop() and must use the value computed by the most
 	// recent Calculator render.  It is cleared only when the panel is gone
@@ -319,6 +331,17 @@ void gui_loop() {
 #ifndef CASIOEMU_CORE_WEB
 #ifdef SINGLE_WINDOW
 	ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+	// Optional verification hook: dump the composited debugger UI to a PNG on
+	// the first frame. Used by headless UI checks where the macOS display is
+	// locked and screencapture cannot see the window.
+	if (const char* dump = std::getenv("CASIOEMU_UI_DUMP")) {
+		// Wait for the shell to settle: the first frames only draw chrome.
+		static int frame = 0;
+		if (renderer && ++frame == 90) {
+			if (!casioemu::shot::SaveRendererPng(renderer, dump))
+				std::fprintf(stderr, "[ui-dump] SaveRendererPng failed\n");
+		}
+	}
 #else
 	ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
 	SDL_RenderPresent(renderer);
@@ -331,6 +354,11 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 		std::this_thread::sleep_for(std::chrono::microseconds(1));
 	const bool multiview = m_emu->chipset.t4x != nullptr;
 	const bool nx_tools = !casioemu::IsEpsFamily(m_emu->hardware_id) && !multiview;
+	// CG100 is driven by the SH4 architecture plugin, not the built-in nX
+	// chipset. It must not inherit the nX-only tool windows (ROP compiler,
+	// payload injector, QR decoder, sprite bitmap viewer) or the nX-layout raw
+	// memory editors. Built-in models keep all of them unchanged.
+	const bool cg100_arch = casioemu::cg100info::IsActive();
 	std::filesystem::path label_file = m_emu->GetModelFilePath("labels.txt");
 	if (!label_file.empty() && std::filesystem::exists(label_file))
 		g_labels = parseFile(label_file.string());
@@ -352,12 +380,12 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 	windows.push_back(CreateCallAnalysisWindow());
 	windows.push_back(code_viewer = new CodeViewer());
 	m_emu->chipset.on_rom_changed = [] { if (code_viewer) code_viewer->PrepareDisasm(); };
-	if (nx_tools)
+	if (nx_tools && !cg100_arch)
 		windows.push_back(injector = new Injector());
 	membp = new Breakpoints();
 	windows.push_back(membp);
 	if (!multiview) windows.push_back(CreateAddressWindow());
-	if (nx_tools) {
+	if (nx_tools && !cg100_arch) {
 #if !defined(TEST_BUILD)
 		windows.push_back(CreateRopCompilerWindow());
 #endif
@@ -369,16 +397,20 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 	windows.push_back(snapshot_window = static_cast<SnapshotWindow*>(CreateSnapshotWindow()));
 #endif
 #ifndef CASIOEMU_CORE_WEB
-	if (nx_tools)
+	if (nx_tools && !cg100_arch)
 		windows.push_back(new QrCodeWindow());
 #endif
 	windows.push_back(MakeSettingsWindow());
-	if (!multiview) {
+	if (!multiview && !cg100_arch) {
 		auto* bitmap_window = CreateBitmapViewer();
 		windows.push_back(bitmap_window);
 	}
-	for (auto item : GetEditors()) {
-		windows.push_back(item);
+	// The generic ROM/RAM/All editors read the nX MMU layout, which is empty
+	// for CG100. The repopulated Memory tab browses the SH4 plugin's flash.
+	if (!cg100_arch) {
+		for (auto item : GetEditors()) {
+			windows.push_back(item);
+		}
 	}
 #ifndef CASIOEMU_CORE_WEB
 	// The Wiz / CWiz toolchain is offered for the two ClassWiz models it targets

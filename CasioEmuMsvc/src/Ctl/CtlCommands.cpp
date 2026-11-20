@@ -72,6 +72,22 @@ namespace casioctl {
 			return *keyboard;
 		}
 
+		// A plugin architecture core (CG100) owns the keypad; the generic
+		// IKeyboard interface is backed by the built-in chipset, which is not
+		// connected to that core. Route casioctl injection through the SAME
+		// held-matrix API the GUI uses so keys actually reach the emulated OS.
+		// No diagnostic logic is added here -- this is only key transport.
+		bool ArchKeyFromCode(casioemu::Emulator& emulator, uint8_t code, int& row, int& col) {
+			if (!emulator.HasArchitectureCore())
+				return false;
+			if (code == static_cast<uint8_t>(casioemu::BUTTON_KIKO_POWER)) {
+				row = 6; col = 9; // hardware-verified ON contact on CG100
+				return true;
+			}
+			row = (code >> 4) & 0x0f;
+			col = code & 0x0f;
+			return true;
+		}
 		std::string Lower(std::string value) {
 			std::transform(value.begin(), value.end(), value.begin(),
 				[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -883,7 +899,22 @@ namespace casioctl {
 
 		if (command == "key.press" || command == "key.release") {
 			ResolvedKey key = ResolveKey(emulator, arguments);
-			RequireKeyboard().PressCode(key.code, command == "key.press");
+			int row = 0, col = 0;
+			if (ArchKeyFromCode(emulator, key.code, row, col)) {
+				if (command == "key.press") {
+					// A plain press is a COMPLETE tap: the plugin's raw matrix
+					// bridge presses and releases the key after enough run slices
+					// for the OS scanner. No held level can be left stuck, so
+					// repeated presses never become no-ops.
+					emulator.ArchTapKey(row, col);
+				} else {
+					// Explicit release only clears an arch held level (e.g. one
+					// left by key.hold); the idempotence guard makes this safe.
+					emulator.ArchSetHeldKey(row, col, false);
+				}
+			}
+			else
+				RequireKeyboard().PressCode(key.code, command == "key.press");
 			outcome.result = KeyToJson(emulator, key);
 			outcome.result["pressed"] = command == "key.press";
 			return outcome;
@@ -892,7 +923,17 @@ namespace casioctl {
 		if (command == "key.hold") {
 			const ResolvedKey key = ResolveKey(emulator, arguments);
 			const uint32_t delay = static_cast<uint32_t>(ArgUInt(arguments, "ms", false, 120, 60000));
-			RequireKeyboard().PressCode(key.code, true);
+			int row = 0, col = 0;
+			if (ArchKeyFromCode(emulator, key.code, row, col)) {
+				emulator.ArchSetHeldKey(row, col, true);
+				// The scheduled release must go back through the SAME arch API,
+				// otherwise the host idempotence set stays populated forever.
+				outcome.release_arch = true;
+				outcome.release_row = row;
+				outcome.release_col = col;
+			}
+			else
+				RequireKeyboard().PressCode(key.code, true);
 			outcome.result = KeyToJson(emulator, key);
 			outcome.result["hold_ms"] = delay;
 			outcome.schedule_release = true;
@@ -902,7 +943,10 @@ namespace casioctl {
 		}
 
 		if (command == "key.releaseall") {
-			RequireKeyboard().ReleaseAll();
+			if (emulator.HasArchitectureCore())
+				emulator.ArchReleaseAllHeldKeys();
+			else
+				RequireKeyboard().ReleaseAll();
 			Json result = Json::Object();
 			result["released"] = true;
 			outcome.result = std::move(result);
@@ -915,7 +959,17 @@ namespace casioctl {
 			const std::string action = Lower(ArgString(arguments, "action", "press"));
 			if (action != "press" && action != "release")
 				throw CommandError("bad-args", "action must be 'press' or 'release'");
-			RequireKeyboard().Key(static_cast<int>(ki), static_cast<int>(ko), action == "press");
+			if (emulator.HasArchitectureCore()) {
+				// key.list reports ki=column, ko=row; the core API takes (row, col).
+				// A matrix command is a complete tap, matching the plugin's
+				// casioemu_arch_core_key_matrix semantics used by mouse clicks.
+				if (action == "press")
+					emulator.ArchTapKey(static_cast<int>(ko), static_cast<int>(ki));
+				else
+					emulator.ArchSetHeldKey(static_cast<int>(ko), static_cast<int>(ki), false);
+			} else {
+				RequireKeyboard().Key(static_cast<int>(ki), static_cast<int>(ko), action == "press");
+			}
 			Json result = Json::Object();
 			result["ki"] = ki;
 			result["ko"] = ko;

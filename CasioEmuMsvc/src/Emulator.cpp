@@ -49,8 +49,18 @@ namespace casioemu {
 			case SDLK_LSHIFT: case SDLK_RSHIFT: return ArchKey::Shift;
 			case SDLK_LALT: case SDLK_RALT: return ArchKey::Alpha;
 			case SDLK_HOME: return ArchKey::Home;
-			case SDLK_AC_HOME: return ArchKey::ON;
+			// ON / AC / x10^x are the three keys used by the CG100 power-on
+			// diagnostic combo. ON and AC are DIFFERENT things: ON is a
+			// hardware wake event (no getkey), AC is the matrix key (0,0)
+			// -> getkey 0x753f. x10^x is (4,1). Keyboard bindings:
+			//   ON    = F9 (also SDL AC_HOME) -> power-on path
+			//   AC    = Backspace               -> matrix (0,0)
+			//   x10^x = x
+			// All three are delivered as per-key down/up events, so holding
+			// several of them at once sets several matrix bits together.
+			case SDLK_F9: case SDLK_AC_HOME: return ArchKey::ON;
 			case SDLK_BACKSPACE: return ArchKey::AC;
+			case SDLK_x: return ArchKey::X10X;
 			case SDLK_PERIOD: case SDLK_KP_DECIMAL: return ArchKey::Dot;
 			case SDLK_PLUS: case SDLK_KP_PLUS: return ArchKey::Plus;
 			case SDLK_MINUS: case SDLK_KP_MINUS: return ArchKey::Minus;
@@ -81,6 +91,63 @@ namespace casioemu {
 					my >= btn.rect.y && my < btn.rect.y + btn.rect.h) {
 					row = btn.kiko >> 4;
 					col = btn.kiko & 0xF;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// The physical ON button's skin hitbox carries kiko 0x00 — the SAME as
+		// the AC button (both derive from the CG50 combined AC/ON key). kiko
+		// alone therefore cannot tell ON from AC; the skin's data-key is the
+		// distinguishing identity: the ON button is "Power", AC is "Delete".
+		// Route ON clicks to the hardware wake bridge, never to the matrix.
+		static bool ArchIsPowerButton(const casioemu::ModelInfo& model, int mx, int my) {
+			for (const auto& btn : model.buttons) {
+				if (btn.rect.w <= 0 || btn.rect.h <= 0)
+					continue;
+				if (mx >= btn.rect.x && mx < btn.rect.x + btn.rect.w &&
+					my >= btn.rect.y && my < btn.rect.y + btn.rect.h) {
+					return btn.keyname == "Power";
+				}
+			}
+			return false;
+		}
+
+		// Hit-test a point in model/face coordinates and return the button's
+		// face rect. Used for the dark pressed-key overlay (no kiko needed).
+		static bool ArchHitButtonRect(const casioemu::ModelInfo& model, int mx, int my, Rect& out) {
+			for (const auto& btn : model.buttons) {
+				if (btn.rect.w <= 0 || btn.rect.h <= 0)
+					continue;
+				if (mx >= btn.rect.x && mx < btn.rect.x + btn.rect.w &&
+					my >= btn.rect.y && my < btn.rect.y + btn.rect.h) {
+					out = btn.rect;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Resolve a kiko ((row << 4) | col) to the button's face rect.
+		static bool ArchButtonRectByKiko(const casioemu::ModelInfo& model, int kiko, Rect& out) {
+			for (const auto& btn : model.buttons) {
+				if (btn.kiko == kiko && btn.rect.w > 0 && btn.rect.h > 0) {
+					out = btn.rect;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Resolve an SDL key code to a button via its configured keyname, the
+		// same binding Keyboard::Initialise() uses (SDL_GetKeyFromName).
+		static bool ArchButtonRectBySdlKey(const casioemu::ModelInfo& model, int sdlKey, Rect& out) {
+			for (const auto& btn : model.buttons) {
+				if (btn.keyname.empty() || btn.rect.w <= 0 || btn.rect.h <= 0)
+					continue;
+				if (SDL_GetKeyFromName(btn.keyname.c_str()) == static_cast<SDL_Keycode>(sdlKey)) {
+					out = btn.rect;
 					return true;
 				}
 			}
@@ -175,6 +242,11 @@ namespace casioemu {
 			constexpr unsigned int kMaxSliceMs = 2;
 			return interval > kMaxSliceMs ? kMaxSliceMs : interval;
 		}
+
+		// CG100 is driven by an architecture-plugin SH4 core (Go). Its budget is
+		// 200 MIPS; the plugin passes the same number to cg100_set_ips() so the
+		// core's RTC/KEYSC time base agrees with the host clock.
+		constexpr unsigned int kCg100CyclesPerSecond = 200000000;
 
 		unsigned int GetLimitedCyclesPerSecond(int hardware_id) {
 			switch (hardware_id) {
@@ -392,6 +464,11 @@ namespace casioemu {
 			eps_timer1_source_hz = GetEpsTimer1SourceHz(ModelDefinition);
 		}
 		if (hardware_id == HW_TI_MULTI_VIEW) cycles_per_second = 1000000; // Microsecond scheduling, as in the reference JS.
+		// Board models (HW_CG100) use the plugin SH4 core, not the built-in
+		// chipset. Give it the full 200 MIPS budget instead of the 8 MHz
+		// full-speed default above.
+		if (hardware_id == HW_CG100)
+			cycles_per_second = kCg100CyclesPerSecond;
 		timer_interval = GetTimerInterval(hardware_id);
 		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
 			timer_interval = SliceTimerInterval(timer_interval);
@@ -564,6 +641,11 @@ namespace casioemu {
 			eps_timer1_source_hz = GetEpsTimer1SourceHz(ModelDefinition);
 		}
 		if (hardware_id == HW_TI_MULTI_VIEW) cycles_per_second = 1000000; // Microsecond scheduling, as in the reference JS.
+		// Board models (HW_CG100) use the plugin SH4 core, not the built-in
+		// chipset. Give it the full 200 MIPS budget instead of the 8 MHz
+		// full-speed default above.
+		if (hardware_id == HW_CG100)
+			cycles_per_second = kCg100CyclesPerSecond;
 		timer_interval = GetTimerInterval(hardware_id);
 		if (!IsEpsFamily(hardware_id) && hardware_id != HW_TI_MULTI_VIEW)
 			timer_interval = SliceTimerInterval(timer_interval);
@@ -714,7 +796,91 @@ namespace casioemu {
 			dlsym(RTLD_DEFAULT, "casioemu_arch_core_framebuffer"));
 		arch_key_matrix_fn = reinterpret_cast<ArchKeyMatrixFn>(
 			dlsym(RTLD_DEFAULT, "casioemu_arch_core_key_matrix"));
+		// Physical ON button: hardware wake, no getkey (distinct from AC).
+		arch_power_on_fn = reinterpret_cast<ArchPowerOnFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_power_on"));
+		// Physical RESET button: true CPU reset to the reset vector (cold boot).
+		arch_reboot_fn = reinterpret_cast<ArchRebootFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_reboot"));
+		// Genuine OS diag entry: the plugin patches flash/boot state and resets
+		// so the OS enters diag on its own next boot (no UI keypresses).
+		arch_enter_diag_fn = reinterpret_cast<ArchEnterDiagFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_enter_diag"));
+		// Held-key bridge used by the Calculator panel's "To diagnostics mode"
+		// macro button. These exports already exist in CG100SH4.plugin; no
+		// emulator-side diagnostic logic is added.
+		arch_key_down_fn = reinterpret_cast<ArchHeldKeyFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_key_down"));
+		arch_key_up_fn = reinterpret_cast<ArchHeldKeyFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_key_up"));
+		arch_release_all_fn = reinterpret_cast<ArchReleaseAllFn>(
+			dlsym(RTLD_DEFAULT, "casioemu_arch_core_release_all"));
 #endif
+	}
+
+	void Emulator::ArchSetHeldKey(int row, int col, bool down) {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		if (!core || row < 0 || col < 0)
+			return;
+		// Idempotent host/plugin boundary: only the first down (and first up)
+		// for a given level reaches the plugin. Re-asserting an already-held
+		// key must not generate a new press edge.
+		{
+			std::lock_guard<std::mutex> lock(arch_held_mx);
+			const auto key = std::make_pair(row, col);
+			if (down) {
+				if (!arch_held_keys.insert(key).second)
+					return; // already held -> no new key_down
+			} else {
+				if (arch_held_keys.erase(key) == 0)
+					return; // not held -> no new key_up
+			}
+		}
+		if (ArchHeldKeyFn fn = down ? arch_key_down_fn : arch_key_up_fn)
+			fn(core, row, col);
+	}
+
+	void Emulator::ArchTapKey(int row, int col) {
+		// The plugin's raw matrix bridge performs down + deferred up plus enough
+		// run slices for the OS scanner. It is self-releasing and does not touch
+		// other held levels, so repeated taps cannot be swallowed by the host's
+		// idempotence set.
+		if (IEmulatorCore* core = arch_core.load(std::memory_order_acquire))
+			if (arch_key_matrix_fn && row >= 0 && col >= 0)
+				arch_key_matrix_fn(core, row, col);
+	}
+
+	void Emulator::ArchReleaseAllHeldKeys() {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		{
+			std::lock_guard<std::mutex> lock(arch_held_mx);
+			arch_held_keys.clear(); // all levels are released at the core too
+		}
+		if (core && arch_release_all_fn)
+			arch_release_all_fn(core);
+	}
+
+	bool Emulator::ArchReadFramebufferRGBA(unsigned char* out, int outLen) {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		return core && arch_framebuffer_fn && arch_framebuffer_fn(core, out, outLen) != 0;
+	}
+
+	void Emulator::ArchPowerOn() {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		if (core && arch_power_on_fn)
+			arch_power_on_fn(core);
+	}
+
+	void Emulator::ArchReboot() {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		if (core && arch_reboot_fn)
+			arch_reboot_fn(core);
+	}
+
+	void Emulator::ArchEnterDiag(int mode) {
+		IEmulatorCore* core = arch_core.load(std::memory_order_acquire);
+		if (core && arch_enter_diag_fn)
+			arch_enter_diag_fn(core, mode);
 	}
 
 	Emulator::~Emulator() {
@@ -786,9 +952,14 @@ namespace casioemu {
 		// fall through to the normal handler; only calculator input is consumed.
 		if (IEmulatorCore* core = arch_core.load()) {
 			if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+				const bool down = event.type == SDL_KEYDOWN;
 				const ArchKey key = ArchKeyFromSdl(event.key.keysym.sym);
 				if (key != ArchKey::None)
-					core->Key(key, event.type == SDL_KEYDOWN);
+					core->Key(key, down);
+				// Highlight the matching on-screen key. Ignore auto-repeat
+				// keydowns so the release does not leave a stale overlay.
+				if (!event.key.repeat)
+					SetButtonHighlightBySdlKey(static_cast<int>(event.key.keysym.sym), down);
 				return;
 			}
 			if (event.type == SDL_MOUSEBUTTONDOWN) {
@@ -799,7 +970,13 @@ namespace casioemu {
 					my = (int)(my * (float)interface_background.dest.h / emu_rect.h);
 					int row = 0, col = 0;
 					if (ArchHitButton(ModelDefinition, mx, my, row, col)) {
-						if (arch_key_matrix_fn)
+						SetButtonHighlight((row << 4) | col, true);
+						if (ArchIsPowerButton(ModelDefinition, mx, my)) {
+							// ON: hardware wake only, no getkey (AC stays matrix).
+							if (arch_power_on_fn)
+								arch_power_on_fn(core);
+						}
+						else if (arch_key_matrix_fn)
 							arch_key_matrix_fn(core, row, col);
 						else
 							core->Key(ArchKey::EXE, true);
@@ -807,8 +984,16 @@ namespace casioemu {
 				}
 				return;
 			}
-			if (event.type == SDL_MOUSEBUTTONUP)
+			if (event.type == SDL_MOUSEBUTTONUP) {
+				if (emu_rect.w > 0 && emu_rect.h > 0) {
+					int mx = (int)((event.button.x - emu_rect.x) * (float)interface_background.dest.w / emu_rect.w);
+					int my = (int)((event.button.y - emu_rect.y) * (float)interface_background.dest.h / emu_rect.h);
+					int row = 0, col = 0;
+					if (ArchHitButton(ModelDefinition, mx, my, row, col))
+						SetButtonHighlight((row << 4) | col, false);
+				}
 				return;
+			}
 		}
 		switch (event.type) {
 		case SDL_MOUSEBUTTONDOWN:
@@ -841,11 +1026,33 @@ namespace casioemu {
 			return;
 		composite_dirty.store(true, std::memory_order_release);
 		if (IEmulatorCore* core = arch_core.load()) {
+			// Track the pressed key for the dark overlay (board models have no
+			// Keyboard::Frame()). Remember the exact rect on press so releasing
+			// after dragging off the key still clears the right highlight.
+			if (down) {
+				Rect rect{};
+				if (ArchHitButtonRect(ModelDefinition, model_x, model_y, rect)) {
+					mouse_highlight_rect = rect;
+					mouse_highlight_active = true;
+					AddButtonHighlight(rect);
+				}
+			}
+			else {
+				if (mouse_highlight_active) {
+					RemoveButtonHighlight(mouse_highlight_rect);
+					mouse_highlight_active = false;
+				}
+			}
 			if (!down)
 				return;
 			int row = 0, col = 0;
 			if (ArchHitButton(ModelDefinition, model_x, model_y, row, col)) {
-				if (arch_key_matrix_fn)
+				if (ArchIsPowerButton(ModelDefinition, model_x, model_y)) {
+					// ON: hardware wake only, no getkey.
+					if (arch_power_on_fn)
+						arch_power_on_fn(core);
+				}
+				else if (arch_key_matrix_fn)
 					arch_key_matrix_fn(core, row, col);
 				else
 					core->Key(ArchKey::EXE, true);
@@ -861,6 +1068,46 @@ namespace casioemu {
 		event.button.x = model_x;
 		event.button.y = model_y;
 		chipset.UIEvent(event);
+	}
+
+	std::vector<Rect> Emulator::GetPressedButtonRects() const {
+		const std::lock_guard<std::mutex> lock(pressed_rect_mx);
+		return pressed_button_rects;
+	}
+
+	void Emulator::AddButtonHighlight(const Rect& rect) {
+		const std::lock_guard<std::mutex> lock(pressed_rect_mx);
+		pressed_button_rects.push_back(rect);
+	}
+
+	void Emulator::RemoveButtonHighlight(const Rect& rect) {
+		const std::lock_guard<std::mutex> lock(pressed_rect_mx);
+		for (auto it = pressed_button_rects.begin(); it != pressed_button_rects.end(); ++it) {
+			if (it->x == rect.x && it->y == rect.y && it->w == rect.w && it->h == rect.h) {
+				pressed_button_rects.erase(it);
+				return;
+			}
+		}
+	}
+
+	void Emulator::SetButtonHighlight(int kiko, bool pressed) {
+		Rect rect{};
+		if (!ArchButtonRectByKiko(ModelDefinition, kiko, rect))
+			return;
+		if (pressed)
+			AddButtonHighlight(rect);
+		else
+			RemoveButtonHighlight(rect);
+	}
+
+	void Emulator::SetButtonHighlightBySdlKey(int sdlKey, bool pressed) {
+		Rect rect{};
+		if (!ArchButtonRectBySdlKey(ModelDefinition, sdlKey, rect))
+			return;
+		if (pressed)
+			AddButtonHighlight(rect);
+		else
+			RemoveButtonHighlight(rect);
 	}
 
 	void Emulator::RunStartupScript() {
@@ -1214,11 +1461,13 @@ namespace casioemu {
 
 	void Emulator::Tick() {
 		// A plugin architecture core must never touch the built-in chipset: its
-		// peripherals were never initialised for this model. Pace the SH4 core to
-		// ~60 slices/sec (one cg100_run() per 16 ms) like the original host loop.
+		// peripherals were never initialised for this model. The old 16 ms gate
+		// capped the SH4 core at ~30 M cycles/s; with the 200 MIPS CG100 budget
+		// only yield 1 ms between slices, so the core runs at full speed while
+		// access_mx is briefly released for the UI thread.
 		if (IEmulatorCore* core = arch_core.load()) {
 			const Uint32 now = SDL_GetTicks();
-			if (now - last_arch_tick_ms >= 16) {
+			if (now - last_arch_tick_ms >= 1) {
 				last_arch_tick_ms = now;
 				core->Tick();
 			}
@@ -1285,6 +1534,16 @@ namespace casioemu {
 	}
 
 	void Emulator::ResetToMainMenu() {
+		// Architecture-core models (e.g. fx-CG100 / SH4) never set up the
+		// built-in chipset, so chipset.Reset() below would touch uninitialised
+		// state and leave the calculator apparently unchanged. Reboot through
+		// the core so it restarts from its reset vector. This single guard
+		// covers every ResetToMainMenu() caller (Settings/Run state, Shell,
+		// Wiz toolchain, Ui) without changing behaviour for built-in models.
+		if (HasArchitectureCore()) {
+			ArchReboot();
+			return;
+		}
 		// Stop the worker between two instructions, reset the chipset and let the
 		// CPU boot again.  The user keeps every debugger window; only the
 		// emulated calculator goes back to its home screen.

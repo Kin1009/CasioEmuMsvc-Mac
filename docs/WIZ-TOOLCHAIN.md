@@ -21,8 +21,10 @@ The window follows the Rop Compiler: a menu bar, a chooser row, two columns and 
 - **Target** — which calculator to build for. It is selected from the model that is running
   (`fx-880BTG` → `880`, `fx-580VN X` → `580`); you can override it:
   `880 fx-880BTG`, `580 fx-580VN X`, or `580 app (firmware patch)`.
-- **Language** — `Auto (by file name)`, `Wiz (.wz)` or `CWiz (.cwiz)`. `Auto` picks CWiz for a
-  name ending in `.cwiz` and Wiz otherwise.
+- **Language** — `Auto (by file name)`, `Wiz (.wz)`, `CWiz (.cwiz)`, or direct `RSC / RAC (.rsc)`. `Auto` picks CWiz for a
+  name ending in `.cwiz`, direct RAC for `.rsc`, and Wiz otherwise. RSC mode
+  sends the source to the external RAC compiler unchanged; it does not
+  regenerate or wrap the file as CWiz.
 - **File** — the name used for the diagnostics, the on-disk copy and the `#include` path.
 - **Build** — compile, write `wiz/<name>.bin`, `wiz/<name>.asm` and the source next to the
   model (a `wiz/` directory beside the ROM), and log the ROM bytes and the RAM used.

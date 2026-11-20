@@ -4,6 +4,7 @@
 #include "Gui/ThemeManager.h"
 #include "Gui/Editors.h"
 #include "Gui/WizToolchain.h"
+#include "Gui/Cg100CoreInfo.hpp"
 #include "Gui/Ui.hpp"
 #include "Gui/ToolUi.hpp"
 #include "Plugin/PluginMan.h"
@@ -687,7 +688,7 @@ bool IsKnownTextExtension(const std::string& ext) {
 	// Fast path: source and project formats are accepted without a read.  The
 	// content sniff below handles every other extension, extensionless files
 	// and dotfiles such as .gitignore.
-	static const char* const extensions[] = { ".wz", ".cwiz", ".cwapplink", ".c", ".h", ".hpp",
+	static const char* const extensions[] = { ".wz", ".cwiz", ".rsc", ".cwapplink", ".c", ".h", ".hpp",
 		".hh", ".hxx", ".cpp", ".cc", ".cxx", ".m", ".mm", ".txt", ".md", ".markdown", ".json",
 		".jsonc", ".json5", ".lua", ".ini", ".cfg", ".conf", ".asm", ".s", ".inc", ".py",
 		".sh", ".zsh", ".bash", ".bat", ".ps1", ".toml", ".yaml", ".yml", ".xml", ".html",
@@ -1022,8 +1023,8 @@ std::string TargetLabelForIndex(int index) {
 }
 
 std::string LanguageNameForIndex(int index) {
-	static const char* names[] = { "Auto", "Wiz", "CWiz" };
-	return names[std::clamp(index, 0, 2)];
+	static const char* names[] = { "Auto", "Wiz", "CWiz", "RSC / RAC" };
+	return names[std::clamp(index, 0, 3)];
 }
 
 void SaveFileDocument(FileDocument& doc, const std::string& path = std::string());
@@ -1083,7 +1084,7 @@ void RenderEditorExampleTree(const std::filesystem::path& dir) {
 			dirs.push_back(it->path());
 		else if (it->is_regular_file(ec)) {
 			const std::string ext = it->path().extension().string();
-			if (ext == ".wz" || ext == ".cwiz" || ext == ".cwapplink")
+			if (ext == ".wz" || ext == ".cwiz" || ext == ".rsc" || ext == ".cwapplink")
 				files.push_back(it->path());
 		}
 	}
@@ -1230,7 +1231,7 @@ void TransferDocumentToToolchain(FileDocument& doc) {
 	}
 	else {
 		wiz->SetEditorTarget(TargetNameForIndex(doc.targetIndex));
-		wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : "auto"));
+		wiz->SetEditorLanguage(doc.languageIndex == 1 ? "wiz" : (doc.languageIndex == 2 ? "cwiz" : (doc.languageIndex == 3 ? "rsc" : "auto")));
 	}
 	wiz->SetEditorRopPadding(doc.ropPadding);
 	wiz->SetEditorOriginalRom(doc.originalRomPath);
@@ -1507,6 +1508,7 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 		buffer << input.rdbuf();
 		const std::string ext = LowerExtension(path);
 		const bool cwiz_source = ext == ".cwiz";
+		const bool rsc_source = ext == ".rsc";
 		doc->savedText = buffer.str();
 		doc->editor.SetLanguageDefinition(MakeToolchainLanguage(cwiz_source));
 		doc->editor.SetPalette(ThemeManager::Instance().IsDarkMode()
@@ -1516,10 +1518,12 @@ void OpenFileInEditor(const std::filesystem::path& path) {
 		doc->observedText = doc->savedText;
 		// Auto-detection by extension: .wz is Wiz, .cwiz is CWiz.  Auto remains
 		// for untitled/other text documents.
-		doc->languageIndex = ext == ".wz" ? 1 : (ext == ".cwiz" ? 2 : 0);
+		doc->languageIndex = ext == ".wz" ? 1 : (ext == ".cwiz" ? 2 : (rsc_source ? 3 : 0));
 		// Pick the target from the live model so a .wz on an fx-880BTG builds for
 		// the 880 chip instead of silently using the 580 default.
 		doc->targetIndex = (m_emu && m_emu->hardware_id == casioemu::HW_CLASSWIZ_II) ? 0 : 1;
+		if (rsc_source)
+			doc->targetIndex = 3; // 580 ROP / direct RAC source
 		if (doc->languageIndex != 0 || IsCwappLinkPath(path)) {
 			const auto record = OriginalRomRecordPath();
 			std::error_code record_ec;
@@ -1596,8 +1600,12 @@ void RebuildSessionMemoryWindows() {
 			++index;
 		}
 	}
-	for (auto* editor : GetEditors())
-		windows.push_back(editor);
+	// CG100's raw flash is owned by the SH4 plugin; the nX-layout ROM/RAM/All
+	// editors would be empty and misleading. The repopulated Memory tab is the
+	// CG100 flash/FAT12 viewer instead.
+	if (!casioemu::cg100info::IsActive())
+		for (auto* editor : GetEditors())
+			windows.push_back(editor);
 	g.toolIndex = std::clamp(g.toolIndex, 0, std::max(0, static_cast<int>(ToolWindows().size()) - 1));
 	g.lastToolIndex = -1;
 }
@@ -2494,7 +2502,7 @@ void RenderCalculatorPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size)
 
 bool IsWizDocument(const FileDocument& doc) {
 	return IsCwappLinkPath(doc.path) || LowerExtension(doc.path) == ".wz" ||
-		LowerExtension(doc.path) == ".cwiz";
+		LowerExtension(doc.path) == ".cwiz" || LowerExtension(doc.path) == ".rsc";
 }
 
 void FindInDocument(FileDocument& doc) {
@@ -2755,7 +2763,7 @@ void RenderFileEditor(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::SetNextItemWidth(86.0f);
 		ImGui::BeginDisabled(project);
 		if (ImGui::BeginCombo("##editor_language", LanguageNameForIndex(doc.languageIndex).c_str())) {
-			for (int index = 0; index < 3; ++index) {
+			for (int index = 0; index < 4; ++index) {
 				if (ImGui::Selectable(LanguageNameForIndex(index).c_str(), index == doc.languageIndex))
 					doc.languageIndex = index;
 			}
@@ -3284,13 +3292,18 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		ImGui::ColorConvertFloat4ToU32(palette.surface));
 
 	const char* tabs[] = { L("Shell.Output", "Output"), L("Shell.Problems", "Problems"), L("Shell.Terminal", "Terminal"), L("Shell.WizOutput", "Wiz Output") };
+	// Wiz Output belongs to the 580/880 CWiz toolchain. A CG100 SH4 session
+	// has no Wiz toolchain, so the fourth bottom-panel tab is hidden there.
+	const int tab_count = casioemu::cg100info::IsActive() ? 3 : 4;
+	if (g.panelTab >= tab_count)
+		g.panelTab = 0;
 	const bool compact_panel = size.x < 620.0f;
 	const float close_width = compact_panel ? 26.0f : 70.0f;
 	const float tab_pad = compact_panel ? 16.0f : 26.0f;
 	const float tabs_limit = pos.x + size.x - close_width - 8.0f;
 	float x = pos.x + 12.0f;
 	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(tabs_limit, pos.y + kPanelHeaderHeight), true);
-	for (int index = 0; index < 4; ++index) {
+	for (int index = 0; index < tab_count; ++index) {
 		const float width = TextWidth(tabs[index]) + tab_pad +
 			((index == 1 && !g.problems.empty()) ? 34.0f : 0.0f);
 		ImGui::SetCursorScreenPos(ImVec2(x, pos.y));
@@ -4533,10 +4546,13 @@ bool WriteLayoutReport(const std::string& path) {
 		if (display == "Injection")
 			injection_label_present = true;
 	}
+	// CG100 intentionally hides the nX-only raw-memory and ROP/Payload tabs.
+	const bool cg100_tool_session = casioemu::cg100info::IsActive();
 	check(!settings_duplicated, "Settings is not duplicated in the tool-document strip");
-	check(raw_memory_tabs, "ROM/RAM/All tool tabs are present for a running model");
+	check(raw_memory_tabs || cg100_tool_session, "ROM/RAM/All tool tabs are present for a running model");
 	check(!plugin_manager_tab, "no duplicate Plugins entry in the tool strip");
-	check(!injection_label_present && rop_label_present, "Injection tab is labelled Rop Compiler");
+	check((!injection_label_present && rop_label_present) || cg100_tool_session,
+		"Injection tab is labelled Rop Compiler");
 	output << "panel_tabs=Output,Problems,Terminal\n";
 
 	check(std::fabs((g.rectTitle.y + g.rectTitle.w) - g.rectTabs.y) < eps, "chrome/tab strip do not overlap");
