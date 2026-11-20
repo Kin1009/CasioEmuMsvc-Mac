@@ -32,19 +32,38 @@ void PluginLogWindow::RenderInstalled() {
 	auto& entries = registry.Entries();
 
 	ToolUi::Section("Plugins");
-	ToolUi::Description("Themes, injectors, tools and native plugins.");
+	ToolUi::Description("Only .plugin packages are accepted. Native dylibs must be embedded inside a .plugin (ZIP) package.");
 	ImGui::Spacing();
 	{
 		ToolUi::PanelScope panel("##plugin_actions");
-		if (ToolUi::AccentButton("Install Plugin..."))
-			registry.InstallFromDialog();
+		if (ToolUi::AccentButton("Install .plugin...")) {
+			std::string error;
+			if (registry.InstallFromDialog(&error))
+				m_status = "Installed .plugin package.";
+			else
+				m_status = "Install failed: " + (error.empty() ? std::string("no file selected") : error);
+		}
 		ImGui::SameLine();
 		if (ImGui::Button("Open Plugins Folder"))
 			registry.OpenPluginsFolder();
 		ImGui::SameLine();
+		if (ImGui::Button("Reload")) {
+			registry.Reload();
+			m_status = "Plugin folders re-scanned.";
+		}
+		ImGui::SameLine();
 		if (ImGui::Button("Reload Declarative"))
 			registry.ReloadDeclarative();
-		ToolUi::Hint("Or copy a .plugin into the plugins folder.");
+		ToolUi::Hint("Plugins are stored inside the app bundle (Contents/MacOS/plugins). Installed packages may be a ZIP container with embedded dylibs.");
+		if (!m_status.empty()) {
+			ImGui::Spacing();
+			const bool failed = m_status.find("failed") != std::string::npos ||
+				m_status.find("Failed") != std::string::npos;
+			ImGui::PushStyleColor(ImGuiCol_Text,
+				failed ? ToolUi::Palette().error : ToolUi::Palette().success);
+			ImGui::TextWrapped("%s", m_status.c_str());
+			ImGui::PopStyleColor();
+		}
 	}
 
 	ToolUi::Section("Installed Plugins");
@@ -91,6 +110,17 @@ void PluginLogWindow::RenderInstalled() {
 
 			ImGui::TableSetColumnIndex(2);
 			ImGui::TextUnformatted(entry.package.valid ? casioemu::plugin::TypeName(entry.package.manifest.type) : "invalid");
+			if (entry.zipContainer) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("[ZIP]");
+				if (ImGui::IsItemHovered() && !entry.embeddedDylibs.empty()) {
+					ImGui::BeginTooltip();
+					ImGui::TextUnformatted("Embedded dylibs:");
+					for (const auto& dylib : entry.embeddedDylibs)
+						ImGui::BulletText("%s", dylib.c_str());
+					ImGui::EndTooltip();
+				}
+			}
 
 			ImGui::TableSetColumnIndex(3);
 			ImGui::PushStyleColor(ImGuiCol_Text, entry.state == "Loaded" ? ToolUi::Palette().success
@@ -219,11 +249,12 @@ void PluginLogWindow::RenderRemovePopup() {
 	ToolUi::DialogScope dialog("Remove plugin?###plugin_remove", "Remove plugin", 460.0f);
 	if (!dialog)
 		return;
-	ImGui::TextWrapped("Remove plugin '%s'? The package cache and trust record are deleted. The original .plugin file is not touched.",
+	ImGui::TextWrapped("Remove plugin '%s'? Its extracted package cache, trust record and the .plugin file in the app's plugins folder are deleted. This cannot be undone.",
 		m_removeId.c_str());
 	ImGui::Spacing();
 	if (ToolUi::AccentButton("Remove", ImVec2(120, 0))) {
 		casioemu::plugin::PluginRegistry::Instance().Remove(m_removeId);
+		m_status = "Removed " + m_removeId + ".";
 		m_removeId.clear();
 		ImGui::CloseCurrentPopup();
 	}

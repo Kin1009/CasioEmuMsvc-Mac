@@ -11,6 +11,7 @@ public:
 
 private:
 	std::string m_removeId;
+	std::string m_status;
 	bool m_openRemovePopup = false;
 	void RenderInstalled();
 	void RenderDeveloper();

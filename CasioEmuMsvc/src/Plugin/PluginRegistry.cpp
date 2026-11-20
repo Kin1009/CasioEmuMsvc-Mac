@@ -65,11 +65,71 @@ std::string JoinPermissions(const std::vector<std::string>& permissions) {
 	return result;
 }
 
-bool HasPluginExtension(const std::filesystem::path& path) {
-	std::string extension = path.extension().string();
-	std::transform(extension.begin(), extension.end(), extension.begin(),
+bool HasPluginExtension(const std::string& extension) {
+	std::string lowered = extension;
+	std::transform(lowered.begin(), lowered.end(), lowered.begin(),
 		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	return extension == ".plugin";
+	return lowered == ".plugin";
+}
+
+bool HasPluginExtension(const std::filesystem::path& path) {
+	return HasPluginExtension(path.extension().string());
+}
+
+// Install target: prefer the .app bundle's plugins folder. If the bundle is
+// read-only (signed/notarized .app), fall back to the user plugin folder.
+std::filesystem::path WritableInstallDir(const std::filesystem::path& appDir,
+	const std::filesystem::path& userDir) {
+	std::error_code ec;
+	std::filesystem::create_directories(appDir, ec);
+	if (!ec) {
+		const auto probe = appDir / ".write_probe";
+		std::ofstream stream(probe, std::ios::binary);
+		if (stream.good()) {
+			stream.close();
+			std::filesystem::remove(probe, ec);
+			return appDir;
+		}
+	}
+	return userDir;
+}
+
+bool IsInsideDirectory(const std::filesystem::path& file, const std::filesystem::path& directory) {
+	std::error_code ec;
+	const auto file_canonical = std::filesystem::weakly_canonical(file, ec);
+	if (ec)
+		return false;
+	const auto dir_canonical = std::filesystem::weakly_canonical(directory, ec);
+	if (ec)
+		return false;
+	const auto file_string = file_canonical.string();
+	const auto dir_string = dir_canonical.string();
+	return file_string.size() > dir_string.size() &&
+		file_string.compare(0, dir_string.size(), dir_string) == 0 &&
+		file_string[dir_string.size()] == std::filesystem::path::preferred_separator;
+}
+
+// Files embedded in a .plugin ZIP container that are actual Mach-O dylibs.
+std::vector<std::string> FindEmbeddedDylibs(const std::filesystem::path& root) {
+	std::vector<std::string> result;
+	std::error_code ec;
+	if (!std::filesystem::is_directory(root, ec))
+		return result;
+	for (auto& item : std::filesystem::recursive_directory_iterator(root, ec)) {
+		if (ec)
+			break;
+		std::error_code file_ec;
+		if (!item.is_regular_file(file_ec))
+			continue;
+		const std::string ext = item.path().extension().string();
+		if (ext == ".dylib" || ext == ".plugin" || ext == ".so") {
+			const auto relative = std::filesystem::relative(item.path(), root, file_ec);
+			if (!file_ec)
+				result.push_back(relative.generic_string());
+		}
+	}
+	std::sort(result.begin(), result.end());
+	return result;
 }
 
 std::string TrustReason(const TrustEvaluation& evaluation) {
@@ -105,6 +165,21 @@ std::filesystem::path PluginRegistry::AppPluginsDir() const {
 }
 
 std::filesystem::path PluginRegistry::CacheDir() const {
+	// The .plugin container design keeps extracted runtime files INSIDE the
+	// .app bundle (Contents/MacOS/plugins/.cache/<sha256>/). If the bundle is
+	// mounted read-only, fall back to the per-user Application Support dir.
+	const std::filesystem::path in_app = AppPluginsDir() / ".cache";
+	std::error_code ec;
+	std::filesystem::create_directories(in_app, ec);
+	if (!ec) {
+		const auto probe = in_app / ".write_probe";
+		std::ofstream stream(probe, std::ios::binary);
+		if (stream.good()) {
+			stream.close();
+			std::filesystem::remove(probe, ec);
+			return in_app;
+		}
+	}
 	return SettingsDir() / "plugin-cache";
 }
 
@@ -204,7 +279,33 @@ void PluginRegistry::AddPackage(const std::filesystem::path& file) {
 	Package package;
 	ExtractPackage(file, CacheDir(), package);
 	entry.package = std::move(package);
+	if (entry.package.valid) {
+		// A .plugin is a ZIP container when ExtractPackage succeeded. Record
+		// any embedded dylibs so the UI can display them.
+		entry.zipContainer = true;
+		entry.embeddedDylibs = FindEmbeddedDylibs(entry.package.root);
+	}
 	if (!entry.package.valid) {
+		// Backward compatibility: a legacy plain-Mach-O .plugin is dlopen'd by
+		// the early architecture pass, not by the ZIP extractor. Reflect that
+		// in the UI instead of showing the working core as "Invalid".
+		if (::IsArchitectureModuleLoaded(file)) {
+			Manifest legacy;
+			legacy.id = "legacy." + file.stem().string();
+			legacy.name = file.stem().string();
+			legacy.version = "0.0.0";
+			legacy.type = PluginType::Tool;
+			entry.package.valid = true;
+			entry.package.manifest = std::move(legacy);
+			entry.package.file = file;
+			entry.state = "Loaded (arch core)";
+			entry.loaded = true;
+			entry.zipContainer = false;
+			LogLine("[INFO] " + file.filename().string() +
+				" is a legacy native module already loaded by the architecture pass");
+			m_entries.push_back(std::move(entry));
+			return;
+		}
 		entry.state = "Invalid";
 		entry.error = entry.package.code + ": " + entry.package.message;
 		LogLine("[ERROR] " + file.filename().string() + ": " + entry.error);
@@ -455,6 +556,16 @@ bool PluginRegistry::LoadNative(PluginEntry& entry) {
 		return false;
 
 	const std::filesystem::path library = entry.package.root / entry.package.manifest.nativeEntry;
+	// The early architecture pass may already have dlopen'd this exact dylib
+	// (and called fPluginLoadArch). Loading it again would call fPluginLoad a
+	// second time, so just mark the entry as loaded.
+	if (::IsArchitectureModuleLoaded(library)) {
+		entry.loaded = true;
+		entry.state = "Loaded (arch core)";
+		entry.error.clear();
+		LogLine("[INFO] " + entry.Id() + ": native module already loaded by the architecture pass");
+		return true;
+	}
 	std::error_code ec;
 	if (!std::filesystem::exists(library, ec)) {
 		entry.state = "Error";
@@ -767,6 +878,20 @@ void PluginRegistry::Remove(const std::string& id) {
 			std::error_code ec;
 			if (!entry.package.root.empty())
 				std::filesystem::remove_all(entry.package.root, ec);
+			// Delete the source .plugin package as well, but only when it lives
+			// inside one of the recognised plugin folders. This makes "Remove"
+			// permanent instead of the package reappearing on the next scan.
+			const auto source = entry.package.file;
+			if (!source.empty() &&
+				(IsInsideDirectory(source, AppPluginsDir()) ||
+				 IsInsideDirectory(source, UserPluginsDir()) ||
+				 IsInsideDirectory(source, ExecutableDir() / ".." / "Resources" / "plugins"))) {
+				std::error_code remove_ec;
+				if (std::filesystem::remove(source, remove_ec))
+					LogLine("[INFO] Removed plugin package " + source.filename().string());
+				else if (remove_ec)
+					LogLine("[WARN] Cannot remove plugin package: " + remove_ec.message());
+			}
 			ClearPluginPayloads(id);
 			ClearPluginResources(id);
 			m_entries.erase(it);
@@ -805,9 +930,10 @@ void PluginRegistry::RevealPath(const std::filesystem::path& path) const {
 }
 
 void PluginRegistry::OpenPluginsFolder() const {
+	const std::filesystem::path target = WritableInstallDir(AppPluginsDir(), UserPluginsDir());
 	std::error_code ec;
-	std::filesystem::create_directories(UserPluginsDir(), ec);
-	std::system(("open \"" + UserPluginsDir().string() + "\" >/dev/null 2>&1").c_str());
+	std::filesystem::create_directories(target, ec);
+	std::system(("open \"" + target.string() + "\" >/dev/null 2>&1").c_str());
 }
 
 bool PluginRegistry::InstallFromFile(const std::filesystem::path& file, std::string* error) {
@@ -824,8 +950,11 @@ bool PluginRegistry::InstallFromFile(const std::filesystem::path& file, std::str
 	if (!HasPluginExtension(file))
 		return fail("Not a .plugin package: " + file.filename().string());
 
-	std::filesystem::create_directories(UserPluginsDir(), ec);
-	const std::filesystem::path destination = UserPluginsDir() / file.filename();
+	const std::filesystem::path target_dir = WritableInstallDir(AppPluginsDir(), UserPluginsDir());
+	if (target_dir == UserPluginsDir())
+		LogLine("[WARN] .app plugins folder is read-only; installing to the user plugin folder instead");
+	std::filesystem::create_directories(target_dir, ec);
+	const std::filesystem::path destination = target_dir / file.filename();
 	if (std::filesystem::exists(destination, ec))
 		return fail("A plugin with this filename already exists: " + destination.filename().string());
 
@@ -851,13 +980,25 @@ bool PluginRegistry::InstallFromFile(const std::filesystem::path& file, std::str
 	return true;
 }
 
-void PluginRegistry::InstallFromDialog() {
+bool PluginRegistry::InstallFromDialog(std::string* error) {
 	std::string selected;
-	if (!Host().PickPluginFile(selected))
-		return;
-	std::string error;
-	if (!InstallFromFile(selected, &error))
-		LogLine("[ERROR] Install failed: " + error);
+	if (!Host().PickPluginFile(selected)) {
+		if (error)
+			*error = "No file selected";
+		return false;
+	}
+	bool ok = InstallFromFile(selected, error);
+	if (!ok && error)
+		LogLine("[ERROR] Install failed: " + *error);
+	return ok;
+}
+
+void PluginRegistry::Reload() {
+	LogLine("[INFO] Reloading plugin folders");
+	ScanDirectory(AppPluginsDir());
+	ScanDirectory(UserPluginsDir());
+	ScanDirectory(ExecutableDir() / ".." / "Resources" / "plugins");
+	SaveTrust();
 }
 
 int PluginRegistry::FirstPendingIndex() const {

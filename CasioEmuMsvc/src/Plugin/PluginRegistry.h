@@ -31,6 +31,10 @@ struct PluginEntry {
 	std::string state = "Discovered";
 	std::string error;
 	std::string document;
+	// .plugin container info (populated when an installed package is a ZIP).
+	bool zipContainer = false;
+	// Dylibs embedded in a .plugin container (relative to package.root).
+	std::vector<std::string> embeddedDylibs;
 
 	[[nodiscard]] bool IsNative() const { return package.manifest.IsNative(); }
 	[[nodiscard]] const std::string& Id() const { return package.manifest.id; }
@@ -51,12 +55,18 @@ public:
 	void PumpFrame();
 	void RenderTrustModal();
 
-	// Copies `file` into the user plugin folder and loads it immediately.
-	// Returns false and fills `error` on invalid input.
+	// Copies `file` inside the .app bundle's plugins folder (with a read-only
+	// bundle fallback to the user plugin folder) and loads it immediately.
+	// Only *.plugin packages are accepted. Returns false and fills `error` on
+	// invalid input.
 	bool InstallFromFile(const std::filesystem::path& file, std::string* error = nullptr);
-	// Opens a native file chooser and installs the selected package.
-	void InstallFromDialog();
+	// Opens a native file chooser (*.plugin only) and installs the selected
+	// package. Returns false and fills `error` when installation fails.
+	bool InstallFromDialog(std::string* error = nullptr);
 
+	// Re-scans the plugin folders for newly added .plugin packages and adds
+	// them without unloading already-installed plugins.
+	void Reload();
 	void ReloadDeclarative();
 	void SetEnabled(const std::string& id, bool enabled);
 	void Remove(const std::string& id);

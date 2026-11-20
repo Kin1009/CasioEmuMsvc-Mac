@@ -1,9 +1,15 @@
 ﻿#include "PluginApi.h"
 #include "PluginMan.h"
+#include "PluginPackage.h"
+#include "PluginRegistry.h"
 #include <iostream>
 #include <fstream>
+#include <cctype>
 #include <filesystem>
 #include <vector>
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/stat.h>
+#endif
 #if defined(__APPLE__)
 #include <SDL.h>
 #endif
@@ -52,17 +58,28 @@ casioemu::IArchitectureRegistry* GetArchitectureRegistry() {
 
 #if defined(__APPLE__) || defined(__linux__)
 namespace {
-	// Discover bare .plugin/.dylib/.so modules in CASIOEMU_PLUGINS_DIR and the
-	// bundle/cwd plugin folders. Only the early architecture pass uses this list;
-	// the new UI's PluginRegistry handles packaged plugins separately.
+	// Only *.plugin packages are accepted by the architecture pass -- raw
+	// *.dylib / *.so files are deliberately NOT discovered (the Plugin Manager
+	// accepts .plugin packages only). A .plugin is either a plain Mach-O dylib
+	// (legacy, still supported) or a ZIP container resolved by
+	// ResolvePluginNativeModule().
+	bool IsPluginPackageFile(const std::filesystem::directory_entry& entry) {
+		std::error_code ec;
+		if (!entry.is_regular_file(ec))
+			return false;
+		std::string ext = entry.path().extension().string();
+		for (char& c : ext)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return ext == ".plugin";
+	}
+
 	std::vector<std::filesystem::path> FindArchPluginModules() {
 		std::vector<std::filesystem::path> candidates;
 		const char* envDir = std::getenv("CASIOEMU_PLUGINS_DIR");
 		if (envDir && *envDir) {
 			std::error_code ec;
 			for (auto& e : std::filesystem::directory_iterator(envDir, ec)) {
-				auto ext = e.path().extension().string();
-				if (ext == ".plugin" || ext == ".dylib" || ext == ".so")
+				if (IsPluginPackageFile(e))
 					candidates.push_back(e.path());
 			}
 		}
@@ -75,8 +92,7 @@ namespace {
 				std::filesystem::path p = std::filesystem::path(exe_dir) / rel;
 				if (!std::filesystem::exists(p, ec)) continue;
 				for (auto& e : std::filesystem::directory_iterator(p, ec)) {
-					auto ext = e.path().extension().string();
-					if (ext == ".plugin" || ext == ".dylib" || ext == ".so")
+					if (IsPluginPackageFile(e))
 						candidates.push_back(e.path());
 				}
 			}
@@ -87,8 +103,7 @@ namespace {
 			std::error_code ec;
 			if (!std::filesystem::exists(base, ec)) continue;
 			for (auto& e : std::filesystem::directory_iterator(base, ec)) {
-				auto ext = e.path().extension().string();
-				if (ext == ".plugin" || ext == ".dylib" || ext == ".so")
+				if (IsPluginPackageFile(e))
 					candidates.push_back(e.path());
 			}
 		}
@@ -100,6 +115,101 @@ namespace {
 		}
 		return unique;
 	}
+
+	bool HasZipMagic(const std::filesystem::path& file) {
+		std::ifstream input(file, std::ios::binary);
+		if (!input)
+			return false;
+		unsigned char magic[4]{};
+		input.read(reinterpret_cast<char*>(magic), sizeof(magic));
+		// PK\x03\x04 = normal archive, PK\x05\x06 = empty, PK\x07\x08 = spanned.
+		return magic[0] == 'P' && magic[1] == 'K' &&
+			((magic[2] == 3 && magic[3] == 4) ||
+			 (magic[2] == 5 && magic[3] == 6) ||
+			 (magic[2] == 7 && magic[3] == 8));
+	}
+
+	// miniz writes extracted files with the archive's stored mode (usually
+	// 0644). dyld needs an executable mapping for Mach-O images, so add the
+	// executable bits to every extracted file. Harmless for JSON assets.
+	void MakeExtractedFilesExecutable(const std::filesystem::path& root) {
+		std::error_code ec;
+		if (!std::filesystem::is_directory(root, ec))
+			return;
+		for (auto& item : std::filesystem::recursive_directory_iterator(root, ec)) {
+			if (ec)
+				break;
+			std::error_code file_ec;
+			if (!item.is_regular_file(file_ec))
+				continue;
+			const std::string path = item.path().string();
+			struct stat st{};
+			if (::stat(path.c_str(), &st) == 0)
+				::chmod(path.c_str(), static_cast<mode_t>(st.st_mode | 0111));
+		}
+	}
+
+	std::filesystem::path FindEmbeddedNativeModule(const casioemu::plugin::Package& package) {
+		// Prefer the manifest's native_entry, then fall back to any embedded
+		// Mach-O / dylib so a container missing native_entry still loads.
+		if (!package.manifest.nativeEntry.empty()) {
+			const auto preferred = package.root / package.manifest.nativeEntry;
+			std::error_code ec;
+			if (std::filesystem::is_regular_file(preferred, ec))
+				return preferred;
+		}
+		std::error_code ec;
+		for (auto& item : std::filesystem::recursive_directory_iterator(package.root, ec)) {
+			if (ec)
+				break;
+			std::error_code file_ec;
+			if (!item.is_regular_file(file_ec))
+				continue;
+			const std::string ext = item.path().extension().string();
+			if (ext == ".dylib" || ext == ".plugin" || ext == ".so")
+				return item.path();
+		}
+		return {};
+	}
+}
+
+std::filesystem::path ResolvePluginNativeModule(
+	const std::filesystem::path& pluginFile,
+	const std::filesystem::path& cacheDir,
+	std::string* error) {
+	const auto fail = [&](const std::string& message) -> std::filesystem::path {
+		g_PluginLoadLog += "[ARCH] " + message + "\n";
+		if (error)
+			*error = message;
+		return {};
+	};
+
+	std::error_code ec;
+	if (!std::filesystem::is_regular_file(pluginFile, ec))
+		return fail("not a plugin file: " + pluginFile.string());
+
+	// Legacy/plain format: a bare Mach-O dylib named *.plugin. Load it in place
+	// so the existing CG100SH4.plugin keeps working unchanged.
+	if (!HasZipMagic(pluginFile))
+		return pluginFile;
+
+	// ZIP container: metadata (plugin.json) + embedded dylib(s).
+	casioemu::plugin::Package package;
+	if (!casioemu::plugin::ExtractPackage(pluginFile, cacheDir, package)) {
+		return fail("cannot extract .plugin container " + pluginFile.filename().string() +
+			": " + package.code + ": " + package.message);
+	}
+
+	const std::filesystem::path native = FindEmbeddedNativeModule(package);
+	if (native.empty())
+		return fail(".plugin container has no native dylib: " + pluginFile.filename().string());
+
+	MakeExtractedFilesExecutable(package.root);
+	g_PluginLoadLog += "[ARCH] Extracted " + pluginFile.filename().string() +
+		" -> " + package.root.string() + "\n";
+	if (error)
+		error->clear();
+	return native;
 }
 #endif
 
@@ -202,17 +312,29 @@ void LoadPlugins() {}
 #include <dlfcn.h>
 void LoadArchitecturePlugins() {
 	g_PluginLoadLog += "[ARCH] Starting early architecture plugin pass\n";
+	const std::filesystem::path cacheDir = casioemu::plugin::PluginRegistry::Instance().CacheDir();
 	for (auto& path : FindArchPluginModules()) {
-		const std::string p = path.string();
-		void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
-		if (!h) {
-			g_PluginLoadLog += "[ARCH] dlopen failed: " + std::string(dlerror()) + "\n";
+		std::string error;
+		const std::filesystem::path module = ResolvePluginNativeModule(path, cacheDir, &error);
+		if (module.empty()) {
+			g_PluginLoadLog += "[ARCH] Skipped " + path.filename().string() +
+				(error.empty() ? std::string(" (no native module)") : ": " + error) + "\n";
 			continue;
 		}
+		const std::string p = module.string();
+		void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
+		if (!h) {
+			g_PluginLoadLog += "[ARCH] dlopen failed for " + p + ": " + std::string(dlerror()) + "\n";
+			continue;
+		}
+		MarkArchitectureModuleLoaded(module);
 		auto load = reinterpret_cast<PluginLoadArch>(dlsym(h, "fPluginLoadArch"));
 		if (load) {
 			load(g_pluginapi);
 			g_PluginLoadLog += "[ARCH] Registered via " + p + "\n";
+		}
+		else {
+			g_PluginLoadLog += "[ARCH] No fPluginLoadArch export in " + p + "\n";
 		}
 	}
 }
