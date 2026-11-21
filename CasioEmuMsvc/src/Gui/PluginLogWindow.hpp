@@ -1,4 +1,6 @@
 #pragma once
+// LEGACY: the plugin manager UI moved to Settings > Plugins (Gui/Theme.cpp).
+// This class is no longer instantiated or registered as a tool window.
 #include "Ui.hpp"
 #include <string>
 

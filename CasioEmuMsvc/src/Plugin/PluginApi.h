@@ -316,6 +316,13 @@ public:
 	// --- Appended at END of vtable. Do not insert above this line. ---
 	/// Convenience wrapper around
 	/// QueryInterface(CASIOEMU_ARCH_REGISTRY_NAME)->RegisterProvider().
+	///
+	/// Permission: an architecture/emulation provider declares the ADDITIVE
+	/// manifest permission "arch" (Capability::Arch).  The host's per-plugin
+	/// permission facade gates this call and the architecture-registry
+	/// QueryInterface on that capability; declaring `arch` does not remove or
+	/// replace ui.shell / filesystem / emulator permissions.  The host's
+	/// early fPluginLoadArch() bootstrap uses the ungated backend API.
 	[[nodiscard]] virtual bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) = 0;
 };
 

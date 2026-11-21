@@ -77,15 +77,25 @@ public:
 
 	void RenderCore() override {
 		if (!m_emu) {
-			ImGui::TextDisabled("The calculator is not running.");
+			// Center the empty-state hint vertically in the panel instead of
+			// clipping it against the very top edge (the docked panel's cursor
+			// starts under the title bar where a single line gets cut off).
+			const char* hint = "No calculator session. Start one from Welcome \xe2\x86\x92 All models.";
+			const ImVec2 area = ImGui::GetContentRegionAvail();
+			ImVec2 text_size = ImGui::CalcTextSize(hint);
+			const float wrap_width = area.x > 0.0f ? area.x : 320.0f;
+			if (wrap_width > 0.0f && text_size.x > wrap_width)
+				text_size = ImGui::CalcTextSize(hint, nullptr, false, wrap_width);
+			const float y_offset = (area.y > text_size.y) ? (area.y - text_size.y) * 0.5f : ImGui::GetTextLineHeight() * 4.0f;
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + y_offset);
+			ImGui::TextWrapped("%s", hint);
 			return;
 		}
 
 		float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
-		// The diag macro button adds one more controls line on arch-core
-		// sessions; reserve it so the Fit / zoom row stays inside the panel.
-		if (m_emu && m_emu->HasArchitectureCore())
-			footer += ImGui::GetFrameHeightWithSpacing();
+		// CG100 power/diagnostics buttons used to add one more controls line on
+		// arch-core sessions. They now live in the "CG100 Controls" session tab,
+		// so this panel only ever needs the single zoom/controls row.
 
 #ifdef SINGLE_WINDOW
 		// The whole calculator, as the external window used to render it.  Use
@@ -178,61 +188,10 @@ private:
 		}
 	}
 
-	// --- Genuine OS diag entry buttons (plugin/arch cores only) --------------
-	// These do NOT press keys. Each calls the plugin's state-configure+reboot
-	// export: the plugin patches REAL calculator state (mode 0: factory-blank
-	// flash model word 0x300 = FF FF FF FF; mode 1: exam marker erased and the
-	// boot key-combo held IN THE CORE), resets the CPU to the reset vector, and
-	// lets the OS itself enter diag on the next boot. No fake text is drawn and
-	// no diagnostic function is called from the host. The plugin holds/releases
-	// the in-core combo itself (via its normal Tick loop), so no UI key handling
-	// is involved at all.
-	void StartDiag(int mode) {
-		if (!m_emu || !m_emu->HasArchitectureCore())
-			return;
-		if (diag_cooldown_ && std::chrono::steady_clock::now() - diag_last_click_ <
-		                          std::chrono::milliseconds(1500))
-			return; // re-entry guard: do not interrupt an in-progress diag boot
-		diag_last_click_ = std::chrono::steady_clock::now();
-		diag_cooldown_ = true;
-		m_emu->ArchEnterDiag(mode);
-		diag_status_ = mode == 0
-			? "SERVICE diag: factory-blank 0x300, booting..."
-			: "FACTORY diag: combo held in-core, booting (auto-release after boot)...";
-	}
-
+	// CG100 power/diagnostics buttons (Reboot, SERVICE/FACTORY diag entry) now
+	// live in the dedicated "CG100 Controls" session tab. This panel keeps only
+	// zoom/display controls.
 	void DrawControls(int width, int height) {
-		if (m_emu && m_emu->HasArchitectureCore()) {
-			const bool diag_running = false; // calls are synchronous; guard is time-based
-			if (diag_running)
-				ImGui::BeginDisabled(); // cannot re-trigger while a diag boot is in progress
-			const bool svc_clicked = ImGui::Button("To diagnostics mode (SERVICE)");
-			const bool svc_tip = ImGui::IsItemHovered();
-			ImGui::SameLine();
-			const bool fac_clicked = ImGui::Button("To diagnostics mode (FACTORY)");
-			const bool fac_tip = ImGui::IsItemHovered();
-			if (diag_running)
-				ImGui::EndDisabled();
-			if (svc_clicked && !diag_running)
-				StartDiag(0); // factory-blank flash 0x300 -> service menu
-			if (fac_clicked && !diag_running)
-				StartDiag(1); // boot key-combo gate -> DIAGNOSTIC MODE
-			if (!diag_status_.empty()) {
-				ImGui::SameLine();
-				ImGui::TextUnformatted(diag_status_.c_str());
-			}
-			if (svc_tip)
-				ImGui::SetTooltip("Patches the factory-blank flash model word (0x300 = FF FF FF FF) and RESETs. The OS's own boot gate enters the [BaseROM MAIN] SERVICE menu (1.PATTERN 5.SERVICE / 4.VERSION ...). No keys, no fake output.");
-			if (fac_tip)
-				ImGui::SetTooltip("Erases the exam marker, RESETs, and holds AC + x10^x + ON IN THE CORE. The OS's own boot gate enters '=DIAGNOSTIC MODE= / Factory Use Only!'. The combo is released once the dialog appears; no UI keypresses or fake output.");
-			ImGui::SameLine();
-			const bool reboot_clicked = ImGui::Button("Reboot");
-			const bool reboot_tip = ImGui::IsItemHovered();
-			if (reboot_clicked)
-				m_emu->ArchReboot();
-			if (reboot_tip)
-				ImGui::SetTooltip("Physical RESET button: true CPU reset to the reset vector (0x80000000), then boot the OS fresh");
-		}
 		ImGui::Checkbox("Fit", &fit_);
 		ImGui::SameLine();
 		bool original = !fit_ && std::abs(zoom_ - 1.0f) < 0.001f;
@@ -288,10 +247,6 @@ private:
 	bool fit_ = true;
 	float zoom_ = 2.0f;
 	std::vector<uint8_t> frame_;
-
-	bool diag_cooldown_ = false;                 // re-entry guard for diag buttons
-	std::chrono::steady_clock::time_point diag_last_click_{};
-	std::string diag_status_;
 };
 
 UIWindow* CreateCalcScreenWindow() {

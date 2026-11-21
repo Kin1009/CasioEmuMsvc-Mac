@@ -1,0 +1,49 @@
+// rop/arrow_keys.cwiz — arrow-key direction detector.
+//
+// The high-level form of the hardware-verified program.  The emitter is
+// expected to reproduce its exact RAC source: `lbl start`, setlr_pc/setsfr,
+// the inline key slot, the `restore` block, the string terminators, the key
+// table and the trailing `lbl end / hex 00 00 00 00`.
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+#pad 4
+
+int k;
+
+void start() {
+    setlr_pc();
+    setsfr();
+
+read_input:
+    k = getscankey();
+    keytable(0x0480, up, 0x0840, down, 0x0440, left, 0x0880, right,
+             0x1004, exit, 0x0000, restore);
+
+up:
+    print(0x01, 0x01, "UP");
+    render();
+    goto restore;
+
+down:
+    print(0x01, 0x01, "DOWN");
+    render();
+    goto restore;
+
+left:
+    print(0x01, 0x01, "LEFT");
+    render();
+    goto restore;
+
+right:
+    print(0x01, 0x01, "RIGHT");
+    render();
+    goto restore;
+
+exit:
+    brk();
+
+restore:
+    restore();
+}

@@ -24,6 +24,7 @@ constexpr const char* kPermissionNames[] = {
 	"process",
 	"ui.shell",
 	"clipboard",
+	"arch",
 };
 
 constexpr const char* kPermissionDescriptions[] = {
@@ -37,6 +38,7 @@ constexpr const char* kPermissionDescriptions[] = {
 	"Spawn processes, including terminal shells.",
 	"Add or modify tabs, tools, layout, themes, or the shell.",
 	"Read or write the clipboard.",
+	"Register an architecture provider and define custom hardware IDs / model classes for emulated calculators.",
 };
 
 ManifestResult Fail(const std::string& code, const std::string& message) {
@@ -305,11 +307,44 @@ ManifestResult ParseManifest(const std::string& jsonText) {
 		}
 	}
 	for (const auto& platform : manifest.platforms) {
-		if (platform != "macos")
-			return Fail("manifest.platform", "only the 'macos' platform is supported");
+		if (!IsKnownOsTag(platform))
+			return Fail("manifest.platform", "unknown platform '" + platform +
+				"' (known: macos, linux, windows, android, any)");
 	}
 	if (manifest.platforms.empty())
 		manifest.platforms.push_back("macos");
+
+	// Additive platform tags (schema stays 1).  Both fields are optional;
+	// omitting them keeps the legacy single-binary native_entry behaviour.
+	if (document.contains("os_tags")) {
+		if (!document["os_tags"].is_array())
+			return Fail("manifest.os_tag", "os_tags must be an array");
+		for (const auto& value : document["os_tags"]) {
+			if (!value.is_string())
+				return Fail("manifest.os_tag", "os_tags must contain strings");
+			const std::string tag = value.get<std::string>();
+			if (!IsKnownOsTag(tag))
+				return Fail("manifest.os_tag", "unknown OS tag '" + tag +
+					"' (known: macos, linux, windows, android, any)");
+			if (!manifest.HasOsTag(tag))
+				manifest.osTags.push_back(tag);
+		}
+	}
+
+	if (document.contains("arch_tags")) {
+		if (!document["arch_tags"].is_array())
+			return Fail("manifest.arch_tag", "arch_tags must be an array");
+		for (const auto& value : document["arch_tags"]) {
+			if (!value.is_string())
+				return Fail("manifest.arch_tag", "arch_tags must contain strings");
+			const std::string tag = value.get<std::string>();
+			if (!IsKnownArchTag(tag))
+				return Fail("manifest.arch_tag", "unknown architecture tag '" + tag +
+					"' (known: x64, x32, arm64, arm64-android, any)");
+			if (!manifest.HasArchTag(tag))
+				manifest.archTags.push_back(tag);
+		}
+	}
 
 	if (document.contains("permissions")) {
 		if (!document["permissions"].is_array())
@@ -349,8 +384,9 @@ ManifestResult ParseManifest(const std::string& jsonText) {
 	}
 
 	const bool native_type = manifest.type == PluginType::Tab || manifest.type == PluginType::Tool;
-	if (native_type && manifest.nativeEntry.empty())
-		return Fail("manifest.field", "type '" + manifest.typeName + "' requires native_entry");
+	if (native_type && manifest.nativeEntry.empty() && !manifest.HasPlatformTaggedBinaries())
+		return Fail("manifest.field", "type '" + manifest.typeName +
+			"' requires native_entry or platform-tagged native binaries");
 	if (manifest.type == PluginType::Theme && !manifest.nativeEntry.empty())
 		return Fail("manifest.field", "theme plugins cannot include native code");
 	if (manifest.type == PluginType::Inject && !manifest.nativeEntry.empty())

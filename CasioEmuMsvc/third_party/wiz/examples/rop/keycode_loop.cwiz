@@ -1,0 +1,20 @@
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+#pad 4
+
+int kc;
+
+void main() {
+    screen_del();
+    while (1) {
+        setlr_pc();
+        setsfr();
+        kc = getscankey();
+        num_to_str(kc, 0xE000);
+        print_addr(0x30, 0x01, 0xE000);
+        render();
+        restore();
+    }
+}

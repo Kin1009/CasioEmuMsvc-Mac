@@ -1,0 +1,89 @@
+// Full CWiz port of rsc_ropchain/key_switch.rsc.
+// Core ROP instructions are native CWiz inline statements; only RAC literals
+// requiring exact bracket/string spelling remain quoted data/operations.
+#rop
+#for 580
+#org 0xe9e0
+#launcher common medium 0xe9e0 0xd730
+#nopad
+
+void main() {
+    asm {
+        lbl start;
+        setlr_pc;
+        setsfr;
+        lbl read_input;
+        er0 = adr(key);
+        getscancode;
+        setlr_pc;
+        ea = adr(table);
+        pop er0;
+        lbl key;
+        hex 00 00;
+        call 09C20;
+        call 1C64A;
+        sp = er6, pop er8;
+        lbl handle_key_1;
+        xr0 = hex 01 01, adr(text_a);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_key_2;
+        xr0 = hex 01 01, adr(text_b);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_key_3;
+        xr0 = hex 01 01, adr(text_c);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_exit;
+        brk;
+        lbl restore;
+        di, rt;
+        xr0 = 0xd730, 0xe9e0;
+        call 09451;
+        hex fe 01;
+        er14 = 0xd72e;
+        sp = er14, pop er14;
+        lbl text_a;
+        "\"A\"";
+        hex 00;
+        lbl text_b;
+        "\"B\"";
+        hex 00;
+        lbl text_c;
+        "\"C\"";
+        hex 00;
+        lbl table;
+        key_1;
+        eval(adr(handle_key_1) - 0x2);
+        key_2;
+        eval(adr(handle_key_2) - 0x2);
+        key_3;
+        eval(adr(handle_key_3) - 0x2);
+        key_ac;
+        eval(adr(handle_exit) - 0x2);
+        hex 00 00;
+        eval(adr(restore) - 0x2);
+        lbl end;
+        hex 00 00 00 00;
+    }
+}
+
+void launcher() {
+    asm {
+        hex fd 24 30 30;
+        setlr;
+        setsfr;
+        xr0 = 0xd730, 0xe9e0;
+        call 09451;
+        hex fe 01;
+        er14 = 0xd72e;
+        sp = er14, pop er14;
+    }
+}

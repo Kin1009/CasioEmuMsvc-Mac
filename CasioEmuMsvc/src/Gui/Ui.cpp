@@ -3,6 +3,7 @@
 #include "5800FileSystem.h"
 #include "AddressWindow.h"
 #include "BitmapViewer.h"
+#include "CG100CoreControls.hpp"
 #include "CallAnalysis.h"
 #include "Chipset/Chipset.hpp"
 #include "Chipset/MMU.hpp"
@@ -30,7 +31,6 @@
 #endif
 #ifndef TEST_BUILD
 #include "Rop/RopCompilerUI.h"
-#include "PluginLogWindow.hpp"
 #include "Plugin/PluginRegistry.h"
 #include "SnapshotWindow.h"
 #endif
@@ -390,9 +390,6 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 		windows.push_back(CreateRopCompilerWindow());
 #endif
 	}
-#if !defined(TEST_BUILD) && !defined(CASIOEMU_CORE_WEB)
-	windows.push_back(new PluginLogWindow());
-#endif
 #if !defined(TEST_BUILD)
 	windows.push_back(snapshot_window = static_cast<SnapshotWindow*>(CreateSnapshotWindow()));
 #endif
@@ -423,6 +420,11 @@ static CodeViewer* CreateDebuggerGuiWindows() {
 			windows.push_back(CreateCwModeWindow());
 	}
 	windows.push_back(CreateCalcScreenWindow());
+	// CG100 power/diagnostics (Reboot, SERVICE/FACTORY OS diag entry) get their
+	// own dedicated session tab instead of cluttering the Calculator controls
+	// strip with non-zoom actions. Only present for a live CG100 arch-core session.
+	if (cg100_arch)
+		windows.push_back(CreateCG100CoreControls());
 #endif
 
 #ifdef __ANDROID__

@@ -30,6 +30,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 #if _WIN32
 #include <Windows.h>
 #include <combaseapi.h>
@@ -250,16 +251,37 @@ int main(int argc, char* argv[]) {
 #endif
 
 	std::map<std::string, std::string> argv_map;
+	// Bare tokens are ONLY accepted as model paths when they are not known
+	// boolean flags.  Treating `no_dbg` as `model=no_dbg` made a no-model launch
+	// try to load a directory literally named "no_dbg" and end in a PANIC
+	// (__builtin_trap / SIGILL) inside Emulator::LoadModelDefition().
+	auto is_known_flag = [](const std::string& token) {
+		static const char* flags[] = {"headless", "no_dbg", "low_perf_ext",
+			"show_welcome", "startup_welcome"};
+		for (const char* flag : flags)
+			if (token == flag) return true;
+		return false;
+	};
 	for (int ix = 1; ix != argc; ++ix) {
+		std::string arg = argv[ix];
+		if (arg.rfind("--", 0) == 0 && arg.find('=') == std::string::npos)
+			arg.erase(0, 2);
 		std::string key, value;
 		char* eq_pos = strchr(argv[ix], '=');
 		if (eq_pos) {
 			key = std::string(argv[ix], eq_pos);
+			if (key.rfind("--", 0) == 0) key.erase(0, 2);
 			value = eq_pos + 1;
 		}
 		else {
-			key = "model";
-			value = argv[ix];
+			if (is_known_flag(arg)) {
+				key = arg;
+				value = "1";
+			}
+			else {
+				key = "model";
+				value = argv[ix];
+			}
 		}
 
 		if (argv_map.find(key) == argv_map.end())
@@ -268,6 +290,12 @@ int main(int argc, char* argv[]) {
 			logger::Info("[argv][Info] #%i: key '%s' already set\n", ix, key.c_str());
 	}
 	bool headless = argv_map.find("headless") != argv_map.end();
+	// `show_welcome` / `startup_welcome` open the main shell's Welcome tab
+	// directly (no model, no package, no mouse). Shell.cpp consumes the env.
+	const bool show_welcome = !argv_map["show_welcome"].empty() ||
+		!argv_map["startup_welcome"].empty();
+	if (show_welcome)
+		setenv("CASIOEMU_SHOW_WELCOME", "1", 1);
 	for (int index = 1; index < argc; ++index) {
 		const std::string argument = argv[index];
 		auto value_of = [&](const char* key) -> std::string {
@@ -306,16 +334,33 @@ for (;;) {
 	if (argv_map["model"].empty()) {
 		// Prefer a bundled fx-CG100 model so launching the .app directly (Finder /
 		// `open -a`) opens the CG100 IDE without the startup picker.
+		// SDL_GetBasePath() returns .../Contents/Resources/ on macOS, while the
+		// bundled models are copied next to the executable in .../Contents/MacOS/.
+		// Probing both roots is required; the old code only produced Resources
+		// paths, never found the model, and fell through to sui_loop().
 		char* base_path = SDL_GetBasePath();
 		if (base_path) {
-			for (const char* rel : {"models/fx-CG100", "../Resources/models/fx-CG100"}) {
-				const std::string candidate = std::string(base_path) + rel;
-				if (std::filesystem::exists(std::filesystem::path(candidate) / "config.bin")) {
-					argv_map["model"] = candidate;
-					break;
-				}
+			std::vector<std::string> roots;
+			const std::string base(base_path);
+			roots.push_back(base);
+			const std::string resources_marker = "Contents/Resources/";
+			const size_t marker = base.rfind(resources_marker);
+			if (marker != std::string::npos) {
+				roots.push_back(base.substr(0, marker) + "Contents/MacOS/");
 			}
 			SDL_free(base_path);
+			for (const std::string& root : roots) {
+				for (const char* rel : {"models/fx-CG100", "../Resources/models/fx-CG100"}) {
+					std::filesystem::path candidate =
+						(std::filesystem::path(root) / rel).lexically_normal();
+					std::error_code ec;
+					if (std::filesystem::exists(candidate / "config.bin", ec)) {
+						argv_map["model"] = candidate.string();
+						break;
+					}
+				}
+				if (!argv_map["model"].empty()) break;
+			}
 		}
 	}
 	if (argv_map["model"].empty()) {
@@ -325,6 +370,21 @@ for (;;) {
 		if (argv_map["model"].empty()) {
 			DiscordRPC::Shutdown();
 			return std::getenv("CASIOEMU_SHOT_STARTUP") ? 0 : -1;
+		}
+	}
+	// Folder-based models must contain a config before Emulator construction.
+	// Otherwise Emulator::LoadModelDefition() PANICs with a buffered (invisible)
+	// message and __builtin_trap() kills the process with SIGILL. Fail cleanly.
+	if (!startup_resources) {
+		std::error_code ec;
+		const auto model_dir = std::filesystem::path(argv_map["model"]);
+		const bool has_config = std::filesystem::exists(model_dir / "config.bin", ec) ||
+			std::filesystem::exists(model_dir / "config.json", ec);
+		if (!has_config) {
+			std::fprintf(stderr, "[Startup] No model configuration found at '%s'\n",
+				argv_map["model"].c_str());
+			DiscordRPC::Shutdown();
+			return -1;
 		}
 	}
 
@@ -459,8 +519,16 @@ for (;;) {
 	std::chrono::steady_clock::time_point close_test_closed_at{};
 	auto frame_event = SDL_RegisterEvents(1);
 #ifdef DBG
-	if (!no_dbg) {
+	if (!no_dbg || show_welcome) {
 		test_gui(&guiCreated, emulator.window, emulator.renderer);
+		if (show_welcome) {
+			// test_gui() needs a live primary emulator while it builds the
+			// debugger windows.  Once the shell exists, close that session and
+			// land on the Welcome document: no calculator, no loaded package.
+			casioemu::session::CloseSession(0);
+			// CASIOEMU_SHOW_WELCOME is already set above; Shell.cpp's
+			// gui_loop() hook calls OpenWelcomeTab() on the first frame.
+		}
 		background = IMG_Load("background.jpg");
 		bg_txt = 0;
 		if (background) {
@@ -602,7 +670,7 @@ for (;;) {
 
 			SDL_RenderPresent(emulator.renderer);
 #else
-			if (!no_dbg) {
+			if (!no_dbg || show_welcome) {
 				gui_loop();
 			}
 			emulator.Frame();

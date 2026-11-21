@@ -1,0 +1,43 @@
+// 580VN X keyboard dispatch: 1/2/3 display A/B/C; AC exits.
+// Unlike the community RSC, this is expressed in CWiz and uses the
+// getscankey() restore loop supplied by the ROP emitter.
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+#pad 4
+
+int key;
+
+void main() {
+    setlr_pc();
+    setsfr();
+
+read_key:
+    key = getscankey();
+    // Raw KI/KO words from the 580 ROP guides: 1=01 01, 2=01 02,
+    // 3=01 04, AC=04 10 (the source spelling is little-endian).
+    keytable(0x0101, key_a, 0x0102, key_b, 0x0104, key_c,
+             0x1004, exit, 0x0000, restore);
+
+key_a:
+    print(0x01, 0x01, "A");
+    render();
+    goto restore;
+
+key_b:
+    print(0x01, 0x01, "B");
+    render();
+    goto restore;
+
+key_c:
+    print(0x01, 0x01, "C");
+    render();
+    goto restore;
+
+exit:
+    brk();
+
+restore:
+    restore();
+}

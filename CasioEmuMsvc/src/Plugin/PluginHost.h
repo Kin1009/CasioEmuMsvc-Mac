@@ -2,6 +2,7 @@
 
 #include "PluginManifest.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,9 +22,14 @@ public:
 
 	// Directory that owns `portable.flag`, `plugins/` and `settings/`.
 	virtual std::string ExecutableDir() = 0;
-	// Native file chooser used by InstallFromDialog.  Returns false when the
-	// user cancels.
+	// Legacy synchronous chooser.  Kept for compatibility only: the ImGui
+	// popup it uses cannot work from a one-shot button handler (the popup is
+	// not open on the first frame, so this returns false immediately).
 	virtual bool PickPluginFile(std::string& path) = 0;
+	// Native callback-based chooser.  The callback is invoked with the chosen
+	// .plugin path; it is NOT invoked when the user cancels.  This is the
+	// chooser used by PluginRegistry::RequestInstall.
+	virtual void PickPluginFileAsync(std::function<void(std::string)> callback) = 0;
 
 	// Theme services.  ApplyPluginTheme parses a declarative theme document and
 	// assigns ImGui's style (the registry retries it after font rebuilds).

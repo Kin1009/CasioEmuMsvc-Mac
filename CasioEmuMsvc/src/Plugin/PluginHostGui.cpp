@@ -8,6 +8,7 @@
 #include "ThemeTokens.h"
 #include "Ui.hpp"
 #include "FileDialog.hpp"
+#include "SysDialog.h"
 #include "Settings/Settings.h"
 
 #include <SDL.h>
@@ -37,6 +38,17 @@ public:
 			return false;
 		path = selected;
 		return true;
+	}
+
+	void PickPluginFileAsync(std::function<void(std::string)> callback) override {
+		// Use the same native picker as shell package import (RequestShellImport).
+		// FileDialog::ShowFileOpenDialog is an ImGui popup that must be drawn over
+		// many frames; a one-shot button click cannot drive it and always failed
+		// with "No file selected".
+		SystemDialogs::OpenFileDialog([callback](std::filesystem::path p) {
+			if (!p.empty() && callback)
+				callback(p.string());
+		});
 	}
 
 	bool ApplyPluginTheme(const std::string& document, std::string& error) override {

@@ -2,9 +2,11 @@
 
 #include "PluginPermissions.h"
 #include "PluginPackage.h"
+#include "PlatformTags.h"
 #include "PluginTrust.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -36,7 +38,21 @@ struct PluginEntry {
 	// Dylibs embedded in a .plugin container (relative to package.root).
 	std::vector<std::string> embeddedDylibs;
 
-	[[nodiscard]] bool IsNative() const { return package.manifest.IsNative(); }
+	// Platform-tag selection (relative paths, sorted).  Empty means the plugin
+	// uses the legacy single nativeEntry path.
+	std::vector<std::string> compatibleNativeBinaries;
+	std::string targetPlatform = CurrentPlatformKey();
+	// True when tagged binaries exist but none match this host: the entry is
+	// put into an Error state and never loaded.
+	bool platformMismatch = false;
+	// Every native module this host actually loaded via LoadNative.  The first
+	// is also mirrored in handle/apiContext for the legacy single-module path.
+	std::vector<void*> nativeHandles;
+	std::vector<void*> nativeApiContexts;
+
+	[[nodiscard]] bool IsNative() const {
+		return package.manifest.IsNative() || !compatibleNativeBinaries.empty();
+	}
 	[[nodiscard]] const std::string& Id() const { return package.manifest.id; }
 	[[nodiscard]] const std::string& Name() const { return package.manifest.name; }
 	[[nodiscard]] const std::string& Version() const { return package.manifest.version; }
@@ -63,6 +79,11 @@ public:
 	// Opens a native file chooser (*.plugin only) and installs the selected
 	// package. Returns false and fills `error` when installation fails.
 	bool InstallFromDialog(std::string* error = nullptr);
+	// Preferred install entry point for UI buttons. Opens the native,
+	// callback-based file picker (never the one-shot ImGui popup) and calls
+	// `callback(success, error)` after installing the chosen package. The
+	// callback is not invoked when the user cancels the picker.
+	void RequestInstall(std::function<void(bool, std::string)> callback);
 
 	// Re-scans the plugin folders for newly added .plugin packages and adds
 	// them without unloading already-installed plugins.
@@ -105,6 +126,11 @@ private:
 	void LoadEntry(PluginEntry& entry);
 	bool LoadNative(PluginEntry& entry);
 	bool LoadDeclarative(PluginEntry& entry);
+	// Scans the extracted package for <name>-<os>-<arch>.<ext> binaries and
+	// fills entry.compatibleNativeBinaries.  On a tagged package with no match,
+	// sets entry.platformMismatch / Error state and returns false so the plugin
+	// is never loaded.  Returns true for legacy (untagged) packages too.
+	bool SelectPlatformBinaries(PluginEntry& entry);
 	void Approve(PluginEntry& entry, bool remember);
 	void Reject(PluginEntry& entry);
 	void LogLine(const std::string& line);

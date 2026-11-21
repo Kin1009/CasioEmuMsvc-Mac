@@ -1,0 +1,19 @@
+// Full CWiz port of the RAC hexd editor.
+// The firmware-specific ROP implementation is provided by the CWiz ROP
+// compiler's hexd_* primitives; this source contains no embedded RAC/asm.
+#rop
+#for 580
+#org 0xDF60
+#launcher common medium 0xDF60 0xDDE0
+#nopad
+
+void main() {
+    hexd_display();
+    hexd_process_value_key();
+    hexd_set_sp();
+    hexd_check_function_key();
+    hexd_process_type_key();
+    hexd_inject();
+    hexd_loop();
+    hexd_data();
+}

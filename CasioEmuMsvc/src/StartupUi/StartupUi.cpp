@@ -993,7 +993,16 @@ namespace casioemu {
 											flash = {std::istreambuf_iterator<char>{ifs3.rdbuf()}, std::istreambuf_iterator<char>{}};
 									}
 								}
-								auto ri = rom_info(rom, flash, mi.real_hardware);
+								// Board models (e.g. the bundled fx-CG100) ship an
+								// empty rom.bin placeholder because their core lives in
+								// flash. rom_info() dereferences rom.data() without a
+								// size check, so skip the ROM probe for empty images
+								// instead of crashing the whole startup picker.
+								RomInfo ri{};
+								if (!rom.empty())
+									ri = rom_info(rom, flash, mi.real_hardware);
+								else
+									mod.show_sum = false;
 								if (ri.type != 0) {
 									switch (ri.type) {
 									case RomInfo::ES:

@@ -4,13 +4,18 @@
 #include "Emulator.hpp"
 #include "Gui/Ui.hpp"
 #include "Peripheral/Screen.hpp"
+#include "Plugin/IArchitectureProvider.h"
+#include "Plugin/PluginMan.h"
 #include "Settings/Settings.h"
+#include "Binary.h"
+#include "ModelInfo.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <vector>
@@ -81,6 +86,72 @@ void PointGlobalsAt(int index) {
 	me_mmu = &entry.emulator->chipset.mmu;
 }
 
+// Board models (the fx-CG100 SH4 pack) are driven by a plugin architecture
+// core. The emulator intentionally skips chipset.Setup() for them, so a board
+// model with no attached core is completely inert. main() attaches the core to
+// the primary emulator from its config.bin; models opened from the GUI go
+// through OpenSession() instead and previously never got a core -- that is why
+// a freshly imported CG100 package opened as a tab "did nothing". Mirror the
+// main() dispatch here so GUI/session-opened board models boot through the
+// same plugin core.
+void AttachArchitectureCoreForSession(Emulator& emulator, const std::string& modelPath) {
+	using namespace casioemu;
+	// The early architecture plugin pass normally ran in main(). Keep this
+	// robust for hosts/tests that open sessions without going through main().
+	if (!GetArchitectureRegistry() || GetArchitectureRegistry()->GetProviderCount() == 0)
+		LoadArchitecturePlugins();
+
+	ModelInfo model{};
+	std::ifstream config_stream(std::filesystem::path(modelPath) / "config.bin", std::ios::binary);
+	if (!config_stream)
+		return;
+	try {
+		Binary::Read(config_stream, model);
+	}
+	catch (const std::exception& e) {
+		std::fprintf(stderr, "[ArchProvider][session] Failed to read config.bin: %s\n", e.what());
+		return;
+	}
+	// Only board models (CG100 packs carry board.svg + board_path) are
+	// dispatched. Ordinary models keep their built-in core.
+	if (model.board_path.empty() || model.hardware_id != HW_CG100)
+		return;
+
+	IArchitectureProvider* provider = GetArchitectureRegistry()->FindProvider(model.hardware_id);
+	if (!provider)
+		return;
+	IEmulatorCore* core = provider->CreateCore();
+	if (!core)
+		return;
+
+	ArchInitInfo info{};
+	const std::string flash_path = model.flash_path.empty()
+		? std::string() : emulator.GetModelFilePath(model.flash_path);
+	const std::string rom_path = model.rom_path.empty()
+		? std::string() : emulator.GetModelFilePath(model.rom_path);
+	info.model_path = emulator.model_path.c_str();
+	info.flash_path = flash_path.empty() ? nullptr : flash_path.c_str();
+	info.rom_path = rom_path.empty() ? nullptr : rom_path.c_str();
+	info.hardware_id = model.hardware_id;
+	auto lcd = emulator.ModelDefinition.sprites.find("rsd_pixel");
+	if (lcd != emulator.ModelDefinition.sprites.end()) {
+		info.lcd_x = lcd->second.dest.x;
+		info.lcd_y = lcd->second.dest.y;
+		info.lcd_w = lcd->second.dest.w;
+		info.lcd_h = lcd->second.dest.h;
+	}
+	if (core->Initialize(info)) {
+		core->Reset();
+		emulator.SetArchitectureCore(core);
+		std::printf("[ArchCore] SH4 Architecture attached to session Emulator; LCD rect = (%d,%d,%d,%d)\n",
+			info.lcd_x, info.lcd_y, info.lcd_w, info.lcd_h);
+	}
+	else {
+		std::fprintf(stderr, "[ArchCore] session core Initialize() failed.\n");
+		provider->DestroyCore(core);
+	}
+}
+
 } // namespace
 
 void RegisterPrimary(Emulator* emulator, const std::string& modelPath,
@@ -132,6 +203,9 @@ bool OpenSession(const std::string& modelPath, std::string* error, bool force_ne
 	argv_map["model"] = modelPath;
 	try {
 		auto emulator = std::make_unique<Emulator>(argv_map, false, nullptr);
+		// GUI-opened board models need the plugin architecture core too, not
+		// just the primary emulator created by main().
+		AttachArchitectureCoreForSession(*emulator, modelPath);
 		Entry entry;
 		entry.emulator = emulator.get();
 		entry.owned = std::move(emulator);
