@@ -1,4 +1,7 @@
 #include "Shell.h"
+#ifdef _WIN32
+#include "posix_time.h"
+#endif
 
 #include "Gui.h"
 #include "Gui/ThemeManager.h"

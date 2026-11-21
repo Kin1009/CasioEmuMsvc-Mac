@@ -1,4 +1,7 @@
 #include "SnapshotWindow.h"
+#ifdef _WIN32
+#include "posix_time.h"
+#endif
 #include "Snapshot.h"
 #include "Emulator.hpp"
 #include "ToolUi.hpp"

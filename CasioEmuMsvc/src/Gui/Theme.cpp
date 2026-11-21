@@ -1,4 +1,7 @@
 #include "Theme.h"
+#ifdef _WIN32
+#include "posix_time.h"
+#endif
 #include "Peripheral/OrdinaryLcdHistory.hpp"
 #include "Peripheral/ScreenGate.hpp"
 #include "FileDialog.hpp"

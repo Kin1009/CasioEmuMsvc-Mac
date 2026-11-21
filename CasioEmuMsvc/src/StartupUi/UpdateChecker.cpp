@@ -1,4 +1,7 @@
 #include "UpdateChecker.h"
+#ifdef _WIN32
+#include "posix_time.h"
+#endif
 #include "Config.hpp"
 #include "../../../McpPlugin/json.hpp"
 #ifndef __ANDROID__
