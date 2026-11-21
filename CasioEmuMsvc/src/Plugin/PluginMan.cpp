@@ -8,10 +8,10 @@
 #include <cctype>
 #include <filesystem>
 #include <vector>
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
 #include <sys/stat.h>
 #endif
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
 #include <SDL.h>
 #endif
 
@@ -57,7 +57,7 @@ casioemu::IArchitectureRegistry* GetArchitectureRegistry() {
 	return &g_archRegistry;
 }
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
 namespace {
 	// Only *.plugin packages are accepted by the architecture pass -- raw
 	// *.dylib / *.so files are deliberately NOT discovered (the Plugin Manager
@@ -92,6 +92,20 @@ namespace {
 				std::error_code ec;
 				std::filesystem::path p = std::filesystem::path(exe_dir) / rel;
 				if (!std::filesystem::exists(p, ec)) continue;
+				for (auto& e : std::filesystem::directory_iterator(p, ec)) {
+					if (IsPluginPackageFile(e))
+						candidates.push_back(e.path());
+				}
+			}
+			SDL_free(exe_dir);
+		}
+#elif defined(_WIN32)
+		// A Windows GUI launch commonly has an unrelated working directory;
+		// look beside CasioEmuMsvc.exe as well as the CWD-relative paths below.
+		if (char* exe_dir = SDL_GetBasePath()) {
+			std::error_code ec;
+			std::filesystem::path p = std::filesystem::path(exe_dir) / "plugins";
+			if (std::filesystem::exists(p, ec)) {
 				for (auto& e : std::filesystem::directory_iterator(p, ec)) {
 					if (IsPluginPackageFile(e))
 						candidates.push_back(e.path());
@@ -167,7 +181,7 @@ namespace {
 			if (!item.is_regular_file(file_ec))
 				continue;
 			const std::string ext = item.path().extension().string();
-			if (ext == ".dylib" || ext == ".plugin" || ext == ".so")
+			if (ext == ".dylib" || ext == ".plugin" || ext == ".so" || ext == ".dll")
 				return item.path();
 		}
 		return {};
@@ -339,7 +353,10 @@ void LoadPlugins() {
 void LoadPlugins() {}
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+// On Windows this is the Win32 dlfcn shim (LoadLibrary/GetProcAddress with an
+// RTLD_GLOBAL module registry); the platform-tagged .plugin selection is
+// shared with the POSIX builds through PlatformTags.h.
 #include <dlfcn.h>
 void LoadArchitecturePlugins() {
 	g_PluginLoadLog += "[ARCH] Starting early architecture plugin pass\n";
