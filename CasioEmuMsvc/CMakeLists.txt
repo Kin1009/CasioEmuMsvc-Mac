@@ -912,6 +912,7 @@ elseif(BUILD_EXECUTABLE)
             -lpthread
             -ldl
             -lrt
+            -lutil
             -lm
             -Wl,--end-group
             # Expose SDL (and other) symbols in the executable's dynamic symbol

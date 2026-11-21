@@ -145,14 +145,26 @@ build/run instructions.
 
 ## 5. Verification performed
 
-* Configure and build of the full `CasioEmuMsvc` target on the cross toolchain
-  (see `PORT_LINUX_FINAL.md` for the final status and log locations).
-* `file(1)` / `readelf` / `nm` on the executable, plugin `.so` and Go core `.so`.
-* Static checks: ELF x86-64, expected ABI symbols (`fPluginLoad`,
-  `fPluginLoadArch`, `casioemu_arch_core_*`), RPATH `$ORIGIN:$ORIGIN/lib`,
-  no dependency on a host-specific `libstdc++`.
-* The plugin-format header's platform selection was compile-checked to yield
-  `linux-x64`.
+* Configure and build of the full `CasioEmuMsvc` target **succeeded**
+  (`build-linux/CasioEmuMsvc/CasioEmuMsvc`, ELF 64-bit LSB executable, x86-64,
+  dynamically linked, for GNU/Linux 3.2.0, ~23 MB). Logs:
+  `/Volumes/Code/casio-tools/temp/port-linux-logs/`.
+* `readelf -d` on the executable: only standard Linux dependencies
+  (`libpthread`, `libdl`, `librt`, `libutil`, `libm`, `libc`, `ld-linux`); max
+  `GLIBC_2.28`. `-Wl,--export-dynamic` puts SDL entry points
+  (`SDL_CreateTexture`, `SDL_UpdateTexture`, `SDL_RenderCopy`, ...) in `.dynsym`
+  for plugin `dlsym(RTLD_DEFAULT, ...)`.
+* Plugin `.so` / Go core `.so`: ELF x86-64, expected ABI symbols
+  (`fPluginLoad`, `fPluginLoadArch`, `casioemu_arch_core_*`, full `cg100_*`
+  including 16 `cg100_usb_*`), RPATH `$ORIGIN:$ORIGIN/lib`, no host-specific
+  `libstdc++` dependency (max `GLIBC_2.27` for the plugin, `2.3.2` for the core).
+* The CG100 plugin build script was run end-to-end successfully.
+* Platform-tag selection verified natively: extracting `CG100SH4.plugin` and
+  calling `SelectPlatformBinariesForRoot(root, "linux", "x64")` returns
+  `Matched` with `CG100SH4-linux-x64.so`.
+* Portable `crypto::SHA256` (used instead of Apple CommonCrypto for package
+  hashing) was compared byte-for-byte against `CC_SHA256` for several inputs,
+  in both one-shot and streaming modes — all matched.
 
 ## 6. Known limitations
 
