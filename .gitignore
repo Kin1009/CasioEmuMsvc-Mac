@@ -412,6 +412,7 @@ app/src/main/assets/
 
 # universal build output
 /build-universal/
+/build-ipados/
 
 # plugin example build products
 /examples/plugins/*/lib/

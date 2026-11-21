@@ -48,6 +48,9 @@
 #include <mach-o/dyld.h>
 #include <unistd.h>
 #endif
+#ifdef CASIOEMU_IPADOS
+#include "IPadOSBridge.h"
+#endif
 #include "StartupUi/StartupUi.h"
 #include <Gui.h>
 #include <Plugin/PluginMan.h>
@@ -490,6 +493,10 @@ for (;;) {
 	menu_actions.pause_resume = [] { casioemu::shell::TogglePause(); };
 	menu_actions.reset = [] { casioemu::shell::ResetSession(); };
 	casioemu::mac::InstallNativeMenu(menu_actions);
+#ifdef CASIOEMU_IPADOS
+	// UIKit: resizable scene, safe-area insets, trackpad pointer and keyboard.
+	casioemu::ipados::ConfigureWindow(emulator.window);
+#endif
 
 	SDL_ShowWindow(emulator.window);
 	SDL_RaiseWindow(emulator.window);
@@ -498,6 +505,9 @@ for (;;) {
 	LoadPlugins();
 #endif
 	while (!quitting) {
+#ifdef CASIOEMU_IPADOS
+		casioemu::ipados::PollMainThread();
+#endif
 		if (casioemu::shell::ConsumeQuitRequest()) {
 			request_quit();
 			break;

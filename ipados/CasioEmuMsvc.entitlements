@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox is mandatory for App Store iPadOS apps. -->
+    <key>com.apple.security.app-sandbox</key><true/>
+
+    <!-- Files the user explicitly picks in UIDocumentPicker. -->
+    <key>com.apple.security.files.user-selected.read-write</key><true/>
+    <key>com.apple.security.files.downloads.read-write</key><true/>
+    <key>com.apple.security.files.pictures.read-write</key><true/>
+
+    <!-- The optional online model client needs outbound networking. -->
+    <key>com.apple.security.network.client</key><true/>
+
+    <!-- JIT / unsigned executable memory is deliberately NOT requested.
+         CASIOEMU_IPADOS builds exclude AsmJit and JitU8 and always use the
+         portable interpreter.  Do not add com.apple.security.cs.allow-jit. -->
+    <key>com.apple.security.cs.allow-jit</key><false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><false/>
+</dict>
+</plist>

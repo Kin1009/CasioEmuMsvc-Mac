@@ -21,6 +21,23 @@ if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(BUILD_EXECUTABLE ON CACHE BOOL "Web builds produce an executable html/js/wasm bundle" FORCE)
 endif()
 
+# ---------------------------------------------------------------------------
+# iPadOS target.  CMake reports iPadOS as CMAKE_SYSTEM_NAME=iOS; the deployment
+# target set on the command line must be >= 16.0 (see ipados/Info.plist).
+# JIT/code generation is forbidden by the App Store and by the OS (W^X), so the
+# AsmJit x86 backend and the JitU8 translator are excluded.  The interpreter in
+# Chipset/CPU.cpp is the only execution engine in this build.
+# ---------------------------------------------------------------------------
+if(IOS AND NOT CASIOEMU_WEB)
+    set(CASIOEMU_IPADOS ON CACHE BOOL "Build the iPadOS application" FORCE)
+    if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "16.0")
+        message(FATAL_ERROR "iPadOS deployment target must be 16.0 or newer")
+    endif()
+    message(STATUS "iPadOS target: interpreter-only, bundled declarative plugins, UIKit bridge")
+else()
+    set(CASIOEMU_IPADOS OFF CACHE BOOL "Build the iPadOS application" FORCE)
+endif()
+
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fms-extensions")
 # set(CMAKE_CXX_EXTENSIONS OFF)
 set(SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -175,7 +192,9 @@ set(ASMJIT_STATIC ON CACHE BOOL "Build AsmJit as a static library")
 set(ASMJIT_BUILD_TEST OFF CACHE BOOL "Disable AsmJit tests")
 set(ASMJIT_BUILD_EXAMPLES OFF CACHE BOOL "Disable AsmJit examples")
 
-if(NOT CASIOEMU_WEB)
+if(CASIOEMU_IPADOS)
+    message(STATUS "iPadOS: skipping AsmJit (JIT/W^X is forbidden); using the CPU interpreter")
+elseif(NOT CASIOEMU_WEB)
     message(STATUS "Attempting to add subdirectory: ${ASMJIT_DIR}")
     if(EXISTS "${ASMJIT_DIR}/CMakeLists.txt")
         message(STATUS "Found ${ASMJIT_DIR}/CMakeLists.txt")
@@ -336,6 +355,13 @@ endif()
 
 list(APPEND MAIN_SOURCES ${MAIN_SOURCES_EPS6800_CORE})
 
+if(CASIOEMU_IPADOS)
+    # x86-only AsmJit translator and the crash reporter are not part of the
+    # iPadOS build.  The portable C++ interpreter in Chipset/CPU.cpp remains.
+    list(FILTER MAIN_SOURCES EXCLUDE REGEX "JitU8/JitU8\\.cpp$")
+    list(FILTER MAIN_SOURCES EXCLUDE REGEX "CrashHandler/")
+endif()
+
 # target_sources(main PRIVATE ${MAIN_SOURCES})
 
 if(BUILD_EXECUTABLE)
@@ -353,19 +379,39 @@ if(BUILD_EXECUTABLE)
     endif()
 
     if(APPLE)
-        set(MAC_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/icon.icns)
-        set_source_files_properties(${MAC_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-        add_executable(${TARGET_NAME} MACOSX_BUNDLE ${MAIN_SOURCES} ${WIN_RESOURCES} ${MAC_RESOURCES})
-        set_target_properties(${TARGET_NAME} PROPERTIES
-            MACOSX_BUNDLE_INFO_STRING "Casio nX-U8/100 &amp; nX-U16/100 Emulator"
-            MACOSX_BUNDLE_BUNDLE_NAME "CasioEmuMsvc"
-            MACOSX_BUNDLE_IDENTIFIER "com.telecomadm1145.casioemumsvc"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "com.telecomadm1145.casioemumsvc"
-            MACOSX_BUNDLE_BUNDLE_VERSION "1.1.0"
-            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.1.0"
-            MACOSX_BUNDLE_COPYRIGHT "Copyright (C) 2024-2026 telecomadm1145"
-            MACOSX_BUNDLE_ICON_FILE "icon.icns"
-        )
+        if(CASIOEMU_IPADOS)
+            # iPadOS apps are always bundles.  Info.plist and entitlements live
+            # in ipados/ next to the bridge sources.
+            add_executable(${TARGET_NAME} MACOSX_BUNDLE ${MAIN_SOURCES} ${WIN_RESOURCES})
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/ipados/Info.plist"
+                MACOSX_BUNDLE_BUNDLE_NAME "CasioEmuMsvc"
+                MACOSX_BUNDLE_IDENTIFIER "com.telecomadm1145.casioemumsvc.ipados"
+                MACOSX_BUNDLE_GUI_IDENTIFIER "com.telecomadm1145.casioemumsvc.ipados"
+                MACOSX_BUNDLE_BUNDLE_VERSION "1.1.0"
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "1.1.0"
+                XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_SOURCE_DIR}/ipados/CasioEmuMsvc.entitlements"
+                XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+                XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "2"
+                XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphonesimulator iphoneos"
+                XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+                XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
+            )
+        else()
+            set(MAC_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/icon.icns)
+            set_source_files_properties(${MAC_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+            add_executable(${TARGET_NAME} MACOSX_BUNDLE ${MAIN_SOURCES} ${WIN_RESOURCES} ${MAC_RESOURCES})
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                MACOSX_BUNDLE_INFO_STRING "Casio nX-U8/100 &amp; nX-U16/100 Emulator"
+                MACOSX_BUNDLE_BUNDLE_NAME "CasioEmuMsvc"
+                MACOSX_BUNDLE_IDENTIFIER "com.telecomadm1145.casioemumsvc"
+                MACOSX_BUNDLE_GUI_IDENTIFIER "com.telecomadm1145.casioemumsvc"
+                MACOSX_BUNDLE_BUNDLE_VERSION "1.1.0"
+                MACOSX_BUNDLE_SHORT_VERSION_STRING "1.1.0"
+                MACOSX_BUNDLE_COPYRIGHT "Copyright (C) 2024-2026 telecomadm1145"
+                MACOSX_BUNDLE_ICON_FILE "icon.icns"
+            )
+        endif()
     else()
         add_executable(${TARGET_NAME} ${MAIN_SOURCES} ${WIN_RESOURCES})
     endif()
@@ -400,6 +446,32 @@ endif()
 # Apply include dirs to target (scoped) to reduce global includes and compiler parsing
 target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_INCLUDE_DIRS})
 target_include_directories(${TARGET_NAME} BEFORE PRIVATE "${ONLINE_GENERATED_DIR}")
+
+if(CASIOEMU_IPADOS)
+    target_compile_definitions(${TARGET_NAME} PRIVATE
+        CASIOEMU_IPADOS=1
+        ASMJIT_NO_JIT=1
+        DISABLE_SENTRY=1)
+    target_include_directories(${TARGET_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/ipados/src")
+    target_sources(${TARGET_NAME} PRIVATE
+        "${CMAKE_SOURCE_DIR}/ipados/src/IPadOSBridge.mm"
+        "${CMAKE_SOURCE_DIR}/ipados/src/IPadOSKeypad.cpp"
+        "${CMAKE_SOURCE_DIR}/ipados/src/IPadOSPlugins.cpp")
+    # Objective-C++ is required for the UIKit bridge and for SDL's iOS backend.
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/ipados/src/IPadOSBridge.mm"
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+
+    # Data-only plugins are compiled into the app bundle at build time.  The
+    # loader scans <bundle>/Resources/Plugins at startup.
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${TARGET_NAME}>/Plugins"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/ipados/bundled_plugins"
+            "$<TARGET_FILE_DIR:${TARGET_NAME}>/Plugins"
+        COMMENT "Bundling declarative iPadOS plugins")
+endif()
 
 # Visible build stamp refreshed on every build (commit + local time).
 set(BUILD_STAMP_CPP "${ONLINE_GENERATED_DIR}/build_stamp.cpp")
@@ -441,7 +513,7 @@ else()
     message(STATUS "No resources/themes directory found; built-in presets will fall back to the legacy style")
 endif()
 
-if(CASIOEMU_BUILD_SETTINGS_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+if(CASIOEMU_BUILD_SETTINGS_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE AND NOT IOS)
     add_executable(casioemu_settings_smoke
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings_smoke.cpp"
         "${SOURCE_DIR}/Settings/Settings.cpp")
@@ -458,7 +530,7 @@ endif()
 # Starts/stops the LCD worker repeatedly, then exits while it is still running
 # and taking the process-wide settings lease. Exercises the shutdown/destruction
 # order that used to abort in std::recursive_mutex::lock() at process exit.
-if(NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+if(NOT CASIOEMU_WEB AND BUILD_EXECUTABLE AND NOT IOS)
     find_package(Threads REQUIRED)
     add_executable(casioemu_screen_thread_lifetime
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/screen_thread_lifetime.cpp"
@@ -484,7 +556,7 @@ endif()
 # plugin_registry_headless: end-to-end registry harness with a fake host; loads
 # theme/inject/layout/tool fixtures, asserts states, permission denials, hash-
 # change re-prompts, unload, install and theme token application.
-if(CASIOEMU_PLUGIN_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE)
+if(CASIOEMU_PLUGIN_TESTS AND NOT CASIOEMU_WEB AND BUILD_EXECUTABLE AND NOT IOS)
     enable_testing()
     find_package(Threads REQUIRED)
 
@@ -831,8 +903,10 @@ elseif(BUILD_EXECUTABLE)
         SDL2::SDL2
         SDL2_image::SDL2_image-static
         #CpuFeatures::cpu_features
-        asmjit::asmjit
     )
+    if(TARGET asmjit::asmjit)
+        target_link_libraries(${TARGET_NAME} PRIVATE asmjit::asmjit)
+    endif()
     find_package(CURL QUIET)
     if(NOT CURL_FOUND)
         include(FetchContent)
@@ -868,6 +942,29 @@ elseif(BUILD_EXECUTABLE)
             ws2_32
         )
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "")
+    elseif(IOS)
+        # iOS has no AppKit and no libdl.  UIKit/Metal come from the SDL2 iOS
+        # backend; QuartzCore and Security are used by the bridge/keychain code.
+        find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
+        find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        find_library(METAL_FRAMEWORK Metal REQUIRED)
+        find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+        find_library(IMAGEIO_FRAMEWORK ImageIO REQUIRED)
+        find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+        find_library(SECURITY_FRAMEWORK Security REQUIRED)
+        target_link_libraries(${TARGET_NAME} PRIVATE
+            SDL2::SDL2main
+            -lpthread
+            -lm
+            ${UIKIT_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK}
+            ${METAL_FRAMEWORK}
+            ${QUARTZCORE_FRAMEWORK}
+            ${IMAGEIO_FRAMEWORK}
+            ${COREGRAPHICS_FRAMEWORK}
+            ${SECURITY_FRAMEWORK}
+            "-ObjC"
+        )
     elseif(APPLE)
         find_library(APPKIT_FRAMEWORK AppKit)
         find_library(SECURITY_FRAMEWORK Security REQUIRED)

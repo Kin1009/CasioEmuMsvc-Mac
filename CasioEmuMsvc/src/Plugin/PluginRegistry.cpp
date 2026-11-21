@@ -552,6 +552,15 @@ bool PluginRegistry::LoadDeclarative(PluginEntry& entry) {
 }
 
 bool PluginRegistry::LoadNative(PluginEntry& entry) {
+#ifdef CASIOEMU_IPADOS
+	// iPadOS forbids mapping unsigned executable memory and dlopen of arbitrary
+	// paths.  A native .plugin cannot be shipped or loaded here; use a bundled
+	// data-only package instead (see ipados/src/IPadOSPlugins.cpp).
+	entry.state = "Unavailable";
+	entry.error = "native plugin loading is not permitted on iPadOS";
+	LogLine("[INFO] " + entry.Id() + ": " + entry.error);
+	return false;
+#endif
 	if (!RequireCapability(entry, Capability::Native, "native library loading"))
 		return false;
 
@@ -926,14 +935,25 @@ void PluginRegistry::Reveal(const std::string& id) const {
 }
 
 void PluginRegistry::RevealPath(const std::filesystem::path& path) const {
+#ifdef CASIOEMU_IPADOS
+	// There is no Finder on iPadOS.  The Files app can reach the sandbox's
+	// Documents directory (UIFileSharingEnabled is set in Info.plist).
+	std::fprintf(stderr, "[ipados] Reveal not available: %s\n", path.c_str());
+#else
 	std::system(("open -R \"" + path.string() + "\" >/dev/null 2>&1").c_str());
+#endif
 }
 
 void PluginRegistry::OpenPluginsFolder() const {
+#ifdef CASIOEMU_IPADOS
+	std::fprintf(stderr, "[ipados] Open plugins folder not available; use the Files app\n");
+	return;
+#else
 	const std::filesystem::path target = WritableInstallDir(AppPluginsDir(), UserPluginsDir());
 	std::error_code ec;
 	std::filesystem::create_directories(target, ec);
 	std::system(("open \"" + target.string() + "\" >/dev/null 2>&1").c_str());
+#endif
 }
 
 bool PluginRegistry::InstallFromFile(const std::filesystem::path& file, std::string* error) {

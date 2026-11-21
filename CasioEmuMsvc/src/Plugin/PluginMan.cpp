@@ -1,5 +1,8 @@
 ﻿#include "PluginApi.h"
 #include "PluginMan.h"
+#ifdef CASIOEMU_IPADOS
+#include "IPadOSPlugins.h"
+#endif
 #include "PluginPackage.h"
 #include "PluginRegistry.h"
 #include <iostream>
@@ -302,13 +305,21 @@ void LoadPlugins() {
 #include "PluginRegistry.h"
 
 void LoadPlugins() {
+#ifdef CASIOEMU_IPADOS
+	// iPadOS cannot dlopen arbitrary code.  Load the data-only packages that
+	// were bundled into the app at build time; native entries are rejected by
+	// PluginRegistry::LoadNative in this configuration.
+	casioemu::ipados::plugins::LoadBundledPlugins();
+	g_PluginLoadLog += "[INFO] iPadOS: native plugin loading disabled (JIT/dlopen forbidden)\n";
+	g_PluginLoadLog += casioemu::ipados::plugins::Log();
+#endif
 	casioemu::plugin::PluginRegistry::Instance().Initialize();
 }
 #else
 void LoadPlugins() {}
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__linux__) || (defined(__APPLE__) && !defined(CASIOEMU_IPADOS))
 #include <dlfcn.h>
 void LoadArchitecturePlugins() {
 	g_PluginLoadLog += "[ARCH] Starting early architecture plugin pass\n";
@@ -339,5 +350,9 @@ void LoadArchitecturePlugins() {
 	}
 }
 #else
-void LoadArchitecturePlugins() {}
+void LoadArchitecturePlugins() {
+#ifdef CASIOEMU_IPADOS
+	g_PluginLoadLog += "[ARCH] iPadOS: architecture plugins must be statically bundled at build time; dynamic loading skipped\n";
+#endif
+}
 #endif

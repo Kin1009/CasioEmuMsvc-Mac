@@ -35,6 +35,9 @@
 #include "SnapshotWindow.h"
 #endif
 #include "imgui/imgui.h"
+#ifdef CASIOEMU_IPADOS
+#include "IPadOSKeypad.h"
+#endif
 #ifdef CASIOEMU_CORE_WEB
 #include "WebDebuggerGui.h"
 #else
@@ -327,6 +330,9 @@ void gui_loop() {
 #endif
 	ImGui::NewFrame();
 	RenderDebuggerGuiWindows();
+#ifdef CASIOEMU_IPADOS
+	casioemu::ipados::keypad::Render();
+#endif
 	ImGui::Render();
 #ifndef CASIOEMU_CORE_WEB
 #ifdef SINGLE_WINDOW

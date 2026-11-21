@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>CasioEmuMsvc</string>
+    <key>CFBundleExecutable</key><string>CasioEmuMsvc</string>
+    <key>CFBundleIdentifier</key><string>com.telecomadm1145.casioemumsvc.ipados</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>CasioEmuMsvc</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.1.0</string>
+    <key>CFBundleVersion</key><string>1.1.0</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <key>LSMinimumSystemVersion</key><string>16.0</string>
+    <key>MinimumOSVersion</key><string>16.0</string>
+
+    <!-- iPad only: arm64 device requirement, all four orientations. -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- iPad multitasking / Stage Manager: the app is resizable and can share
+         the screen with another app. SDL observes the resulting resize events. -->
+    <key>UIRequiresFullScreen</key><false/>
+    <key>UIStatusBarStyle</key><string>UIStatusBarStyleLightContent</string>
+    <key>UIViewControllerBasedStatusBarAppearance</key><false/>
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIColorName</key><string></string>
+    </dict>
+
+    <!-- File import (model .package, plugin .plugin, ROM images, themes). -->
+    <key>LSSupportsOpeningDocumentsInPlace</key><false/>
+    <key>UIFileSharingEnabled</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Casio emulator package</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Default</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.casioemu.package</string>
+                <string>com.casioemu.plugin</string>
+                <string>com.pkware.zip-archive</string>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.casioemu.package</string>
+            <key>UTTypeDescription</key><string>Casio emulator model package</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>package</string></array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.casioemu.plugin</string>
+            <key>UTTypeDescription</key><string>Casio emulator plugin package</string>
+            <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>plugin</string></array>
+            </dict>
+        </dict>
+    </array>
+
+    <!-- Network code (online model client) is optional; no encryption export
+         paperwork is required for this build. -->
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><false/>
+    </dict>
+</dict>
+</plist>

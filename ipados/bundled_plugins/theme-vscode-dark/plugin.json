@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "com.casioemu.theme.vscode-dark",
+  "name": "VS Code Dark",
+  "version": "1.0.0",
+  "author": "CasioEmuMsvc",
+  "description": "Bundled data-only dark theme for iPadOS (no native code).",
+  "min_host": "2.1.0",
+  "platforms": [
+    "ipados",
+    "ios"
+  ],
+  "type": "theme",
+  "permissions": [
+    "ui.shell"
+  ],
+  "entry_point": "assets/theme.json",
+  "assets": [
+    "assets/theme.json"
+  ]
+}

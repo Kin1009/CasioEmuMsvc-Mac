@@ -1,6 +1,8 @@
 #include "MacWindow.h"
 
-#ifdef __APPLE__
+#include <TargetConditionals.h>
+
+#if defined(__APPLE__) && TARGET_OS_OSX
 
 #import <Cocoa/Cocoa.h>
 

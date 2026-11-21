@@ -1,5 +1,9 @@
-#ifdef __APPLE__
 #include "SysDialog.h"
+#include <TargetConditionals.h>
+
+// AppKit does not exist on iPadOS.  The iPad implementation of these dialogs
+// lives in ipados/src/IPadOSBridge.mm and uses UIDocumentPickerViewController.
+#if defined(__APPLE__) && TARGET_OS_OSX
 #import <AppKit/AppKit.h>
 #include <string>
 

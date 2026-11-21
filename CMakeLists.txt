@@ -85,7 +85,12 @@ endif()
 # Your game and its CMakeLists.txt are in a subfolder named "src"
 add_subdirectory(CasioEmuMsvc)
 
-add_subdirectory(tools/casioctl)
+# iPadOS: the host-side CLI tool is not part of the app target.  iOS executables
+# are never allowed on a device without a bundle + signature, and the tool is
+# useless inside the sandboxed app anyway.
+if(NOT IOS)
+    add_subdirectory(tools/casioctl)
+endif()
 
 if(WIN32 AND BUILD_EXECUTABLE AND BUILD_MCP_PLUGIN)
     add_subdirectory(McpPlugin)
