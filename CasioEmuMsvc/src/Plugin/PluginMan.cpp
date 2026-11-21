@@ -329,7 +329,7 @@ void LoadPlugins() {
         }
     }
 }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__linux__)
 #include "PluginRegistry.h"
 
 void LoadPlugins() {

@@ -902,6 +902,11 @@ elseif(BUILD_EXECUTABLE)
             -lrt
             -lm
             -Wl,--end-group
+            # Expose SDL (and other) symbols in the executable's dynamic symbol
+            # table so native plugins can resolve them with dlsym(RTLD_DEFAULT).
+            # macOS gets this from the flat namespace automatically; ELF needs
+            # an explicit --export-dynamic.
+            -Wl,--export-dynamic
         )
     endif()
 else()

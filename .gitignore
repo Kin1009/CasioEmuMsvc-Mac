@@ -379,6 +379,7 @@ local.properties
 
 .idea/
 
+/build-linux/
 build-web/
 build-web-check/
 build-parent-check/
