@@ -91,9 +91,37 @@ Install by copying the `.plugin` file into `<exe dir>/plugins/` (or setting
 
 ## 5. Verification
 
-See `/Volumes/Code/casio-tools/temp/PORT_WINDOWS_FINAL.md` for the build
-result, `file(1)`/PE export evidence, Wine runs and known gaps.
+* `file(1)`: `CasioEmuMsvc.exe`, `CG100SH4.dll` and `cg100core.dll` are all
+  PE32+ x86-64 Windows binaries. `objdump -p` on the EXE confirms the four SDL
+  entry points the plugin resolves are exported (13,730 exports total because
+  `--export-all-symbols` is used).
+* `tools/cg100-win/verify_win.cpp` (MinGW + Wine, real DLLs): all ABI
+  handshakes and nine arch-core exports present; real 32 MiB CG100 flash ran
+  250 billion cycles with 60,141/88,704 non-black framebuffer pixels and no
+  fault. **ALL RUNTIME CHECKS PASSED**.
+* `tools/cg100-win/verify_platform_tags.cpp` (MinGW + Wine): reports
+  `current platform: windows-x64`, status `Matched`, selects
+  `CG100SH4-windows-x64.dll`. **PLATFORM TAG SELECTION PASSED**.
+* End-to-end host run under Wine Devel 11.9 with
+  `--headless --model=<fx-CG100> --frames=2`: the host extracted the `.plugin`
+  into `plugins/.cache/<sha256>/` (all five entries, including both bundled
+  DLLs), loaded the tagged DLL and logged
+  `[ArchCore] SH4 Architecture attached to Emulator; LCD rect = (89,251,812,468)`.
+  No missing-DLL or plugin-load errors.
+
+Logs: `/Volumes/Code/casio-tools/temp/windows-port-logs/`.
 
 ## 6. Known limitations
 
-_Filled in after verification._
+* No interactive Windows desktop is available on this macOS host; key presses,
+  the diag buttons and the USB-drive UI were not clicked in a real GUI. Their
+  exports and bridges were verified by PE exports and the Wine core harness.
+* The MinGW CRT has no POSIX PTY: the built-in shell terminal reports
+  `Shell terminal requires a POSIX PTY (not available on Windows)` rather than
+  spawning a fake shell.
+* `casioctl` (Unix-domain-socket control server), Sentry/Crashpad, the MCP
+  debugger plugin and the plugin self-tests are not built on this target.
+* `--export-all-symbols` publishes all host globals (13,730 exports) rather
+  than a minimal four-symbol SDL export list; harmless but bloats the EXE.
+* The host EXE is a console-subsystem PE; launching from Explorer shows a
+  console window alongside the SDL GUI.
