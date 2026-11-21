@@ -37,6 +37,7 @@
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #include "sdl_win32_extra.h"
+#include "posix_env.h"
 #endif
 
 #ifdef __ANDROID__
