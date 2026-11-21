@@ -103,10 +103,14 @@ version declared in the Gradle file is 4.1.2; install it with
 `sdkmanager --install "cmake;4.1.2"` or adjust the `version` field to a locally
 installed CMake.
 
-Outputs:
+Outputs (both were produced in this port; see `PORT_ANDROID_FINAL.md`):
 
 * `app/build/outputs/apk/debug/CasioEmuMsvc-debug-arm64-v8a.apk`
-* `app/build/outputs/bundle/debug/*.aab`
+* `app/build/outputs/bundle/debug/app-debug.aab`
+
+The verified APK is ~20 MB and contains `lib/arm64-v8a/libmain.so`,
+`libSDL2.so`, `libSDL2_image.so`, `classes.dex`, locale/ROM assets and
+`assets/plugins/CG100SH4-Android.plugin`.
 
 Release builds are unsigned by default. Java sources are Java 17 compatible;
 the SDL2 Java bridge is vendored in `app/src/main/java/org/libsdl/app`.
@@ -246,11 +250,10 @@ libmain.so  (CMake target "main", SDL_main in src/casioemu.cpp)
 
 ## 8. Known limitations
 
-* An Android SDK/emulator/device was not available in the original porting
-  environment, so the APK/AAB (if not built) and all runtime UI/plugin
-  behaviour are **not** device-verified. The native `.so` is built, linked and
-  checked with `file`/ELF headers; see `PORT_ANDROID_FINAL.md` for the exact
-  status of this run.
+* An Android SDK and JDK 21 were installed for this port so the APK/AAB were
+  built successfully. No emulator/device was available, so runtime UI/plugin
+  behaviour is **not** device-verified. The native `.so` is built, linked and
+  checked with `file`/ELF headers; see `PORT_ANDROID_FINAL.md` for details.
 * The CG100 plugin resolves SDL entry points through `dlsym(RTLD_DEFAULT, ...)`.
   Android does not necessarily export `libmain.so` symbols into the global
   lookup scope; when unavailable, the plugin's optional SDL texture path is
