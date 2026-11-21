@@ -270,6 +270,18 @@ file(GLOB MAIN_SOURCES_TERMINAL CONFIGURE_DEPENDS "${SOURCE_DIR}/Terminal/*.cpp"
 file(GLOB MAIN_SOURCES_STARTUP CONFIGURE_DEPENDS "${SOURCE_DIR}/StartupUi/*.cpp")
 file(GLOB MAIN_SOURCES_WEB "${SOURCE_DIR}/Web/*.cpp")
 
+# Objective-C++ sources (MacWindow.mm, SysDialog.mm) contain only
+# #ifdef __APPLE__ blocks plus plain-C++ fallbacks on other platforms.  GCC
+# cross toolchains have no Objective-C++ frontend, so force C++ mode for them.
+if(NOT APPLE)
+    foreach(_mm_source IN LISTS MAIN_SOURCES_EXT)
+        if(_mm_source MATCHES "\\.mm$")
+            set_source_files_properties("${_mm_source}" PROPERTIES
+                LANGUAGE CXX COMPILE_OPTIONS "-x;c++")
+        endif()
+    endforeach()
+endif()
+
 if(CASIOEMU_WEB)
     list(FILTER MAIN_SOURCES_ROOT EXCLUDE REGEX "casioemu\\.cpp$")
     list(FILTER MAIN_SOURCES_EXT EXCLUDE REGEX "SysDialog\\.cpp$")

@@ -15,9 +15,14 @@ native plugins are named and loaded on Linux, and what is known to work.
 | ccache | optional | pass `-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache` to speed rebuilds |
 
 SDL2 and SDL2_image are **vendored as git submodules** and built statically as
-part of the project — no system SDL dev packages are required. On the target
-Linux machine, the SDL video backend needs a display stack (X11 or Wayland);
-for headless runs set `SDL_VIDEODRIVER=dummy`.
+part of the project — no system SDL dev packages are required. The bundled SDL
+in this cross build enables the `dummy` and `offscreen` video drivers (the
+cross sysroot has no X11/Wayland development headers), so headless operation is
+available out of the box: set `SDL_VIDEODRIVER=dummy`, or use the app's own
+`--headless` / `CASIOEMU_HEADLESS=1` and `--shot-startup` / `CASIOEMU_SHOT_SHELL`
+hooks (these set the dummy driver automatically and write PPM screenshots).
+To get interactive X11/Wayland windows, rebuild SDL against a sysroot that
+provides the corresponding development headers.
 
 The build does **not** require Sentry, the Wiz toolchain to be disabled, or
 the MCP plugin (Windows-only). Options used below disable Sentry, the plugin
@@ -72,7 +77,11 @@ CASIOEMU_PLATFORM_ARCH="x64"
 `CasioEmuMsvc/src/Plugin/PlatformTags.h` is the source of truth for selecting
 native binaries from a `.plugin` ZIP. On a Linux x86-64 build it also derives
 `linux`/`x64` from the compiler predefines (`__linux__`, `__x86_64__`), so the
-selection is correct even if the compile definitions are omitted. A file is
+selection is correct even if the compile definitions are omitted. The build
+may emit a harmless GCC warning `missing terminating " character` for the
+over-escaped `CASIOEMU_PLATFORM_OS/ARCH` definitions; the header deliberately
+`#undef`s and re-derives them precisely because of this (see its comment).
+A file is
 considered a native library when its name matches `<name>-<os>-<arch>.<ext>`
 with `ext` in `.dylib`, `.so`, `.dll`, `.plugin`. Recognised tags:
 `macos|linux|windows|android|any` and `x64|x32|arm64|arm64-android|any`.
