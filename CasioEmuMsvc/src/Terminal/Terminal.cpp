@@ -10,6 +10,9 @@
 #include <cerrno>
 #include <cmath>
 #include <cstring>
+#ifndef _WIN32
+// The shell terminal is backed by a POSIX PTY (forkpty).  Windows has no
+// equivalent in the CRT; Start() reports this honestly instead of faking one.
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/ioctl.h>
@@ -20,6 +23,7 @@
 #include <util.h>
 #else
 #include <pty.h>
+#endif
 #endif
 
 namespace casioemu::terminal {
@@ -54,6 +58,10 @@ bool Terminal::Start(const std::string& workingDirectory) {
 	m_lastError.clear();
 	m_cwd = workingDirectory.empty() ? std::filesystem::current_path().string() : workingDirectory;
 
+#ifdef _WIN32
+	m_lastError = "Shell terminal requires a POSIX PTY (not available on Windows)";
+	return false;
+#else
 	const char* shell_env = std::getenv("SHELL");
 	std::string shell = (shell_env && *shell_env) ? shell_env : kDefaultShell;
 	const std::string shell_base = std::filesystem::path(shell).filename().string();
@@ -114,9 +122,11 @@ bool Terminal::Start(const std::string& workingDirectory) {
 	const char* banner = "\x1b[38;5;244mCasioEmuMsvc terminal - shell in the workspace. Ctrl+C interrupts, Ctrl+D exits.\x1b[0m\r\n";
 	ParseInput(banner, std::strlen(banner));
 	return true;
+#endif
 }
 
 void Terminal::Stop() {
+#ifndef _WIN32
 	if (m_master >= 0) {
 		// SIGHUP, then escalate after a short grace period.  We cannot block the
 		// UI thread, so the escalation happens on the next destructor only.
@@ -132,6 +142,7 @@ void Terminal::Stop() {
 			kill(static_cast<pid_t>(m_pid), SIGKILL);
 		m_pid = 0;
 	}
+#endif
 }
 
 void Terminal::ResizeGrid(int columns, int rows) {
@@ -149,12 +160,14 @@ void Terminal::ResizeGrid(int columns, int rows) {
 	m_lastColumns = m_columns;
 	m_lastRows = m_rows;
 
+#ifndef _WIN32
 	if (m_master >= 0) {
 		struct winsize size {};
 		size.ws_col = static_cast<unsigned short>(m_columns);
 		size.ws_row = static_cast<unsigned short>(m_rows);
 		ioctl(m_master, TIOCSWINSZ, &size);
 	}
+#endif
 }
 
 void Terminal::ClearCell(Cell& cell) {
@@ -239,6 +252,10 @@ void Terminal::EnterAlternateScreen(bool enter) {
 }
 
 void Terminal::PumpOutput() {
+#ifdef _WIN32
+	if (m_master < 0)
+		return;
+#else
 	if (m_master < 0)
 		return;
 	char buffer[8192];
@@ -254,6 +271,7 @@ void Terminal::PumpOutput() {
 		}
 		break;
 	}
+#endif
 }
 
 void Terminal::ParseInput(const char* data, size_t length) {
@@ -513,6 +531,10 @@ void Terminal::HandleControlSequence(char finalByte) {
 }
 
 void Terminal::Send(const char* data, size_t length) {
+#ifdef _WIN32
+	if (m_master < 0 || length == 0)
+		return;
+#else
 	if (m_master < 0 || length == 0)
 		return;
 	size_t offset = 0;
@@ -526,6 +548,7 @@ void Terminal::Send(const char* data, size_t length) {
 			continue;
 		break;
 	}
+#endif
 }
 
 void Terminal::SendString(const std::string& text) {
