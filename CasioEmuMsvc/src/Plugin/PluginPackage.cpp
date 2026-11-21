@@ -208,11 +208,15 @@ bool ExtractPackage(const std::filesystem::path& file, const std::filesystem::pa
 			// ZIP stores no portable hard-link marker; hard links appear as
 			// special (non-regular, non-directory) Unix modes.  Symlinks and
 			// device/FIFO/socket entries are all refused.
+#ifndef _WIN32
+			// MinGW's <sys/stat.h> has no S_ISLNK; Windows has no symlink ZIP
+			// entries in practice (miniz writes regular files only).
 			if (S_ISLNK(mode)) {
 				SetError(out, "package.path", "symlink entries are not allowed: " + name);
 				ok = false;
 				break;
 			}
+#endif
 			if (!S_ISREG(mode) && !S_ISDIR(mode)) {
 				SetError(out, "package.path", "hard-link or special file entries are not allowed: " + name);
 				ok = false;
@@ -271,7 +275,12 @@ bool ExtractPackage(const std::filesystem::path& file, const std::filesystem::pa
 		// Defence in depth: nothing the archive can express should create a
 		// link, but verify the extracted inode is a regular single-link file.
 		struct stat extracted {};
-		if (::lstat(destination.string().c_str(), &extracted) == 0) {
+#ifdef _WIN32
+		const int stat_result = ::stat(destination.string().c_str(), &extracted);
+#else
+		const int stat_result = ::lstat(destination.string().c_str(), &extracted);
+#endif
+		if (stat_result == 0) {
 			if (!S_ISREG(extracted.st_mode)) {
 				SetError(out, "package.path", "extracted entry is not a regular file: " + name);
 				ok = false;
