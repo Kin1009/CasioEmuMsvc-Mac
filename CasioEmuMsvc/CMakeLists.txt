@@ -485,6 +485,14 @@ add_custom_target(build_stamp ALL
 target_sources(${TARGET_NAME} PRIVATE "${BUILD_STAMP_CPP}")
 add_dependencies(${TARGET_NAME} build_stamp)
 
+# iOS bundles have no Contents/Resources directory: resources live at the
+# bundle root.  macOS keeps its classic layout.
+if(CASIOEMU_IPADOS)
+    set(BUNDLE_RES_DIR "$<TARGET_FILE_DIR:${TARGET_NAME}>")
+else()
+    set(BUNDLE_RES_DIR "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources")
+endif()
+
 # ------------------------------------------------------------------ Theme presets
 # Colour themes are data.  They are copied next to the executable (or into the
 # bundle's Resources) so built-in presets and theme plugins share one loader.
@@ -495,10 +503,10 @@ if(EXISTS "${THEMES_SOURCE_DIR}")
     if(APPLE AND BUILD_EXECUTABLE)
         add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/themes"
+                "${BUNDLE_RES_DIR}/themes"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${THEMES_SOURCE_DIR}"
-                "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/themes"
+                "${BUNDLE_RES_DIR}/themes"
             COMMENT "Copying theme presets into the bundle")
     elseif(BUILD_EXECUTABLE)
         add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
@@ -726,13 +734,13 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
             if(IS_DIRECTORY "${WIZ_EXAMPLES_DIR}")
                 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E rm -rf
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
+                        "${BUNDLE_RES_DIR}/wiz/examples"
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
                         "${WIZ_TOOLCHAIN_DIR}/data"
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz"
+                        "${BUNDLE_RES_DIR}/wiz"
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
                         "${WIZ_EXAMPLES_DIR}"
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/examples"
+                        "${BUNDLE_RES_DIR}/wiz/examples"
                     COMMENT "Copying the Wiz toolchain data and examples into the bundle")
             endif()
             # ROP builds invoke RAC as a separate GPL-3.0 process. Include the
@@ -745,10 +753,10 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
             if(IS_DIRECTORY "${WIZ_RAC_SOURCE}")
                 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E rm -rf
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/tools/rac-compiler"
+                        "${BUNDLE_RES_DIR}/wiz/tools/rac-compiler"
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
                         "${WIZ_RAC_SOURCE}"
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/wiz/tools/rac-compiler"
+                        "${BUNDLE_RES_DIR}/wiz/tools/rac-compiler"
                     COMMENT "Copying RAC compiler into the Wiz bundle")
             else()
                 message(WARNING "RAC checkout not found; ROP builds will require RAC_COMPILER")
@@ -759,10 +767,10 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
             if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/models")
                 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E rm -rf
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/MacOS/models"
+                        "${BUNDLE_RES_DIR}/models"
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
                         "${CMAKE_SOURCE_DIR}/models"
-                        "$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/MacOS/models"
+                        "${BUNDLE_RES_DIR}/models"
                     COMMENT "Copying the models into the bundle")
             endif()
             set(WIZ_DOCS_SOURCE "/Users/kin/Desktop/Wiz/docs")
@@ -771,7 +779,7 @@ if(CASIOEMU_WIZ_TOOLCHAIN AND NOT CASIOEMU_WEB)
             endif()
             add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND}
-                    -DDEST=$<TARGET_BUNDLE_CONTENT_DIR:${TARGET_NAME}>/Resources/docs
+                    -DDEST=${BUNDLE_RES_DIR}/docs
                     -DEMU_DOCS=${CMAKE_SOURCE_DIR}/docs
                     -DEMU_ROOT=${CMAKE_SOURCE_DIR}
                     -DWIZ_DOCS=${WIZ_DOCS_SOURCE}
