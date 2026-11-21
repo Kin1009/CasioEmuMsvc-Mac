@@ -387,6 +387,12 @@ build-parent-check/
 /CasioEmuMsvc/temp/
 
 app/src/main/assets/
+# Android port: track the directory itself (README + packaging notes), but not
+# the generated/ROM assets copied there by the native build.
+!app/src/main/assets/
+app/src/main/assets/locales/
+app/src/main/assets/roms.db
+app/src/main/assets/plugins/*.plugin
 
 # ---------------------------------------------------------------------------
 # Local additions for this macOS-only, self-contained working copy.
@@ -401,6 +407,9 @@ app/src/main/assets/
 # ---------------------------------------------------------------------------
 /SDL/
 /SDL_image/
+# Symlinked third-party checkouts are also supported (Android/other ports).
+/SDL
+/SDL_image
 /sentry-native/
 /discord-rpc/
 /CasioEmuMsvc/third_party/asmjit/
@@ -421,6 +430,12 @@ app/src/main/assets/
 /docs/plan.md
 
 # local build dirs and model data
+/build-android/
+/plugins/cg100-sh4/build-android-*/
+# Gradle-extracted emulator assets and generated plugin containers
+/app/src/main/assets/locales/
+/app/src/main/assets/roms.db
+/app/src/main/assets/plugins/*.plugin
 /build-cli/
 /build-plugin/
 /models

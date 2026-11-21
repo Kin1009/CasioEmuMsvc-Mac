@@ -1,0 +1,93 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Android port of CasioEmuMsvc. The native part is built by CMake through
+// Android Gradle Plugin's externalNativeBuild; the same sources can also be
+// built standalone with cmake/toolchain-android.cmake (see docs/ANDROID_PORT.md).
+
+def generatedLocaleAssetsRoot = layout.buildDirectory.dir('generated/assets/copyLocaleAssets')
+def copyLocaleAssetsTask = tasks.register('copyLocaleAssets', Sync) {
+    from(rootProject.file('CasioEmuMsvc/locales')) {
+        include '*.lc'
+        into 'locales'
+    }
+    into(generatedLocaleAssetsRoot)
+}
+
+android {
+    namespace 'com.tele.u8emulator'
+    compileSdkVersion 35
+    buildToolsVersion '35.0.0'
+
+    defaultConfig {
+        applicationId 'com.tele.u8emulator'
+        minSdkVersion 24
+        targetSdkVersion 35
+        // Match the NDK r27c toolchain used by the CMake CLI build.  AGP
+        // otherwise expects its default 26.1.10909125.
+        ndkVersion '27.2.12479018'
+        versionCode 1
+        versionName '1.0.0'
+
+        externalNativeBuild {
+            cmake {
+                // AGP supplies its own CMake toolchain / ANDROID_ABI.
+                arguments '-DANDROID_CPP_FEATURES=rtti;exceptions',
+                          '-DCASIOEMU_ENABLE_SENTRY=OFF',
+                          '-DCASIOEMU_PLUGIN_TESTS=OFF',
+                          '-DCASIOEMU_BUILD_SETTINGS_TESTS=OFF',
+                          '-DCASIOEMU_WIZ_TOOLCHAIN=ON',
+                          '-DBUILD_MCP_PLUGIN=OFF'
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../CMakeLists.txt'
+            version '4.1.2'
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            // Unsigned by default; pass -PcasioStoreFile/-PcasioStorePassword
+            // etc. for a signed release build.
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets.main {
+        assets.srcDirs = ['src/main/assets', generatedLocaleAssetsRoot]
+        jniLibs.srcDirs = ['src/main/jniLibs']
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "CasioEmuMsvc-${variant.name}-arm64-v8a.apk"
+        }
+        variant.mergeAssetsProvider.configure {
+            dependsOn("externalNativeBuild${variant.name.capitalize()}")
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    // Used by PermissionManager (SDL Java bridge itself needs no libraries).
+    implementation 'androidx.core:core:1.5.0'
+}

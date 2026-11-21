@@ -2,7 +2,12 @@
 
 #include "miniz.h"
 
+#if defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
+#else
+// Android/Linux/Windows use the project's header-only SHA-256 implementation.
+#include "Crypto.hpp"
+#endif
 
 #include <array>
 #include <cctype>
@@ -41,22 +46,36 @@ bool ComputeFileSha256(const std::filesystem::path& file, std::string& digest, s
 		return false;
 	}
 
+#if defined(__APPLE__)
 	CC_SHA256_CTX context;
 	CC_SHA256_Init(&context);
+#else
+	crypto::SHA256 context;
+#endif
 	std::array<char, 64 * 1024> buffer{};
 	while (input.good()) {
 		input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 		const std::streamsize read = input.gcount();
-		if (read > 0)
+		if (read > 0) {
+#if defined(__APPLE__)
 			CC_SHA256_Update(&context, buffer.data(), static_cast<CC_LONG>(read));
+#else
+			context.update(reinterpret_cast<const std::uint8_t*>(buffer.data()),
+				static_cast<std::size_t>(read));
+#endif
+		}
 	}
 	if (input.bad()) {
 		error = "failed while reading package";
 		return false;
 	}
 
-	unsigned char hash[CC_SHA256_DIGEST_LENGTH]{};
+	unsigned char hash[32]{};
+#if defined(__APPLE__)
 	CC_SHA256_Final(hash, &context);
+#else
+	context.final(hash);
+#endif
 	digest = HexEncode(hash, sizeof(hash));
 	return true;
 }

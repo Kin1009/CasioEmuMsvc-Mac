@@ -64,8 +64,10 @@ inline void MarkArchitectureModuleLoaded(const std::filesystem::path& path) {
 		ArchitectureLoadedModules().push_back(key);
 }
 
-#if defined(__APPLE__) || defined(__linux__)
-/// Resolve a .plugin package to a loadable native Mach-O module.
+#if defined(__APPLE__) || defined(__linux__) || defined(__ANDROID__)
+/// Resolve a .plugin package to a loadable native module.  On Android an
+/// embedded AArch64 library is selected by its "-android-arm64-android.so"
+/// tag, with "-any" and untagged binaries as fallbacks.
 ///  - plain Mach-O .plugin -> returns `pluginFile` unchanged (backward compat)
 ///  - ZIP .plugin          -> extracts into `cacheDir` via the hardened
 ///                            ExtractPackage() and returns the embedded native

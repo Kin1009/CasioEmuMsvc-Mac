@@ -2,6 +2,16 @@ cmake_minimum_required(VERSION 3.10...3.22)
 
 project(GAME)
 
+# ---------------------------------------------------------------------------
+# Target platform tags (consumed by CasioEmuMsvc/src/Plugin/PlatformTags.h).
+# Detection follows CMAKE_SYSTEM_NAME so cross builds get the target tags.
+# Individual targets apply the definitions via casioemu_apply_platform_tags().
+# ---------------------------------------------------------------------------
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(CasioPlatform)
+casioemu_detect_platform(CASIOEMU_PLATFORM_OS CASIOEMU_PLATFORM_ARCH)
+message(STATUS "CasioEmuMsvc target platform: ${CASIOEMU_PLATFORM_OS}/${CASIOEMU_PLATFORM_ARCH}")
+
 enable_testing()
 
 set(SDL_TEST OFF CACHE BOOL "Disable building the SDL_test library" FORCE)

@@ -305,8 +305,11 @@ ManifestResult ParseManifest(const std::string& jsonText) {
 		}
 	}
 	for (const auto& platform : manifest.platforms) {
-		if (platform != "macos")
-			return Fail("manifest.platform", "only the 'macos' platform is supported");
+		// The Android port ships packages with "android" (and optionally the
+		// platform-tag-qualified "android-arm64-android") in this field.
+		if (platform != "macos" && platform != "linux" && platform != "windows" &&
+			platform != "android" && platform != "android-arm64-android" && platform != "any")
+			return Fail("manifest.platform", "unsupported platform '" + platform + "'");
 	}
 	if (manifest.platforms.empty())
 		manifest.platforms.push_back("macos");
