@@ -239,6 +239,11 @@ set(PROJECT_INCLUDE_DIRS
     ${MINIZ_DIR}
 )
 
+# MinGW-w64 has no <dlfcn.h>; provide a Win32 shim for the plugin loader only.
+if(WIN32)
+    list(APPEND PROJECT_INCLUDE_DIRS ${SOURCE_DIR}/WindowsCompat)
+endif()
+
 # find_library(SDL2 SDL2)
 
 # find_library(SDL2_image SDL2_image)
@@ -754,6 +759,11 @@ if(WIN32)
             "-static-libgcc"
             "-static-libstdc++"
             "-static"
+            # Statically linked SDL is not reachable through GetProcAddress()
+            # unless the .exe exports its symbols.  Native plugins (e.g. the
+            # CG100 SH4 DLL) resolve the SDL render entry points from the host
+            # process, so publish them in the PE export table.
+            "-Wl,--export-all-symbols"
         )
     endif()
     target_compile_definitions(${TARGET_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)

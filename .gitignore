@@ -429,3 +429,7 @@ app/src/main/assets/
 /build-ui1/
 /build-ui2/
 /build-ui3/
+
+# Windows port local build dirs
+/build-windows/
+/tools/cg100-win/build/

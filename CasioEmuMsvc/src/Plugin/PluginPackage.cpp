@@ -2,7 +2,12 @@
 
 #include "miniz.h"
 
-#include <CommonCrypto/CommonDigest.h>
+#if defined(_WIN32)
+# include <windows.h>
+# include <wincrypt.h>
+#else
+# include <CommonCrypto/CommonDigest.h>
+#endif
 
 #include <array>
 #include <cctype>
@@ -41,9 +46,54 @@ bool ComputeFileSha256(const std::filesystem::path& file, std::string& digest, s
 		return false;
 	}
 
+	std::array<char, 64 * 1024> buffer{};
+#if defined(_WIN32)
+	// Windows CryptoAPI SHA-256 (available on Vista and later).  MinGW has no
+	// CommonCrypto, and OpenSSL is not part of the toolchain.
+	HCRYPTPROV provider = 0;
+	if (!CryptAcquireContextA(&provider, nullptr, nullptr, PROV_RSA_AES,
+			CRYPT_VERIFYCONTEXT)) {
+		error = "cannot acquire Windows crypto provider";
+		return false;
+	}
+	HCRYPTHASH context = 0;
+	if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &context)) {
+		CryptReleaseContext(provider, 0);
+		error = "cannot create Windows SHA-256 hash";
+		return false;
+	}
+	while (input.good()) {
+		input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+		const std::streamsize read = input.gcount();
+		if (read > 0 && !CryptHashData(context,
+				reinterpret_cast<const BYTE*>(buffer.data()),
+				static_cast<DWORD>(read), 0)) {
+			CryptDestroyHash(context);
+			CryptReleaseContext(provider, 0);
+			error = "failed while hashing package";
+			return false;
+		}
+	}
+	if (input.bad()) {
+		CryptDestroyHash(context);
+		CryptReleaseContext(provider, 0);
+		error = "failed while reading package";
+		return false;
+	}
+	unsigned char hash[32]{};
+	DWORD hashLength = sizeof(hash);
+	const bool ok = CryptGetHashParam(context, HP_HASHVAL, hash, &hashLength, 0) != FALSE;
+	CryptDestroyHash(context);
+	CryptReleaseContext(provider, 0);
+	if (!ok || hashLength != sizeof(hash)) {
+		error = "failed while finalizing package hash";
+		return false;
+	}
+	digest = HexEncode(hash, sizeof(hash));
+	return true;
+#else
 	CC_SHA256_CTX context;
 	CC_SHA256_Init(&context);
-	std::array<char, 64 * 1024> buffer{};
 	while (input.good()) {
 		input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 		const std::streamsize read = input.gcount();
@@ -59,6 +109,7 @@ bool ComputeFileSha256(const std::filesystem::path& file, std::string& digest, s
 	CC_SHA256_Final(hash, &context);
 	digest = HexEncode(hash, sizeof(hash));
 	return true;
+#endif
 }
 
 bool ExtractPackage(const std::filesystem::path& file, const std::filesystem::path& cacheRoot, Package& out,

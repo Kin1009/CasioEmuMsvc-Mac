@@ -786,9 +786,10 @@ namespace casioemu {
 	void Emulator::SetArchitectureCore(IEmulatorCore* core) {
 		arch_core.store(core);
 		last_arch_tick_ms = SDL_GetTicks();
-#if defined(__APPLE__) || defined(__linux__)
-		// The plugin is dlopen()ed with RTLD_GLOBAL, so its plain-C exports are
-		// visible through RTLD_DEFAULT. Prefer the direct framebuffer/key-matrix
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+		// The plugin is dlopen()ed with RTLD_GLOBAL (on Windows: loaded through
+		// the Win32 dlfcn shim, which keeps a registry of global modules), so
+		// its plain-C exports are visible through RTLD_DEFAULT. Prefer the direct framebuffer/key-matrix
 		// accessors over RenderFrame(): the latter resolves SDL via dlsym() inside
 		// the plugin, which is not reliable when SDL is statically linked into
 		// the host executable.

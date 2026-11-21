@@ -28,11 +28,9 @@
 #include <cstdio>
 #include <string>
 
-#if defined(_WIN32)
-# include <windows.h>
-#else
+// On Windows this is our Win32 shim (LoadLibrary/GetProcAddress + a registry
+// of RTLD_GLOBAL plugin modules); on POSIX it is the system header.
 # include <dlfcn.h>
-#endif
 
 namespace casioemu {
 namespace cg100info {
@@ -47,11 +45,10 @@ inline IEmulatorCore* Core() {
 }
 
 inline void* Resolve(const char* name) {
-#if defined(_WIN32)
-	return reinterpret_cast<void*>(GetProcAddress(GetModuleHandle(nullptr), name));
-#else
+	// The dlfcn shim's RTLD_DEFAULT search also covers every plugin module
+	// loaded with RTLD_GLOBAL, so the plugin's cg100_* exports are found on
+	// Windows just as they are on macOS/Linux.
 	return dlsym(RTLD_DEFAULT, name);
-#endif
 }
 
 template <typename Fn>
