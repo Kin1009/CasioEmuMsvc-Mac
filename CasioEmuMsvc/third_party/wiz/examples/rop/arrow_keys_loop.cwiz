@@ -1,0 +1,37 @@
+#rop
+#for 580
+#org 0xE9E0
+#launcher common
+#pad 4
+
+int k;
+
+void start() {
+read_input:
+    setlr_pc();
+    setsfr();
+    k = getscankey();
+    keytable(0x0480, up, 0x0840, down, 0x0440, left, 0x0880, right,
+             0x1004, exit, 0x0000, restore);
+
+up:
+    print(0x01, 0x01, "UP");
+    render();
+    goto restore;
+down:
+    print(0x01, 0x01, "DOWN");
+    render();
+    goto restore;
+left:
+    print(0x01, 0x01, "LEFT");
+    render();
+    goto restore;
+right:
+    print(0x01, 0x01, "RIGHT");
+    render();
+    goto restore;
+exit:
+    brk();
+restore:
+    restore();
+}

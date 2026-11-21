@@ -1,0 +1,100 @@
+// Full CWiz port of rsc_ropchain/arrow_keys.rsc.
+// Core ROP instructions are native CWiz inline statements; only RAC literals
+// requiring exact bracket/string spelling remain quoted data/operations.
+#rop
+#for 580
+#org 0xe9e0
+#launcher common medium 0xe9e0 0xd730
+#nopad
+
+void main() {
+    asm {
+        lbl start;
+        setlr_pc;
+        setsfr;
+        lbl read_input;
+        er0 = adr(key);
+        getscancode;
+        setlr_pc;
+        ea = adr(table);
+        pop er0;
+        lbl key;
+        hex 00 00;
+        call 09C20;
+        call 1C64A;
+        sp = er6, pop er8;
+        lbl handle_up;
+        xr0 = hex 01 01, adr(text_up);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_down;
+        xr0 = hex 01 01, adr(text_down);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_left;
+        xr0 = hex 01 01, adr(text_left);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_right;
+        xr0 = hex 01 01, adr(text_right);
+        line_print;
+        render.ddd4;
+        er14 = eval(adr(restore) - 0x2);
+        sp = er14, pop er14;
+        lbl handle_exit;
+        brk;
+        lbl restore;
+        di, rt;
+        xr0 = 0xd730, 0xe9e0;
+        call 09451;
+        hex fe 01;
+        er14 = eval(adr(read_input) - 0x2);
+        sp = er14, pop er14;
+        lbl text_up;
+        "\"UP\"";
+        hex 00 00;
+        lbl text_down;
+        "\"DOWN\"";
+        hex 00 00;
+        lbl text_left;
+        "\"LEFT\"";
+        hex 00 00;
+        lbl text_right;
+        "\"RIGHT\"";
+        hex 00;
+        lbl table;
+        key_up;
+        eval(adr(handle_up) - 0x2);
+        key_down;
+        eval(adr(handle_down) - 0x2);
+        key_left;
+        eval(adr(handle_left) - 0x2);
+        key_right;
+        eval(adr(handle_right) - 0x2);
+        key_ac;
+        eval(adr(handle_exit) - 0x2);
+        hex 00 00;
+        eval(adr(restore) - 0x2);
+        lbl end;
+        hex 00 00 00 00;
+    }
+}
+
+void launcher() {
+    asm {
+        hex fd 24 30 30;
+        setlr;
+        setsfr;
+        xr0 = 0xd730, 0xe9e0;
+        call 09451;
+        hex fe 01;
+        er14 = 0xd72e;
+        sp = er14, pop er14;
+    }
+}

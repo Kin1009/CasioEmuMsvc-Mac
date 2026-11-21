@@ -24,6 +24,11 @@ enum class Capability {
 	Theme,
 	Clipboard,
 	Native,
+	// ADDITIVE: marks a plugin as an architecture/emulation provider.  It does
+	// NOT replace or absorb ui.shell / emulator.* / any other capability; the
+	// package still supplies the UI (Reboot / diag buttons), the plugin only
+	// supplies the emulated architecture core.
+	Arch,
 };
 
 [[nodiscard]] const char* CapabilityName(Capability capability);

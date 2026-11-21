@@ -7,6 +7,8 @@
 
 #include "Ext/RomPackage.h"
 #include "ModelConfig.h"
+#include "Gui/Shell/Shell.h"
+#include "Plugin/PluginRegistry.h"
 
 #include <algorithm>
 #include <cctype>
@@ -28,7 +30,99 @@ struct ModelImportResult {
 	std::string modelName;
 	std::string targetPath;
 	std::vector<std::string> files;
+	// Optional package "requires plugin" declaration (see
+	// ReadRequiredPlugins below).  Empty for every legacy package.
+	std::vector<std::string> requiredPlugins;
+	std::vector<std::string> missingPlugins;
+	// Non-empty when a required plugin is absent: suitable for the Output
+	// panel and for the import dialog.  Does not make `ok` false: the package
+	// still imports so the user can install the plugin afterwards.
+	std::string status;
 };
+
+// Model packages declare plugin requirements in the model's existing,
+// already-serialised extension map (config.bin / config.json "extra"):
+//
+//   "extra": { "requires_plugins": "com.casioemu.arch.cg100sh4" }
+//
+// Several ids may be comma- or whitespace-separated.  Old packages have no
+// such key, so they are never gated.  No binary package format change is
+// needed: RomPackage carries ModelInfo (including `extra`) verbatim.
+inline constexpr const char* kRequiredPluginsKey = "requires_plugins";
+
+inline std::vector<std::string> ParseRequiredPluginIds(const std::string& value) {
+	std::vector<std::string> ids;
+	std::string token;
+	const auto flush = [&] {
+		std::string id;
+		for (char c : token) {
+			if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+				c == '.' || c == '_' || c == '-')
+				id += c;
+			else
+				id += '_'; // defensive: keep IDs inert, no path characters
+		}
+		if (!id.empty() && id.find('.') != std::string::npos &&
+			std::find(ids.begin(), ids.end(), id) == ids.end())
+			ids.push_back(id);
+		token.clear();
+	};
+	for (char c : value) {
+		if (c == ',' || std::isspace(static_cast<unsigned char>(c)))
+			flush();
+		else
+			token += c;
+	}
+	flush();
+	return ids;
+}
+
+inline std::vector<std::string> ReadRequiredPlugins(const ModelInfo& model) {
+	const auto it = model.extra.find(kRequiredPluginsKey);
+	if (it == model.extra.end())
+		return {};
+	return ParseRequiredPluginIds(it->second);
+}
+
+inline bool IsPluginAvailable(const std::string& id) {
+	for (const auto& entry : casioemu::plugin::PluginRegistry::Instance().Entries()) {
+		if (entry.Id() == id && !entry.removed && entry.enabled)
+			return true;
+	}
+	return false;
+}
+
+inline std::vector<std::string> MissingRequiredPlugins(const std::vector<std::string>& required) {
+	std::vector<std::string> missing;
+	for (const auto& id : required) {
+		if (!IsPluginAvailable(id))
+			missing.push_back(id);
+	}
+	return missing;
+}
+
+inline std::string RequiredPluginsMessage(const std::vector<std::string>& missing) {
+	if (missing.empty())
+		return {};
+	std::string message = "model requires plugin ";
+	for (size_t i = 0; i < missing.size(); ++i) {
+		if (i)
+			message += ", ";
+		message += missing[i];
+	}
+	message += " — install it from Settings > Plugins";
+	return message;
+}
+
+// Checks a model's declared plugin requirements and mirrors the result into
+// the Output panel.  Returns the same message (empty when nothing is missing)
+// so callers can show it in a dialog/status field as well.
+inline std::string ReportMissingRequiredPlugins(const ModelInfo& model) {
+	const std::string message = RequiredPluginsMessage(MissingRequiredPlugins(ReadRequiredPlugins(model)));
+	if (!message.empty())
+		casioemu::shell::AppendOutput("[requires] " + message);
+	return message;
+}
 
 inline std::filesystem::path DefaultModelsDirectory() {
 	if (const char* override = std::getenv("CASIOEMU_MODELS_DIR"))
@@ -176,7 +270,17 @@ inline ModelImportResult ImportModelPackage(const std::filesystem::path& package
 	}
 	const std::filesystem::path rom_file = target / registered.rom_path;
 	const std::filesystem::path interface_file = target / registered.interface_path;
-	if (!std::filesystem::is_regular_file(rom_file, ec) || std::filesystem::file_size(rom_file, ec) == 0) {
+	const bool has_rom_payload = std::filesystem::is_regular_file(rom_file, ec) &&
+		std::filesystem::file_size(rom_file, ec) > 0;
+	// Board models such as the fx-CG100 SH4 pack boot from a large flash image
+	// and legitimately ship an empty rom.bin.  Requiring a non-empty ROM used to
+	// reject those packages outright ("missing its ROM payload"), so the GUI
+	// import silently left no model to open.  A non-empty flash payload is a
+	// sufficient code/image source for those models.
+	const bool has_flash_payload = !registered.flash_path.empty() &&
+		std::filesystem::is_regular_file(target / registered.flash_path, ec) &&
+		std::filesystem::file_size(target / registered.flash_path, ec) > 0;
+	if (!has_rom_payload && !has_flash_payload) {
 		std::filesystem::remove_all(target, ec);
 		result.error = "The package is missing its ROM payload (" + registered.rom_path + ").";
 		return result;
@@ -186,6 +290,15 @@ inline ModelImportResult ImportModelPackage(const std::filesystem::path& package
 		result.error = "The package is missing its interface image (" + registered.interface_path + ").";
 		return result;
 	}
+	// Optional "requires plugin" declaration. Legacy packages have no such
+	// key, so this is a no-op for them. A missing plugin is reported in the
+	// Output panel but does not undo the import: the user can still install
+	// the plugin from Settings > Plugins afterwards.
+	result.requiredPlugins = ReadRequiredPlugins(registered);
+	result.missingPlugins = MissingRequiredPlugins(result.requiredPlugins);
+	result.status = RequiredPluginsMessage(result.missingPlugins);
+	if (!result.status.empty())
+		casioemu::shell::AppendOutput("[import] " + result.status);
 	result.ok = true;
 	result.modelName = registered.model_name.empty() ? result.modelName : registered.model_name;
 	result.targetPath = target.string();

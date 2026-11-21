@@ -1,6 +1,7 @@
 ﻿#include "PluginApi.h"
 #include "PluginMan.h"
 #include "PluginPackage.h"
+#include "PlatformTags.h"
 #include "PluginRegistry.h"
 #include <iostream>
 #include <fstream>
@@ -173,11 +174,11 @@ namespace {
 	}
 }
 
-std::filesystem::path ResolvePluginNativeModule(
+std::vector<std::filesystem::path> ResolvePluginNativeModules(
 	const std::filesystem::path& pluginFile,
 	const std::filesystem::path& cacheDir,
 	std::string* error) {
-	const auto fail = [&](const std::string& message) -> std::filesystem::path {
+	const auto fail = [&](const std::string& message) -> std::vector<std::filesystem::path> {
 		g_PluginLoadLog += "[ARCH] " + message + "\n";
 		if (error)
 			*error = message;
@@ -191,25 +192,55 @@ std::filesystem::path ResolvePluginNativeModule(
 	// Legacy/plain format: a bare Mach-O dylib named *.plugin. Load it in place
 	// so the existing CG100SH4.plugin keeps working unchanged.
 	if (!HasZipMagic(pluginFile))
-		return pluginFile;
+		return { pluginFile };
 
-	// ZIP container: metadata (plugin.json) + embedded dylib(s).
+	// ZIP container: metadata (plugin.json) + embedded native binaries.
 	casioemu::plugin::Package package;
 	if (!casioemu::plugin::ExtractPackage(pluginFile, cacheDir, package)) {
 		return fail("cannot extract .plugin container " + pluginFile.filename().string() +
 			": " + package.code + ": " + package.message);
 	}
 
-	const std::filesystem::path native = FindEmbeddedNativeModule(package);
-	if (native.empty())
-		return fail(".plugin container has no native dylib: " + pluginFile.filename().string());
+	const auto selection = casioemu::plugin::SelectPlatformBinariesForRoot(package.root);
+	std::vector<std::filesystem::path> modules;
+	if (selection.status == casioemu::plugin::PlatformBinarySelection::Status::Matched) {
+		// Every binary whose <os>-<arch> matches this build is loaded.
+		modules = selection.matched;
+	}
+	else if (selection.status == casioemu::plugin::PlatformBinarySelection::Status::NoMatch) {
+		std::string available;
+		for (const auto& key : selection.available) {
+			if (!available.empty())
+				available += ", ";
+			available += key;
+		}
+		return fail(casioemu::plugin::NoCompatibleBinaryError() +
+			(available.empty() ? std::string() : std::string(" (available: ") + available + ")") +
+			" in " + pluginFile.filename().string());
+	}
+	else {
+		// Legacy untagged ZIP: honour native_entry, then any embedded dylib.
+		const std::filesystem::path native = FindEmbeddedNativeModule(package);
+		if (native.empty())
+			return fail(".plugin container has no native dylib: " + pluginFile.filename().string());
+		modules.push_back(native);
+	}
 
 	MakeExtractedFilesExecutable(package.root);
 	g_PluginLoadLog += "[ARCH] Extracted " + pluginFile.filename().string() +
-		" -> " + package.root.string() + "\n";
+		" -> " + package.root.string() + " (" + std::to_string(modules.size()) +
+		" native module(s) for " + casioemu::plugin::CurrentPlatformKey() + ")\n";
 	if (error)
 		error->clear();
-	return native;
+	return modules;
+}
+
+std::filesystem::path ResolvePluginNativeModule(
+	const std::filesystem::path& pluginFile,
+	const std::filesystem::path& cacheDir,
+	std::string* error) {
+	const auto modules = ResolvePluginNativeModules(pluginFile, cacheDir, error);
+	return modules.empty() ? std::filesystem::path{} : modules.front();
 }
 #endif
 
@@ -315,26 +346,30 @@ void LoadArchitecturePlugins() {
 	const std::filesystem::path cacheDir = casioemu::plugin::PluginRegistry::Instance().CacheDir();
 	for (auto& path : FindArchPluginModules()) {
 		std::string error;
-		const std::filesystem::path module = ResolvePluginNativeModule(path, cacheDir, &error);
-		if (module.empty()) {
+		const auto modules = ResolvePluginNativeModules(path, cacheDir, &error);
+		if (modules.empty()) {
 			g_PluginLoadLog += "[ARCH] Skipped " + path.filename().string() +
 				(error.empty() ? std::string(" (no native module)") : ": " + error) + "\n";
 			continue;
 		}
-		const std::string p = module.string();
-		void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
-		if (!h) {
-			g_PluginLoadLog += "[ARCH] dlopen failed for " + p + ": " + std::string(dlerror()) + "\n";
-			continue;
-		}
-		MarkArchitectureModuleLoaded(module);
-		auto load = reinterpret_cast<PluginLoadArch>(dlsym(h, "fPluginLoadArch"));
-		if (load) {
-			load(g_pluginapi);
-			g_PluginLoadLog += "[ARCH] Registered via " + p + "\n";
-		}
-		else {
-			g_PluginLoadLog += "[ARCH] No fPluginLoadArch export in " + p + "\n";
+		// Load EVERY binary that matches the current OS+architecture.  A
+		// package may ship several arch plugins for the same platform.
+		for (const auto& module : modules) {
+			const std::string p = module.string();
+			void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
+			if (!h) {
+				g_PluginLoadLog += "[ARCH] dlopen failed for " + p + ": " + std::string(dlerror()) + "\n";
+				continue;
+			}
+			MarkArchitectureModuleLoaded(module);
+			auto load = reinterpret_cast<PluginLoadArch>(dlsym(h, "fPluginLoadArch"));
+			if (load) {
+				load(g_pluginapi);
+				g_PluginLoadLog += "[ARCH] Registered via " + p + "\n";
+			}
+			else {
+				g_PluginLoadLog += "[ARCH] No fPluginLoadArch export in " + p + "\n";
+			}
 		}
 	}
 }

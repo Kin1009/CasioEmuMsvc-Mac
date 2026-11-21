@@ -7,7 +7,11 @@
 #include "Gui/Cg100CoreInfo.hpp"
 #include "Gui/Ui.hpp"
 #include "Gui/ToolUi.hpp"
+// The plugin manager now lives in Settings > Plugins (Gui/Theme.cpp).
+// Declared forward here so File / palette entry points can land on that page.
+void SelectPluginsSettingsPage();
 #include "Plugin/PluginMan.h"
+#include "Plugin/PluginRegistry.h"
 #include "Settings/Settings.h"
 #include "SysDialog.h"
 #include "Terminal/Terminal.h"
@@ -64,6 +68,13 @@ const char* L(const char* key, const char* english) {
 
 void PushMenuStyle(const ThemePalette& palette);
 void PopMenuStyle();
+
+// Single entry point for "Plugin Manager": open Settings and select the
+// Plugins page, which now hosts the full manager.  No standalone tool window.
+static void OpenPluginsPage() {
+	OpenSettings();
+	SelectPluginsSettingsPage();
+}
 
 // The chrome row is 28 px tall: AppKit centres the native traffic lights at
 // y = 14 from the top of a full-size content view.  Every chrome element is
@@ -229,7 +240,6 @@ struct State {
 	int dragTargetTool = -1;
 	bool calculatorVisible = true;
 	float calculatorWidth = 360.0f;
-	std::string pendingTool;
 
 	std::vector<std::unique_ptr<FileDocument>> files;
 	int activeFile = -1;
@@ -1141,7 +1151,7 @@ void ExecuteCommand(const std::string& id) {
 	}
 	else if (id == "model.import") RequestShellImport();
 	else if (id == "folder.open") RequestOpenFolder();
-	else if (id == "plugin.install") OpenSettings();
+	else if (id == "plugin.install") RequestInstallPlugin();
 	else if (id == "view.sidebar") ToggleSidebar();
 	else if (id == "view.panel") ToggleBottomPanel();
 	else if (id == "view.tools") ToggleTools();
@@ -1152,7 +1162,7 @@ void ExecuteCommand(const std::string& id) {
 	else if (id == "build.run") BuildToolchain(true);
 	else if (id == "session.pause") { if (m_emu) m_emu->SetPaused(!m_emu->GetPaused()); }
 	else if (id == "session.reset") { if (m_emu) m_emu->ResetToMainMenu(); }
-	else if (id == "plugin.manager") OpenSettings();
+	else if (id == "plugin.manager") OpenPluginsPage();
 	else if (id == "theme.vscode-dark-plus") ApplyThemeAndSave("vscode-dark-plus");
 	else if (id == "theme.vscode-dark") ApplyThemeAndSave("vscode-dark");
 	else if (id == "theme.midnight-blue") ApplyThemeAndSave("midnight-blue");
@@ -1692,6 +1702,7 @@ void RenderTitleBar(const ThemePalette& palette) {
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem(L("Shell.SettingsMenu", "Settings"))) OpenSettings();
+			if (ImGui::MenuItem(L("Shell.PluginManager", "Plugins in Settings..."))) OpenPluginsPage();
 			ImGui::Separator();
 			if (ImGui::MenuItem(L("Shell.Quit", "Quit"))) g.quitRequested = true;
 			ImGui::EndPopup();
@@ -2912,15 +2923,6 @@ void RenderToolDocuments(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 				g.toolIndex = index;
 		}
 	}
-	if (!g.pendingTool.empty()) {
-		for (int index = 0; index < static_cast<int>(tools.size()); ++index) {
-			if (g.pendingTool == tools[index]->name) {
-				g.toolIndex = index;
-				break;
-			}
-		}
-		g.pendingTool.clear();
-	}
 	g.toolIndex = std::clamp(g.toolIndex, 0, static_cast<int>(tools.size()) - 1);
 
 	// Document tabs wrap onto as many rows as needed.  There is no horizontal
@@ -3066,8 +3068,20 @@ void RenderContent(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		RenderToolDocuments(palette, pos, size);
 }
 
-void RenderOutputTab() {
+void RenderOutputTab(const ThemePalette& palette) {
 	ImGui::BeginChild("##output_body", ImVec2(0, 0), ImGuiChildFlags_None);
+	// Shared copy notice (Output, Problems and Wiz Output all use it).
+	if (!g.panelCopyNotice.empty()) {
+		if (ImGui::GetTime() - g.panelCopyNoticeAt < 4.0) {
+			ImGui::Indent(10.0f);
+			ImGui::TextColored(palette.link, "%s", g.panelCopyNotice.c_str());
+			ImGui::Unindent(10.0f);
+			ImGui::Spacing();
+		}
+		else {
+			g.panelCopyNotice.clear();
+		}
+	}
 	ImGui::Indent(10.0f);
 	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
 	if (g.output.empty()) {
@@ -3299,8 +3313,12 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 		g.panelTab = 0;
 	const bool compact_panel = size.x < 620.0f;
 	const float close_width = compact_panel ? 26.0f : 70.0f;
+	const float copy_button_width = compact_panel ? 26.0f : 70.0f;
 	const float tab_pad = compact_panel ? 16.0f : 26.0f;
-	const float tabs_limit = pos.x + size.x - close_width - 8.0f;
+	// The Output tab reserves room on the right for its Copy button so the
+	// tab labels never overlap it.
+	const float tabs_limit = pos.x + size.x - close_width - 8.0f -
+		(g.panelTab == 0 ? copy_button_width + 4.0f : 0.0f);
 	float x = pos.x + 12.0f;
 	ImGui::PushClipRect(ImVec2(pos.x, pos.y), ImVec2(tabs_limit, pos.y + kPanelHeaderHeight), true);
 	for (int index = 0; index < tab_count; ++index) {
@@ -3338,6 +3356,32 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	}
 	ImGui::PopClipRect();
 
+	// Output panel toolbar: copy every output line to the system clipboard.
+	if (g.panelTab == 0) {
+		ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 12.0f - close_width -
+			copy_button_width - 4.0f, pos.y + 6.0f));
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, palette.hover);
+		ImGui::PushStyleColor(ImGuiCol_Text, palette.foreground);
+		const std::string copy_label = compact_panel ? std::string("C##panel_copy") :
+			std::string(L("Shell.CopyOutput", "Copy")) + "##panel_copy";
+		if (ImGui::Button(copy_label.c_str(), ImVec2(copy_button_width, 22))) {
+			std::string dump;
+			for (const auto& line : g.output) {
+				dump += line.text;
+				dump += '\n';
+			}
+			ImGui::SetClipboardText(dump.c_str());
+			g.panelCopyNotice = "Copied " + std::to_string(g.output.size()) +
+				(g.output.size() == 1 ? " output line" : " output lines") + " to the clipboard";
+			g.panelCopyNoticeAt = ImGui::GetTime();
+			AppendOutput("[output] " + g.panelCopyNotice);
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Copy all output lines to the clipboard.");
+		ImGui::PopStyleColor(3);
+	}
+
 	// right-side close (compact label on narrow editor columns)
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - 12.0f - close_width, pos.y + 6.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
@@ -3354,7 +3398,7 @@ void RenderBottomPanel(const ThemePalette& palette, ImVec2 pos, ImVec2 size) {
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, pos.y + kPanelHeaderHeight + 8.0f));
 	ImGui::BeginChild("##panel_content", ImVec2(size.x - 24.0f, size.y - kPanelHeaderHeight - 20.0f), ImGuiChildFlags_None);
 	if (g.panelTab == 0)
-		RenderOutputTab();
+		RenderOutputTab(palette);
 	else if (g.panelTab == 1)
 		RenderProblemsTab(palette);
 	else if (g.panelTab == 2) {
@@ -3433,6 +3477,7 @@ std::string ToolDisplayName(const UIWindow* win) {
 	struct Mapping { const char* name; const char* key; const char* english; };
 	static const Mapping mappings[] = {
 		{ "Variables", "Tool.Variables", "Variables" },
+		{ "CG100 Controls", "Tool.CG100Controls", "CG100 Controls" },
 		{ "Hardware", "Tool.Hardware", "Hardware" },
 		{ "Labels", "Tool.Labels", "Labels" },
 		{ "Watch", "Tool.Watch", "Watch" },
@@ -3469,10 +3514,7 @@ std::vector<UIWindow*> ToolWindows() {
 			continue;
 		// ROM / RAM / All are real document tabs for a running model; the
 		// Addresses ("Memory") view stays available alongside them.
-		// Plugins are configured in Settings > Plugins; a second Plugin Manager
-		// tab would be a duplicate entry for the same screen.
-		if (std::strcmp(win->name, "Plugin Manager") == 0)
-			continue;
+		// Plugin management is hosted by Settings > Plugins, not a tool tab.
 		tools.push_back(win);
 	}
 	return tools;
@@ -3505,8 +3547,8 @@ const std::vector<PaletteCommand>& Commands() {
 		{ "file.open", "File: Open File...", "" },
 		{ "model.import", "File: Import Model Package...", "" },
 		{ "folder.open", "File: Open Folder...", "" },
-		{ "plugin.install", "Plugins: Open Settings > Plugins", "" },
-		{ "plugin.manager", "Plugins: Open Settings > Plugins", "" },
+		{ "plugin.install", "Plugins: Install Plugin... (file picker)", "" },
+		{ "plugin.manager", "Plugins: Open Plugin Manager (in Settings)", "" },
 		{ "view.sidebar", "View: Toggle Sidebar", "Cmd+Shift+B" },
 		{ "view.panel", "View: Toggle Bottom Panel", "" },
 		{ "view.tools", "View: Toggle Tool Dock", "" },
@@ -4291,7 +4333,22 @@ void RequestOpenFolder() {
 }
 
 void RequestInstallPlugin() {
-	OpenSettings();
+	// Install must work from every screen, including Welcome where there is no
+	// session and no tool dock.  Go straight to the native .plugin file picker
+	// (callback based, like shell package import) instead of the one-shot ImGui
+	// popup that always returned "No file selected".
+	casioemu::plugin::PluginRegistry::Instance().RequestInstall([](bool installed, std::string error) {
+		if (installed) {
+			AppendOutput("[plugins] installed plugin package");
+			g.panelCopyNotice = "Plugin installed successfully";
+		}
+		else {
+			const std::string reason = error.empty() ? std::string("unknown error") : error;
+			AppendOutput("[plugins] install failed: " + reason);
+			g.panelCopyNotice = "Plugin install failed: " + reason;
+		}
+		g.panelCopyNoticeAt = ImGui::GetTime();
+	});
 }
 
 void ToggleSidebar() {
@@ -4527,7 +4584,6 @@ bool WriteLayoutReport(const std::string& path) {
 		"calculator splitter sits on the panel's left edge");
 	bool settings_duplicated = false;
 	bool raw_memory_tabs = false;
-	bool plugin_manager_tab = false;
 	bool rop_label_present = false;
 	bool injection_label_present = false;
 	for (const auto* tool : ToolWindows()) {
@@ -4539,8 +4595,6 @@ bool WriteLayoutReport(const std::string& path) {
 		if (std::strcmp(tool->name, "ROM") == 0 || std::strcmp(tool->name, "RAM") == 0 ||
 			std::strcmp(tool->name, "All") == 0)
 			raw_memory_tabs = true;
-		if (std::strcmp(tool->name, "Plugin Manager") == 0)
-			plugin_manager_tab = true;
 		if (display == "Rop Compiler")
 			rop_label_present = true;
 		if (display == "Injection")
@@ -4550,7 +4604,6 @@ bool WriteLayoutReport(const std::string& path) {
 	const bool cg100_tool_session = casioemu::cg100info::IsActive();
 	check(!settings_duplicated, "Settings is not duplicated in the tool-document strip");
 	check(raw_memory_tabs || cg100_tool_session, "ROM/RAM/All tool tabs are present for a running model");
-	check(!plugin_manager_tab, "no duplicate Plugins entry in the tool strip");
 	check((!injection_label_present && rop_label_present) || cg100_tool_session,
 		"Injection tab is labelled Rop Compiler");
 	output << "panel_tabs=Output,Problems,Terminal\n";

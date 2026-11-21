@@ -321,6 +321,13 @@ void PluginRegistry::AddPackage(const std::filesystem::path& file) {
 		}
 	}
 
+	// Select native binaries for this host's OS+arch.  A tagged package with
+	// no compatible binary is put into an Error state and never loaded.
+	if (!SelectPlatformBinaries(entry)) {
+		m_entries.push_back(std::move(entry));
+		return;
+	}
+
 	entry.state = "Discovered";
 	m_entries.push_back(std::move(entry));
 	ApplyTrustAndLoad(m_entries.back());
@@ -332,7 +339,8 @@ void PluginRegistry::ApplyTrustAndLoad(PluginEntry& entry) {
 
 	const Manifest& manifest = entry.package.manifest;
 	const TrustRecord* record = m_trust.Find(manifest.id);
-	const TrustEvaluation evaluation = EvaluateTrust(record, manifest.IsNative(),
+	const bool has_native = manifest.IsNative() || !entry.compatibleNativeBinaries.empty();
+	const TrustEvaluation evaluation = EvaluateTrust(record, has_native,
 		entry.package.sha256, manifest.permissions);
 
 	entry.trustedAt = record ? record->trustedAt : std::string();
@@ -436,7 +444,51 @@ void PluginRegistry::ApplyDenials(PluginEntry& entry) {
 		entry.state = "Loaded (limited)";
 }
 
+bool PluginRegistry::SelectPlatformBinaries(PluginEntry& entry) {
+	entry.compatibleNativeBinaries.clear();
+	entry.platformMismatch = false;
+	entry.targetPlatform = CurrentPlatformKey();
+	if (!entry.package.valid)
+		return true;
+
+	const auto selection = SelectPlatformBinariesForRoot(entry.package.root);
+	if (selection.status == PlatformBinarySelection::Status::NoTaggedBinaries) {
+		// Legacy package: nativeEntry (or the first embedded dylib) is used.
+		return true;
+	}
+
+	if (selection.status == PlatformBinarySelection::Status::NoMatch) {
+		std::string available;
+		for (const auto& key : selection.available) {
+			if (!available.empty())
+				available += ", ";
+			available += key;
+		}
+		entry.platformMismatch = true;
+		entry.state = "Error";
+		entry.error = NoCompatibleBinaryError() +
+			(available.empty() ? std::string() : std::string(" (available: ") + available + ")");
+		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+		return false;
+	}
+
+	std::error_code ec;
+	for (const auto& path : selection.matched) {
+		const auto relative = std::filesystem::relative(path, entry.package.root, ec);
+		if (ec || relative.empty())
+			entry.compatibleNativeBinaries.push_back(path.filename().string());
+		else
+			entry.compatibleNativeBinaries.push_back(relative.generic_string());
+	}
+	LogLine("[INFO] " + entry.Id() + ": selected " +
+		std::to_string(entry.compatibleNativeBinaries.size()) +
+		" native binary(ies) for " + entry.targetPlatform);
+	return true;
+}
+
 void PluginRegistry::LoadEntry(PluginEntry& entry) {
+	if (entry.platformMismatch)
+		return;
 	if (entry.loaded || !entry.enabled || entry.blocked || entry.removed || !entry.package.valid)
 		return;
 	if (entry.libraryRetained) {
@@ -555,104 +607,154 @@ bool PluginRegistry::LoadNative(PluginEntry& entry) {
 	if (!RequireCapability(entry, Capability::Native, "native library loading"))
 		return false;
 
-	const std::filesystem::path library = entry.package.root / entry.package.manifest.nativeEntry;
-	// The early architecture pass may already have dlopen'd this exact dylib
-	// (and called fPluginLoadArch). Loading it again would call fPluginLoad a
-	// second time, so just mark the entry as loaded.
-	if (::IsArchitectureModuleLoaded(library)) {
-		entry.loaded = true;
-		entry.state = "Loaded (arch core)";
-		entry.error.clear();
-		LogLine("[INFO] " + entry.Id() + ": native module already loaded by the architecture pass");
-		return true;
+	// Build the list of native modules to load.  Platform-tagged packages can
+	// ship several binaries for this host; ALL of them get loaded.  Legacy
+	// packages keep using the single manifest native_entry.
+	std::vector<std::filesystem::path> natives;
+	if (!entry.compatibleNativeBinaries.empty()) {
+		for (const auto& relative : entry.compatibleNativeBinaries)
+			natives.push_back(entry.package.root / relative);
 	}
-	std::error_code ec;
-	if (!std::filesystem::exists(library, ec)) {
+	else if (!entry.package.manifest.nativeEntry.empty()) {
+		natives.push_back(entry.package.root / entry.package.manifest.nativeEntry);
+	}
+	if (natives.empty()) {
 		entry.state = "Error";
-		entry.error = std::string("native.entry: native entry not found: ") + library.string();
+		entry.error = NoCompatibleBinaryError();
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
 
-	void* handle = dlopen(library.string().c_str(), RTLD_NOW | RTLD_LOCAL);
-	if (!handle) {
-		const char* reason = dlerror();
-		entry.state = "Error";
-		entry.error = std::string("native.load: ") + (reason ? reason : "dlopen failed");
-		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-		return false;
-	}
-
-	auto load = reinterpret_cast<PluginLoadFn>(dlsym(handle, "fPluginLoad"));
-	if (!load) {
-		dlclose(handle);
-		entry.state = "Error";
-		entry.error = "native.symbol: missing fPluginLoad";
-		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-		return false;
-	}
-
-	// ABI handshake.  Missing exports are accepted for v1/v2 packages that
-	// predate the check, but a mismatch is always fatal.
 	using ApiVersionFn = int (*)();
 	using AbiSignatureFn = unsigned long (*)();
-	unsigned long plugin_signature = 0;
-	if (auto version_fn = reinterpret_cast<ApiVersionFn>(dlsym(handle, kPluginApiVersionSymbol))) {
-		const int plugin_api = version_fn();
-		if (plugin_api > kHostApiVersion || plugin_api < kHostApiMinVersion) {
-			dlclose(handle);
-			entry.state = "Error";
-			entry.error = "native.api: plugin targets API v" + std::to_string(plugin_api) +
-				"; host supports v" + std::to_string(kHostApiMinVersion) + ".." +
-				std::to_string(kHostApiVersion);
-			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-			return false;
+	int loaded_count = 0;
+	int arch_preloaded = 0;
+	bool had_failure = false;
+
+	for (const auto& library : natives) {
+		// The early architecture pass may already have dlopen'd this exact
+		// binary (and called fPluginLoadArch).  Loading it again would call
+		// fPluginLoad a second time, so skip it here.
+		if (::IsArchitectureModuleLoaded(library)) {
+			++arch_preloaded;
+			LogLine("[INFO] " + entry.Id() + ": " + library.filename().string() +
+				" already loaded by the architecture pass");
+			continue;
 		}
-	}
-	if (auto signature_fn = reinterpret_cast<AbiSignatureFn>(dlsym(handle, kPluginAbiSignatureSymbol))) {
-		plugin_signature = signature_fn();
-		const unsigned long host_signature = HostUiWindowAbiSignature();
-		if (plugin_signature != host_signature) {
-			dlclose(handle);
-			entry.state = "Error";
-			entry.error = "native.api: UIWindow ABI mismatch (plugin " +
-				std::to_string(plugin_signature) + ", host " + std::to_string(host_signature) +
-				"); rebuild the plugin with the SDK headers in this tree";
+
+		std::error_code ec;
+		if (!std::filesystem::exists(library, ec)) {
+			had_failure = true;
+			entry.error = std::string("native.entry: native entry not found: ") + library.string();
 			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-			return false;
+			continue;
 		}
-	}
-	else {
-		LogLine("[WARN] " + entry.Id() + ": no fPluginAbiSignature export; assuming legacy UIWindow layout");
+
+		void* handle = dlopen(library.string().c_str(), RTLD_NOW | RTLD_LOCAL);
+		if (!handle) {
+			had_failure = true;
+			const char* reason = dlerror();
+			entry.error = std::string("native.load: ") + (reason ? reason : "dlopen failed");
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			continue;
+		}
+
+		auto load = reinterpret_cast<PluginLoadFn>(dlsym(handle, "fPluginLoad"));
+		if (!load) {
+			dlclose(handle);
+			had_failure = true;
+			entry.error = "native.symbol: missing fPluginLoad";
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			continue;
+		}
+
+		// ABI handshake.  Missing exports are accepted for v1/v2 packages that
+		// predate the check, but a mismatch is always fatal for that binary.
+		bool abi_ok = true;
+		if (auto version_fn = reinterpret_cast<ApiVersionFn>(dlsym(handle, kPluginApiVersionSymbol))) {
+			const int plugin_api = version_fn();
+			if (plugin_api > kHostApiVersion || plugin_api < kHostApiMinVersion) {
+				entry.error = "native.api: plugin targets API v" + std::to_string(plugin_api) +
+					"; host supports v" + std::to_string(kHostApiMinVersion) + ".." +
+					std::to_string(kHostApiVersion);
+				abi_ok = false;
+			}
+		}
+		if (abi_ok) {
+			if (auto signature_fn = reinterpret_cast<AbiSignatureFn>(dlsym(handle, kPluginAbiSignatureSymbol))) {
+				const unsigned long plugin_signature = signature_fn();
+				const unsigned long host_signature = HostUiWindowAbiSignature();
+				if (plugin_signature != host_signature) {
+					entry.error = "native.api: UIWindow ABI mismatch (plugin " +
+						std::to_string(plugin_signature) + ", host " + std::to_string(host_signature) +
+						"); rebuild the plugin with the SDK headers in this tree";
+					abi_ok = false;
+				}
+			}
+			else {
+				LogLine("[WARN] " + entry.Id() + ": no fPluginAbiSignature export; assuming legacy UIWindow layout");
+			}
+		}
+		if (!abi_ok) {
+			dlclose(handle);
+			had_failure = true;
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			continue;
+		}
+
+		PluginApi* api = Host().CreateApi(entry.Id(), entry.package.manifest);
+		try {
+			load(api);
+		}
+		catch (const std::exception& error) {
+			Host().DestroyApi(api);
+			dlclose(handle);
+			had_failure = true;
+			entry.error = std::string("native.load: fPluginLoad threw: ") + error.what();
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			continue;
+		}
+		catch (...) {
+			Host().DestroyApi(api);
+			dlclose(handle);
+			had_failure = true;
+			entry.error = std::string("native.load: fPluginLoad threw an unknown exception");
+			LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
+			continue;
+		}
+
+		entry.nativeHandles.push_back(handle);
+		entry.nativeApiContexts.push_back(api);
+		++loaded_count;
 	}
 
-	PluginApi* api = Host().CreateApi(entry.Id(), entry.package.manifest);
-	try {
-		load(api);
-	}
-	catch (const std::exception& error) {
-		Host().DestroyApi(api);
-		dlclose(handle);
+	if (loaded_count == 0) {
+		// Success is still valid when every binary was already registered by
+		// the early architecture pass.
+		if (arch_preloaded > 0 && arch_preloaded == static_cast<int>(natives.size())) {
+			entry.loaded = true;
+			entry.state = "Loaded (arch core)";
+			entry.error.clear();
+			LogLine("[INFO] " + entry.Id() + ": native modules already loaded by the architecture pass");
+			return true;
+		}
 		entry.state = "Error";
-		entry.error = std::string("native.load: fPluginLoad threw: ") + error.what();
+		if (entry.error.empty())
+			entry.error = "native.load: no compatible native module could be loaded";
 		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
 		return false;
 	}
-	catch (...) {
-		Host().DestroyApi(api);
-		dlclose(handle);
-		entry.state = "Error";
-		entry.error = "native.load: fPluginLoad threw an unknown exception";
-		LogLine("[ERROR] " + entry.Id() + ": " + entry.error);
-		return false;
-	}
 
-	entry.handle = handle;
-	entry.apiContext = api;
+	entry.handle = entry.nativeHandles.front();
+	entry.apiContext = entry.nativeApiContexts.front();
 	entry.loaded = true;
 	entry.state = "Loaded";
 	entry.error.clear();
-	LogLine("[SUCCESS] Loaded native plugin " + entry.Id());
+	LogLine("[SUCCESS] Loaded native plugin " + entry.Id() + " (" +
+		std::to_string(loaded_count) + " module(s)" +
+		(arch_preloaded ? ", " + std::to_string(arch_preloaded) + " preloaded by arch pass" : "") + ")");
+	if (had_failure)
+		LogLine("[WARN] " + entry.Id() + ": some native modules failed to load");
 	ApplyDenials(entry);
 	return true;
 }
@@ -720,6 +822,8 @@ void PluginRegistry::ClearRuntimeState(PluginEntry& entry) {
 	entry.loaded = false;
 	entry.handle = nullptr;
 	entry.apiContext = nullptr;
+	entry.nativeHandles.clear();
+	entry.nativeApiContexts.clear();
 	entry.limited = false;
 	entry.deniedCapabilities.clear();
 	entry.document.clear();
@@ -752,6 +856,7 @@ bool PluginRegistry::UnloadEntry(PluginEntry& entry, bool remove_windows) {
 	void* handle = entry.handle;
 	PluginApi* api = static_cast<PluginApi*>(entry.apiContext);
 	const bool was_theme = entry.package.valid && entry.package.manifest.type == PluginType::Theme;
+	const bool had_native = handle != nullptr || !entry.nativeHandles.empty();
 
 	// Remove windows before fPluginUnload so a plugin that deletes its own
 	// windows cannot leave dangling pointers in the host render loop.  At
@@ -762,7 +867,22 @@ bool PluginRegistry::UnloadEntry(PluginEntry& entry, bool remove_windows) {
 	else
 		(void)TakePluginWindows(entry.Id());
 
-	if (handle) {
+	// Call fPluginUnload on every module this host loaded itself.  Modules
+	// loaded by the early architecture pass keep their own global handles and
+	// are not in this list.  `handle`/`api` mirror the first module and cover
+	// the legacy single-binary path when the list is empty.
+	if (!entry.nativeHandles.empty()) {
+		for (size_t i = 0; i < entry.nativeHandles.size(); ++i) {
+			PluginApi* module_api = i < entry.nativeApiContexts.size()
+				? static_cast<PluginApi*>(entry.nativeApiContexts[i]) : nullptr;
+			const UnloadCallResult result = CallPluginUnload(entry.nativeHandles[i], module_api);
+			if (result.had_callback && !result.threw)
+				LogLine("[INFO] Called fPluginUnload for " + id);
+			else if (result.threw)
+				LogLine("[ERROR] " + id + ": fPluginUnload threw: " + result.error);
+		}
+	}
+	else if (handle) {
 		const UnloadCallResult result = CallPluginUnload(handle, api);
 		if (result.had_callback && !result.threw)
 			LogLine("[INFO] Called fPluginUnload for " + id);
@@ -771,26 +891,30 @@ bool PluginRegistry::UnloadEntry(PluginEntry& entry, bool remove_windows) {
 	}
 
 	const bool retain_library = handle && PluginHasHookRegistrations(id);
-	if (handle && !retain_library) {
-		dlclose(handle);
-		LogLine("[INFO] Unloaded native library " + id);
-	}
-	else if (retain_library) {
+	if (retain_library) {
+		// Keep the libraries + facades alive: hook callbacks still reference
+		// their guards.
 		entry.libraryRetained = true;
 		LogLine("[WARN] " + id + ": fPluginUnload ran but the library stays mapped "
 			"because the plugin registered emulation hooks that cannot be unregistered");
 	}
-
-	if (api && !retain_library) {
-		Host().DestroyApi(api);
-		entry.apiContext = nullptr;
-	}
-	else if (retain_library) {
-		// Keep the facade alive: hook callbacks still reference its guards.
-		entry.apiContext = api;
+	else {
+		for (void* module_handle : entry.nativeHandles)
+			dlclose(module_handle);
+		if (entry.nativeHandles.empty() && handle)
+			dlclose(handle);
+		for (void* module_api : entry.nativeApiContexts)
+			Host().DestroyApi(static_cast<PluginApi*>(module_api));
+		if (entry.nativeApiContexts.empty() && api)
+			Host().DestroyApi(api);
+		entry.nativeHandles.clear();
+		entry.nativeApiContexts.clear();
+		if (had_native)
+			LogLine("[INFO] Unloaded native library " + id);
 	}
 
 	entry.handle = retain_library ? handle : nullptr;
+	entry.apiContext = retain_library ? api : nullptr;
 	entry.loaded = false;
 	entry.state = retain_library ? "Unloaded (library retained: hooks)" : "Unloaded";
 	entry.error.clear();
@@ -991,6 +1115,21 @@ bool PluginRegistry::InstallFromDialog(std::string* error) {
 	if (!ok && error)
 		LogLine("[ERROR] Install failed: " + *error);
 	return ok;
+}
+
+void PluginRegistry::RequestInstall(std::function<void(bool, std::string)> callback) {
+	// PickPluginFileAsync uses the native (callback-based) file dialog, so the
+	// one-shot ImGui popup path above is never on the install path anymore.
+	Host().PickPluginFileAsync([this, callback](std::string path) {
+		if (path.empty())
+			return; // user cancelled; leave UI status untouched
+		std::string error;
+		const bool ok = Instance().InstallFromFile(path, &error);
+		if (!ok)
+			LogLine("[ERROR] Install failed: " + error);
+		if (callback)
+			callback(ok, error);
+	});
 }
 
 void PluginRegistry::Reload() {

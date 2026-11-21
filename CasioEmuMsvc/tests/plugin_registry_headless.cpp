@@ -89,6 +89,11 @@ public:
 		return !path.empty();
 	}
 
+	void PickPluginFileAsync(std::function<void(std::string)> callback) override {
+		if (!next_pick.empty() && callback)
+			callback(next_pick);
+	}
+
 	bool ApplyPluginTheme(const std::string& document, std::string& error) override {
 		if (!ApplyThemeDocument(document, error))
 			return false;
@@ -198,6 +203,10 @@ public:
 		  registered_(registered) {}
 
 	int GetVersion() override { return PLUGIN_API_VERSION; }
+
+	// Pre-existing harness gap: PluginApi.h declares this pure virtual but the
+	// headless fake never implemented it (the target did not build in HEAD).
+	bool RegisterArchitectureProvider(casioemu::IArchitectureProvider*) override { return false; }
 
 	void AddWindow(UIWindow* window) override {
 		if (!window)
@@ -582,6 +591,28 @@ int main() {
 			"new install prompts for trust");
 		Check(!registry.InstallFromFile(staged, &error) && error.find("already exists") != std::string::npos,
 			"duplicate install is refused with a clear error");
+	}
+
+	// RequestInstall must go through the async/native picker callback (the
+	// synchronous popup chooser always returned "No file selected").
+	{
+		const std::filesystem::path staged = root / "incoming" / "async-install.plugin";
+		MakeZip(staged, { { "plugin.json", ManifestJson("com.test.asyncinstall", "theme", R"(["ui.shell"])") },
+			{ "assets/entry.json", ThemeDocument() } });
+		host.next_pick = staged.string();
+		bool callbackFired = false;
+		bool callbackOk = false;
+		registry.RequestInstall([&](bool ok, std::string) {
+			callbackFired = true;
+			callbackOk = ok;
+		});
+		Check(callbackFired, "RequestInstall fires the callback after the picker chooses a file");
+		Check(callbackOk && Find(registry, "com.test.asyncinstall") != nullptr,
+			"RequestInstall installs the picked .plugin package");
+		host.next_pick.clear();
+		bool cancelledCallbackFired = false;
+		registry.RequestInstall([&](bool, std::string) { cancelledCallbackFired = true; });
+		Check(!cancelledCallbackFired, "RequestInstall does not report an error when the picker is cancelled");
 	}
 
 	// -------------------------------------------------------- shutdown

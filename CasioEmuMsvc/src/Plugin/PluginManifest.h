@@ -1,7 +1,9 @@
 #pragma once
 
 #include "PluginVersion.h"
+#include "PlatformTags.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -33,6 +35,11 @@ struct Manifest {
 	std::string homepage;
 	std::string minHost;
 	std::vector<std::string> platforms{ "macos" };
+	// Optional tags describing which OS / CPU architectures this plugin ships
+	// raw native binaries for.  Absent tags keep the legacy single-binary
+	// behaviour (see nativeEntry).  Schema stays 1: these are additive.
+	std::vector<std::string> osTags;
+	std::vector<std::string> archTags;
 	PluginType type = PluginType::Theme;
 	std::string typeName;
 	std::vector<std::string> permissions;
@@ -43,6 +50,16 @@ struct Manifest {
 
 	[[nodiscard]] bool HasPermission(const std::string& permission) const;
 	[[nodiscard]] bool IsNative() const { return !nativeEntry.empty(); }
+	[[nodiscard]] bool HasOsTag(const std::string& tag) const {
+		return std::find(osTags.begin(), osTags.end(), tag) != osTags.end();
+	}
+	[[nodiscard]] bool HasArchTag(const std::string& tag) const {
+		return std::find(archTags.begin(), archTags.end(), tag) != archTags.end();
+	}
+	// A plugin with platform-tagged binaries does not rely on nativeEntry.
+	[[nodiscard]] bool HasPlatformTaggedBinaries() const {
+		return !osTags.empty() || !archTags.empty();
+	}
 };
 
 struct ManifestResult {

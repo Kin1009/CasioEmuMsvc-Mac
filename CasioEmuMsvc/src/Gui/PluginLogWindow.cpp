@@ -1,3 +1,7 @@
+// LEGACY / no longer instantiated.  The plugin manager now lives entirely in
+// Settings > Plugins (see Gui/Theme.cpp, SettingsWindow::RenderPluginList and
+// friends).  This translation unit is kept compiling so the build's GUI source
+// glob stays stable; nothing creates a "Plugin Manager" tool window any more.
 #include "PluginLogWindow.hpp"
 #include "Plugin/PluginMan.h"
 #include "Plugin/PluginRegistry.h"
@@ -37,11 +41,15 @@ void PluginLogWindow::RenderInstalled() {
 	{
 		ToolUi::PanelScope panel("##plugin_actions");
 		if (ToolUi::AccentButton("Install .plugin...")) {
-			std::string error;
-			if (registry.InstallFromDialog(&error))
-				m_status = "Installed .plugin package.";
-			else
-				m_status = "Install failed: " + (error.empty() ? std::string("no file selected") : error);
+			// Native picker + callback: the old synchronous InstallFromDialog
+			// always reported "no file selected" because its ImGui popup was
+			// never drawn. Status updates when the native dialog returns.
+			registry.RequestInstall([this](bool installed, std::string error) {
+				if (installed)
+					m_status = "Installed .plugin package.";
+				else
+					m_status = "Install failed: " + (error.empty() ? std::string("unknown error") : error);
+			});
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Open Plugins Folder"))

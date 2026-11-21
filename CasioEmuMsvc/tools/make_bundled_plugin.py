@@ -46,7 +46,15 @@ MANIFEST = {
     "min_host": "2.1.0",
     "platforms": ["macos"],
     "type": "tool",
-    "permissions": ["ui.shell"],
+    # ADDITIVE permissions: ui.shell stays because it provides the package UI
+    # (the Reboot / diag buttons, tabs and ImGui context).  `arch` is a NEW,
+    # separate permission marking this plugin as an architecture/emulation
+    # provider; it grants Capability::Arch + Native and lets the permission
+    # facade allow RegisterArchitectureProvider / the architecture registry
+    # QueryInterface.  It does NOT replace ui.shell or any other permission.
+    # We do NOT declare emulator.read/emulator.write: the plugin uses the direct
+    # cg100_* C ABI exports, not the gated PluginApi emulator capabilities.
+    "permissions": ["ui.shell", "arch"],
     "entry_point": "assets/info.json",
     "native_entry": "CG100SH4.plugin",
     "assets": ["assets/info.json"],

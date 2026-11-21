@@ -15,7 +15,9 @@ struct Grant {
 };
 
 // Keep this table in sync with kPermissionNames in PluginManifest.cpp.
-constexpr std::array<Grant, 10> kGrants = { {
+// 'arch' is ADDITIVE: it grants only Arch + Native.  Every pre-existing grant
+// (including ui.shell -> Native) is preserved unchanged.
+constexpr std::array<Grant, 11> kGrants = { {
 	{ "emulator.read", { Capability::EmulatorRead } },
 	{ "emulator.write", { Capability::EmulatorWrite } },
 	{ "emulator.code", { Capability::EmulatorCode, Capability::EmulatorWrite } },
@@ -26,6 +28,7 @@ constexpr std::array<Grant, 10> kGrants = { {
 	{ "process", { Capability::Process, Capability::Native } },
 	{ "ui.shell", { Capability::Shell, Capability::Window, Capability::Theme, Capability::Native } },
 	{ "clipboard", { Capability::Clipboard } },
+	{ "arch", { Capability::Arch, Capability::Native } },
 } };
 
 std::mutex g_denial_mutex;
@@ -48,6 +51,7 @@ const char* CapabilityName(Capability capability) {
 	case Capability::Theme: return "theme";
 	case Capability::Clipboard: return "clipboard";
 	case Capability::Native: return "native";
+	case Capability::Arch: return "arch";
 	}
 	return "unknown";
 }

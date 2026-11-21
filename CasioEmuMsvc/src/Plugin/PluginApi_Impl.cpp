@@ -1043,6 +1043,11 @@ class PluginApi_Impl : public PluginApi {
 			return &keyboard_impl;
 		if (strcmp(name, typeid(IDebugger).name()) == 0)
 			return &debugger_impl;
+		// TRUSTED BOOTSTRAP PATH — intentionally NOT gated by Capability::Arch.
+		// PluginMan::LoadArchitecturePlugins() runs before the Emulator exists
+		// and receives this shared backend (`g_pluginapi`), not a per-plugin
+		// ScopedPluginApi. Gating here would break early architecture loading.
+		// The per-plugin permission facade below applies the `arch` gate.
 		if (strcmp(name, CASIOEMU_ARCH_REGISTRY_NAME) == 0)
 			return GetArchitectureRegistry();
 		if (strcmp(name, typeid(casioemu::IArchitectureRegistry).name()) == 0)
@@ -1070,6 +1075,10 @@ class PluginApi_Impl : public PluginApi {
     });
     return true;
   }
+	// TRUSTED BOOTSTRAP PATH — intentionally NOT gated by Capability::Arch.
+	// The early fPluginLoadArch() pass receives this shared backend directly;
+	// gating here would prevent architecture providers from registering at all.
+	// The per-plugin ScopedPluginApi below is where `arch` is enforced.
 	bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) override {
 		return GetArchitectureRegistry()->RegisterProvider(provider);
 	}
@@ -1637,10 +1646,16 @@ public:
 			RecordPermissionDenial(pluginId_, Capability::EmulatorRead, "QueryInterface<IDebugger>");
 			return nullptr;
 		}
-		if (name && std::strcmp(name, CASIOEMU_ARCH_REGISTRY_NAME) == 0)
-			return backend_->QueryInterface(name);
-		if (matches(typeid(casioemu::IArchitectureRegistry)))
-			return backend_->QueryInterface(name);
+		// Architecture registry: restricted to plugins that declare `arch`.
+		// Additive permission — this does not imply or remove any other
+		// capability; the package still owns the UI / Reboot / diag buttons.
+		if ((name && std::strcmp(name, CASIOEMU_ARCH_REGISTRY_NAME) == 0) ||
+			matches(typeid(casioemu::IArchitectureRegistry))) {
+			if (permissions_.Allows(Capability::Arch))
+				return backend_->QueryInterface(name);
+			RecordPermissionDenial(pluginId_, Capability::Arch, "QueryInterface<IArchitectureRegistry>");
+			return nullptr;
+		}
 		// Chipset-specific peripheral interfaces are opaque to the facade.  They
 		// are reachable only with emulator access.
 		if (permissions_.Allows(Capability::EmulatorRead) ||
@@ -1662,6 +1677,10 @@ public:
 		return backend_->RegisterPlugin(id, name, version, author, desc);
 	}
 	bool RegisterArchitectureProvider(casioemu::IArchitectureProvider* provider) override {
+		// `arch` marks this plugin as an architecture/emulation provider.
+		// Additive: ui.shell and other permissions are unaffected.
+		if (!Allow(Capability::Arch, "PluginApi::RegisterArchitectureProvider"))
+			return false;
 		return backend_->RegisterArchitectureProvider(provider);
 	}
 

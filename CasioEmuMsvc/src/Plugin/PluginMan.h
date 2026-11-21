@@ -75,4 +75,16 @@ std::filesystem::path ResolvePluginNativeModule(
 	const std::filesystem::path& pluginFile,
 	const std::filesystem::path& cacheDir,
 	std::string* error = nullptr);
+
+/// Platform-aware variant.  For a ZIP .plugin containing
+/// <name>-<os>-<arch>.<ext> binaries, returns ALL binaries matching the
+/// current build (CASIOEMU_PLATFORM_OS / CASIOEMU_PLATFORM_ARCH).  A plain
+/// Mach-O .plugin returns itself; a legacy untagged ZIP returns its
+/// native_entry (or first embedded dylib).  Returns an empty vector and fills
+/// `error` with "No native binary for <os>-<arch>" when a tagged package has
+/// no compatible binary.
+std::vector<std::filesystem::path> ResolvePluginNativeModules(
+	const std::filesystem::path& pluginFile,
+	const std::filesystem::path& cacheDir,
+	std::string* error = nullptr);
 #endif
